@@ -7,4 +7,14 @@ plugins:
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: infra-operator
 repo: github.com/openstack-k8s-operators/infra-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  group: rabbitmq
+  kind: TransportURL
+  path: github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1
+  version: v1beta1
 version: "3"
