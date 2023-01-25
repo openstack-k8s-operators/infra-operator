@@ -135,7 +135,7 @@ jobs:
         image: infra-operator-bundle
         tags: ${{ env.latesttag }} ${{ github.sha }}
         containerfiles: |
-          ./custom-bundle.Dockerfile.pinned
+          ./bundle.Dockerfile
 
     - name: Push infra-operator-bundle To ${{ env.imageregistry }}
       uses: redhat-actions/push-to-registry@v2
