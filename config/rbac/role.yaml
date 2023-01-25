@@ -6,6 +6,18 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - client.openstack.org
   resources:
   - openstackclients
@@ -64,6 +76,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - keystone.openstack.org
   resources:
   - keystoneapis
@@ -71,6 +95,32 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - memcacheds
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - memcacheds/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - memcacheds/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - rabbitmq.com
   resources:

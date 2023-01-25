@@ -32,8 +32,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	clientv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/client/v1beta1"
+	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	clientcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/client"
+	memcachedcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
@@ -54,6 +56,7 @@ func init() {
 	utilruntime.Must(rabbitmqclusterv1.AddToScheme(scheme))
 	utilruntime.Must(clientv1beta1.AddToScheme(scheme))
 	utilruntime.Must(keystonev1.AddToScheme(scheme))
+	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -125,6 +128,15 @@ func main() {
 		Log:     ctrl.Log.WithName("controllers").WithName("OpenStackClient"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OpenStackClient")
+		os.Exit(1)
+	}
+	if err = (&memcachedcontrollers.Reconciler{
+		Client:  mgr.GetClient(),
+		Kclient: kclient,
+		Log:     ctrl.Log.WithName("controllers").WithName("Memcached"),
+		Scheme:  mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Memcached")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
