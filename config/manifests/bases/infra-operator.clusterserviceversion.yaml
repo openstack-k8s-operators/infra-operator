@@ -1,0 +1,46 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: infra-operator.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: TransportURL is the Schema for the transporturls API
+      displayName: Transport URL
+      kind: TransportURL
+      name: transporturls.rabbitmq.openstack.org
+      version: v1beta1
+  description: OpenStack Infrastructure
+  displayName: OpenStack Infra
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - OpenStack
+  - Infrastructure
+  links:
+  - name: Infra Operator
+    url: https://infra-operator.domain
+  maturity: alpha
+  provider:
+    name: Red Hat Inc.
+    url: https://redhat.com/
+  version: 0.0.0

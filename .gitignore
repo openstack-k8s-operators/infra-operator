@@ -11,6 +11,9 @@ bin
 testbin/*
 Dockerfile.cross
 
+bundle
+bundle.Dockerfile
+
 # Test binary, build with `go test -c`
 *.test
 
