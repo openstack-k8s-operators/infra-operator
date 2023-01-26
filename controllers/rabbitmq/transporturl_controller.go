@@ -34,8 +34,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-	rabbitmqv1beta1 "github.com/openstack-k8s-operators/openstack-operator/apis/rabbitmq/v1beta1"
-	"github.com/openstack-k8s-operators/openstack-operator/pkg/rabbitmq"
+	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -147,7 +146,7 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1beta1.TransportURL, helper *helper.Helper) (ctrl.Result, error) {
 
 	//TODO (implement a watch on the rabbitmq cluster resources to update things if there are changes)
-	rabbit, err := rabbitmq.GetRabbitmqCluster(ctx, helper, instance)
+	rabbit, err := getRabbitmqCluster(ctx, helper, instance)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -261,3 +260,18 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Complete(r)
 }
+
+//
+// GetRabbitmqCluster - get RabbitmqCluster object in namespace
+func getRabbitmqCluster(
+    ctx context.Context,
+    h *helper.Helper,
+    instance *rabbitmqv1beta1.TransportURL,
+) (*rabbitmqv1.RabbitmqCluster, error) {
+    rabbitMqCluster := &rabbitmqv1.RabbitmqCluster{}
+
+    err := h.GetClient().Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitMqCluster)
+
+    return rabbitMqCluster, err
+}
+
