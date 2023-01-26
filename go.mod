@@ -4,9 +4,11 @@ go 1.19
 
 require (
 	github.com/go-logr/logr v1.2.3
-	github.com/onsi/ginkgo/v2 v2.6.0
-	github.com/onsi/gomega v1.24.1
+	github.com/onsi/ginkgo/v2 v2.6.1
+	github.com/onsi/gomega v1.24.2
+	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-00010101000000-000000000000
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230120104300-c5aa132b34d6
+	github.com/rabbitmq/cluster-operator v1.14.0
 	k8s.io/api v0.26.1
 	k8s.io/apimachinery v0.26.1
 	k8s.io/client-go v0.26.1
@@ -69,3 +71,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.2.3 // indirect
 	sigs.k8s.io/yaml v1.3.0 // indirect
 )
+
+replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
