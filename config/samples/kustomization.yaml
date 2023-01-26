@@ -1,4 +1,5 @@
 ## Append samples you want in your CSV to this file as resources ##
 resources:
 - rabbitmq_v1beta1_transporturl.yaml
+- client_v1beta1_openstackclient.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

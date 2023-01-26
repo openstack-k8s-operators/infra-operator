@@ -6,6 +6,52 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - client.openstack.org
+  resources:
+  - openstackclients
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - client.openstack.org
+  resources:
+  - openstackclients/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - client.openstack.org
+  resources:
+  - openstackclients/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - ""
   resources:
   - secrets
