@@ -24,7 +24,7 @@ import (
 
 const (
 	// ServiceAccount -
-	ServiceAccount = "openstack-operator-openstackclient"
+	ServiceAccount = "infra-operator-openstackclient"
 )
 
 // ClientPod func
