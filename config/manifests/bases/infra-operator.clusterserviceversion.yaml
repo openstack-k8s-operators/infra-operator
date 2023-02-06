@@ -10,6 +10,16 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: Memcached is the Schema for the memcacheds API
+      displayName: Memcached
+      kind: Memcached
+      name: memcacheds.memcached.openstack.org
+      version: v1beta1
+    - description: OpenStackClient is the Schema for the openstackclients API
+      displayName: Open Stack Client
+      kind: OpenStackClient
+      name: openstackclients.client.openstack.org
+      version: v1beta1
     - description: TransportURL is the Schema for the transporturls API
       displayName: Transport URL
       kind: TransportURL
