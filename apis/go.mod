@@ -3,7 +3,7 @@ module github.com/openstack-k8s-operators/infra-operator/apis
 go 1.19
 
 require (
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230120104300-c5aa132b34d6
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230207162833-94c25ed85b4c
 	k8s.io/apimachinery v0.26.1
 	sigs.k8s.io/controller-runtime v0.14.1
 )

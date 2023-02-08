@@ -17,6 +17,8 @@ limitations under the License.
 package memcached
 
 import (
+	"time"
+
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	configmap "github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
@@ -147,7 +149,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
 
 	// Service to expose Memcached pods
-	commonsvc := commonservice.NewService(memcached.HeadlessService(instance), map[string]string{}, 5)
+	commonsvc := commonservice.NewService(memcached.HeadlessService(instance), map[string]string{}, time.Duration(5)*time.Second)
 	sres, serr := commonsvc.CreateOrPatch(ctx, helper)
 	if serr != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -161,7 +163,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
 	// Statefulset for stable names
-	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance), 5)
+	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance), time.Duration(5)*time.Second)
 	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
