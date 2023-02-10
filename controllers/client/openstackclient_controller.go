@@ -124,7 +124,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				condition.SeverityInfo,
 				clientv1beta1.OpenStackClientKeystoneWaitingMessage))
 			r.Log.Info("KeystoneAPI not found!")
-			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+			return ctrl.Result{RequeueAfter: time.Duration(5) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			clientv1beta1.OpenStackClientReadyCondition,
@@ -141,7 +141,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			condition.SeverityInfo,
 			clientv1beta1.OpenStackClientKeystoneWaitingMessage))
 		r.Log.Info("KeystoneAPI not yet ready")
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		return ctrl.Result{RequeueAfter: time.Duration(5) * time.Second}, nil
 	}
 
 	_, configMapHash, err := configmap.GetConfigMapAndHashWithName(ctx, h, instance.Spec.OpenStackConfigMap, instance.Namespace)
@@ -152,7 +152,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				condition.RequestedReason,
 				condition.SeverityInfo,
 				clientv1beta1.OpenStackClientConfigMapWaitingMessage))
-			return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			clientv1beta1.OpenStackClientReadyCondition,
@@ -171,7 +171,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 				condition.RequestedReason,
 				condition.SeverityInfo,
 				clientv1beta1.OpenStackClientSecretWaitingMessage))
-			return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			clientv1beta1.OpenStackClientReadyCondition,

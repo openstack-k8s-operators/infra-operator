@@ -166,12 +166,12 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			condition.RequestedReason,
 			condition.SeverityInfo,
 			rabbitmqv1beta1.TransportURLInProgressMessage))
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
 
 	// TODO(dprince): Future we may want to use vhosts for each OpenStackService instead.
 	// vhosts would likely require use of https://github.com/rabbitmq/messaging-topology-operator/ which we do not yet include
-	username, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, 10, "username")
+	username, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "username")
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
@@ -184,7 +184,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrlResult, nil
 	}
 
-	password, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, 10, "password")
+	password, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "password")
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
@@ -197,7 +197,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrlResult, nil
 	}
 
-	host, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, 10, "host")
+	host, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "host")
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
