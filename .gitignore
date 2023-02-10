@@ -7,7 +7,7 @@ go.work.sum
 *.dll
 *.so
 *.dylib
-bin
+/bin
 testbin/*
 Dockerfile.cross
 
