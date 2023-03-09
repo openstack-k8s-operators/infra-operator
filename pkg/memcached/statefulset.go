@@ -91,7 +91,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: m.Name + "-config-data",
+										Name: m.Name + "-memcached-config-data",
 									},
 									Items: []corev1.KeyToPath{
 										{
@@ -107,7 +107,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: m.Name + "-config-data",
+										Name: m.Name + "-memcached-config-data",
 									},
 									Items: []corev1.KeyToPath{
 										{
