@@ -20,6 +20,16 @@ spec:
       kind: OpenStackClient
       name: openstackclients.client.openstack.org
       version: v1beta1
+    - description: OpenStackIPSet is the Schema for the OpenStackipsets API
+      displayName: OpenStack IPSet`
+      kind: OpenStackIPSet
+      name: openstackipsets.network.openstack.org
+      version: v1beta1
+    - description: OpenStackNet is the Schema for the openstacknets API
+      displayName: OpenStack Network`
+      kind: OpenStackNet
+      name: openstacknets.network.openstack.org
+      version: v1beta1
     - description: TransportURL is the Schema for the transporturls API
       displayName: Transport URL
       kind: TransportURL

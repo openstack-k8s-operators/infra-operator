@@ -1,0 +1,39 @@
+apiVersion: network.openstack.org/v1beta1
+kind: OpenStackNet
+metadata:
+    name: ctlplane
+spec:
+    subnets:
+      - name: ctlplane-subnet
+        cidr: 10.0.0.0/24
+        allocationRange:
+            allocationStart: 10.0.0.4
+            allocationEnd: 10.0.0.250
+        gateway: 10.0.0.254
+    domainName: redhat.com
+---
+apiVersion: network.openstack.org/v1beta1
+kind: OpenStackNet
+metadata:
+    name: internalapi
+spec:
+    subnets:
+      - name: internalapi-subnet
+        cidr: 172.16.2.0/24
+        allocationRange:
+            allocationStart: 172.16.2.4
+            allocationEnd: 172.16.2.250
+    domainName: redhat.com
+---
+apiVersion: network.openstack.org/v1beta1
+kind: OpenStackNet
+metadata:
+    name: storage
+spec:
+    subnets:
+      - name: storage-subnet
+        cidr: 172.16.1.0/24
+        allocationRange:
+            allocationStart: 172.16.1.4
+            allocationEnd: 172.16.1.250
+    domainName: redhat.com
