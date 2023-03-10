@@ -194,7 +194,7 @@ func (r *Reconciler) generateConfigMaps(
 	cms := []util.Template{
 		// ConfigMap
 		{
-			Name:          fmt.Sprintf("%s-config-data", instance.Name),
+			Name:          fmt.Sprintf("%s-memcached-config-data", instance.Name),
 			Namespace:     instance.Namespace,
 			Type:          util.TemplateTypeConfig,
 			InstanceType:  instance.Kind,
