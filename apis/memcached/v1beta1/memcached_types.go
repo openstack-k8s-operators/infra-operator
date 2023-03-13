@@ -26,7 +26,7 @@ type MemcachedSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default="quay.io/tripleozedcentos9/openstack-memcached:current-tripleo"
 	// Name of the memcached container image to run
-	ContainerImage string `json:"containerImage,omitempty"`
+	ContainerImage string `json:"containerImage"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
