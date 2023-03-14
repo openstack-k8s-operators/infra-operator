@@ -122,6 +122,58 @@ rules:
   - patch
   - update
 - apiGroups:
+  - network.openstack.org
+  resources:
+  - openstackipsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - openstackipsets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - openstackipsets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - openstacknets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - openstacknets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - openstacknets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - rabbitmq.com
   resources:
   - rabbitmqclusters

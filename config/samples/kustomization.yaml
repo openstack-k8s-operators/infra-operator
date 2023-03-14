@@ -3,4 +3,6 @@ resources:
 - rabbitmq_v1beta1_transporturl.yaml
 - client_v1beta1_openstackclient.yaml
 - memcached_v1beta1_memcached.yaml
+- network_v1beta1_openstacknet.yaml
+- network_v1beta1_openstackipset.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
