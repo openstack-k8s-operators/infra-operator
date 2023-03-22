@@ -20,6 +20,11 @@ spec:
       kind: OpenStackClient
       name: openstackclients.client.openstack.org
       version: v1beta1
+    - description: Redis is the Schema for the redises API
+      displayName: Redis
+      kind: Redis
+      name: redises.redis.openstack.org
+      version: v1beta1
     - description: TransportURL is the Schema for the transporturls API
       displayName: Transport URL
       kind: TransportURL

@@ -1,0 +1,6 @@
+apiVersion: redis.openstack.org/v1beta1
+kind: Redis
+metadata:
+  name: redis
+spec:
+  replicas: 1
