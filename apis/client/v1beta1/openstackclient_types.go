@@ -24,7 +24,7 @@ import (
 // OpenStackClientSpec defines the desired state of OpenStackClient
 type OpenStackClientSpec struct {
 	// +kubebuilder:validation:Required
-	// ContainerImage for the the OpenstackClient container
+	// ContainerImage for the the OpenstackClient container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 	// +kubebuilder:validation:Required
 	// OpenStackConfigMap is the name of the ConfigMap containing the clouds.yaml

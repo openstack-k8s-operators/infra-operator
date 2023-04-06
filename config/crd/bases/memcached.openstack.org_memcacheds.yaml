@@ -45,14 +45,16 @@ spec:
             description: MemcachedSpec defines the desired state of Memcached
             properties:
               containerImage:
-                default: quay.io/tripleozedcentos9/openstack-memcached:current-tripleo
-                description: Name of the memcached container image to run
+                description: Name of the memcached container image to run (will be
+                  set to environmental default if empty)
                 type: string
               replicas:
                 default: 1
                 description: Size of the memcached cluster
                 format: int32
                 type: integer
+            required:
+            - containerImage
             type: object
           status:
             description: MemcachedStatus defines the observed state of Memcached

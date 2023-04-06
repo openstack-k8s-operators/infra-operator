@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -152,6 +153,33 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Redis")
 		os.Exit(1)
 	}
+
+	// Acquire environmental defaults and initialize OpenStackClient defaults with them
+	openStackClientDefaults := clientv1beta1.OpenStackClientDefaults{
+		ContainerImageURL: os.Getenv("INFRA_CLIENT_IMAGE_URL_DEFAULT"),
+	}
+
+	clientv1beta1.SetupOpenStackClientDefaults(openStackClientDefaults)
+
+	// Acquire environmental defaults and initialize Memcached defaults with them
+	memcachedDefaults := memcachedv1.MemcachedDefaults{
+		ContainerImageURL: os.Getenv("INFRA_MEMCACHED_IMAGE_URL_DEFAULT"),
+	}
+
+	memcachedv1.SetupMemcachedDefaults(memcachedDefaults)
+
+	// Setup webhooks if requested
+	if strings.ToLower(os.Getenv("ENABLE_WEBHOOKS")) != "false" {
+		if err = (&clientv1beta1.OpenStackClient{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "OpenStackClient")
+			os.Exit(1)
+		}
+		if err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
+			os.Exit(1)
+		}
+	}
+
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

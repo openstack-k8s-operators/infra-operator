@@ -117,7 +117,9 @@ build: generate fmt vet ## Build manager binary.
 run: export METRICS_PORT?=8080
 run: export HEALTH_PORT?=8081
 run: export OPERATOR_TEMPLATES=./templates
+run: export ENABLE_WEBHOOKS?=false
 run: manifests generate fmt vet ## Run a controller from your host.
+	/bin/bash hack/clean_local_webhook.sh
 	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)"
 
 # If you wish built the manager image targeting other platforms you can use the --platform flag.
@@ -309,3 +311,22 @@ gowork: ## Generate go.work file to support our multi module repository
 operator-lint: gowork ## Runs operator-lint
 	GOBIN=$(LOCALBIN) go install github.com/gibizer/operator-lint@v0.3.0
 	go vet -vettool=$(LOCALBIN)/operator-lint ./... ./apis/...
+
+# Used for webhook testing
+# Please ensure the infra-controller-manager deployment and
+# webhook definitions are removed from the csv before running
+# this. Also, cleanup the webhook configuration for local testing
+# before deplying with olm again.
+# $oc delete validatingwebhookconfiguration/vopenstackclient.kb.io
+# $oc delete mutatingwebhookconfiguration/mopenstackclient.kb.io
+# $oc delete validatingwebhookconfiguration/vmemcached.kb.io
+# $oc delete mutatingwebhookconfiguration/mmemcached.kb.io
+SKIP_CERT ?=false
+.PHONY: run-with-webhook
+run-with-webhook: export METRICS_PORT?=8080
+run-with-webhook: export HEALTH_PORT?=8081
+run-with-webhook: export INFRA_CLIENT_IMAGE_URL_DEFAULT=quay.io/tripleozedcentos9/openstack-tripleoclient:current-tripleo
+run-with-webhook: export INFRA_MEMCACHED_IMAGE_URL_DEFAULT=quay.io/tripleozedcentos9/openstack-memcached:current-tripleo
+run-with-webhook: manifests generate fmt vet ## Run a controller from your host.
+	/bin/bash hack/configure_local_webhook.sh
+	go run ./main.go

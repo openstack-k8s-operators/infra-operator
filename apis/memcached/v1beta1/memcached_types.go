@@ -23,9 +23,8 @@ import (
 
 // MemcachedSpec defines the desired state of Memcached
 type MemcachedSpec struct {
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default="quay.io/tripleozedcentos9/openstack-memcached:current-tripleo"
-	// Name of the memcached container image to run
+	// +kubebuilder:validation:Required
+	// Name of the memcached container image to run (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
 	// +kubebuilder:validation:Optional

@@ -46,6 +46,7 @@ spec:
             properties:
               containerImage:
                 description: ContainerImage for the the OpenstackClient container
+                  (will be set to environmental default if empty)
                 type: string
               nodeSelector:
                 additionalProperties:
