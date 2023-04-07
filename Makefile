@@ -321,12 +321,15 @@ operator-lint: gowork ## Runs operator-lint
 # $oc delete mutatingwebhookconfiguration/mopenstackclient.kb.io
 # $oc delete validatingwebhookconfiguration/vmemcached.kb.io
 # $oc delete mutatingwebhookconfiguration/mmemcached.kb.io
+# $oc delete validatingwebhookconfiguration/vredis.kb.io
+# $oc delete mutatingwebhookconfiguration/mredis.kb.io
 SKIP_CERT ?=false
 .PHONY: run-with-webhook
 run-with-webhook: export METRICS_PORT?=8080
 run-with-webhook: export HEALTH_PORT?=8081
 run-with-webhook: export INFRA_CLIENT_IMAGE_URL_DEFAULT=quay.io/tripleozedcentos9/openstack-tripleoclient:current-tripleo
 run-with-webhook: export INFRA_MEMCACHED_IMAGE_URL_DEFAULT=quay.io/tripleozedcentos9/openstack-memcached:current-tripleo
+run-with-webhook: export INFRA_REDIS_IMAGE_URL_DEFAULT=registry.redhat.io/rhel9/redis-6:latest
 run-with-webhook: manifests generate fmt vet ## Run a controller from your host.
 	/bin/bash hack/configure_local_webhook.sh
-	go run ./main.go
+	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)"

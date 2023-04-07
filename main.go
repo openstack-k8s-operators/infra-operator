@@ -40,7 +40,7 @@ import (
 	clientv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/client/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	clientcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/client"
 	memcachedcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
@@ -61,7 +61,7 @@ func init() {
 	utilruntime.Must(clientv1beta1.AddToScheme(scheme))
 	utilruntime.Must(keystonev1.AddToScheme(scheme))
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
-	utilruntime.Must(redisv1beta1.AddToScheme(scheme))
+	utilruntime.Must(redisv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -168,6 +168,13 @@ func main() {
 
 	memcachedv1.SetupMemcachedDefaults(memcachedDefaults)
 
+	// Acquire environmental defaults and initialize Redis defaults with them
+	redisDefaults := redisv1.RedisDefaults{
+		ContainerImageURL: os.Getenv("INFRA_REDIS_IMAGE_URL_DEFAULT"),
+	}
+
+	redisv1.SetupRedisDefaults(redisDefaults)
+
 	// Setup webhooks if requested
 	if strings.ToLower(os.Getenv("ENABLE_WEBHOOKS")) != "false" {
 		if err = (&clientv1beta1.OpenStackClient{}).SetupWebhookWithManager(mgr); err != nil {
@@ -176,6 +183,10 @@ func main() {
 		}
 		if err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
+			os.Exit(1)
+		}
+		if err = (&redisv1.Redis{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Redis")
 			os.Exit(1)
 		}
 	}

@@ -36,14 +36,16 @@ spec:
             description: RedisSpec defines the desired state of Redis
             properties:
               containerImage:
-                default: registry.redhat.io/rhel9/redis-6:latest
-                description: Name of the redis container image to run
+                description: Name of the redis container image to run (will be set
+                  to environmental default if empty)
                 type: string
               replicas:
                 default: 1
                 description: Size of the redis cluster
                 format: int32
                 type: integer
+            required:
+            - containerImage
             type: object
           status:
             description: RedisStatus defines the observed state of Redis

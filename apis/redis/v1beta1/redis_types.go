@@ -23,9 +23,8 @@ import (
 
 // RedisSpec defines the desired state of Redis
 type RedisSpec struct {
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default="registry.redhat.io/rhel9/redis-6:latest"
-	// Name of the redis container image to run
+	// +kubebuilder:validation:Required
+	// Name of the redis container image to run (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
 	// +kubebuilder:validation:Optional
