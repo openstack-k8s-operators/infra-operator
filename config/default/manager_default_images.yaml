@@ -15,3 +15,5 @@ spec:
           value: quay.io/tripleozedcentos9/openstack-tripleoclient:current-tripleo
         - name: INFRA_MEMCACHED_IMAGE_URL_DEFAULT
           value: quay.io/tripleozedcentos9/openstack-memcached:current-tripleo
+        - name: INFRA_REDIS_IMAGE_URL_DEFAULT
+          value: registry.redhat.io/rhel9/redis-6:latest

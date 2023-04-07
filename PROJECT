@@ -53,4 +53,8 @@ resources:
   path: github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1
   plural: redises
   version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
 version: "3"
