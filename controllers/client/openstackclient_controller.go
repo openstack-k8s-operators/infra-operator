@@ -36,9 +36,7 @@ import (
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
-	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
-	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 )
@@ -188,28 +186,6 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		condition.SeverityInfo,
 		clientv1beta1.OpenStackClientInputReady))
 
-	//
-	// create cm holding deployment script and render deployment script.
-	//
-	cmLabels := labels.GetLabels(instance, labels.GetGroupLabel("openstackclient"), map[string]string{})
-	envVars := make(map[string]env.Setter)
-
-	cms := []util.Template{
-		// ScriptsConfigMap
-		{
-			Name:               "openstackclient-sh",
-			Namespace:          instance.Namespace,
-			Type:               util.TemplateTypeScripts,
-			InstanceType:       instance.Kind,
-			AdditionalTemplate: map[string]string{},
-			Labels:             cmLabels,
-		},
-	}
-	err = configmap.EnsureConfigMaps(ctx, h, instance, cms, &envVars)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	clientLabels := map[string]string{
 		"app": "openstackclient",
 	}
@@ -257,6 +233,5 @@ func (r *OpenStackClientReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&clientv1beta1.OpenStackClient{}).
 		Owns(&corev1.Pod{}).
-		Owns(&corev1.ConfigMap{}).
 		Complete(r)
 }

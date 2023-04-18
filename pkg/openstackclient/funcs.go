@@ -54,8 +54,10 @@ func ClientPod(
 	clientPod.Spec.ServiceAccountName = ServiceAccount
 	clientPod.Spec.Containers = []corev1.Container{
 		{
-			Name:  "openstackclient",
-			Image: instance.Spec.ContainerImage,
+			Name:    "openstackclient",
+			Image:   instance.Spec.ContainerImage,
+			Command: []string{"/bin/sleep"},
+			Args:    []string{"infinity"},
 			SecurityContext: &corev1.SecurityContext{
 				RunAsUser:  &runAsUser,
 				RunAsGroup: &runAsGroup,
@@ -64,10 +66,6 @@ func ClientPod(
 				{
 					Name:  "OS_CLOUD",
 					Value: "default",
-				},
-				{
-					Name:  "KOLLA_CONFIG_STRATEGY",
-					Value: "COPY_ALWAYS",
 				},
 				{
 					Name:  "CONFIG_HASH",
@@ -89,11 +87,6 @@ func ClientPod(
 					MountPath: "/etc/openstack/secure.yaml",
 					SubPath:   "secure.yaml",
 				},
-				{
-					Name:      "kolla-config",
-					MountPath: "/var/lib/kolla/config_files",
-					ReadOnly:  true,
-				},
 			},
 		},
 	}
@@ -112,7 +105,6 @@ func clientPodVolumes(
 	secretHash string,
 ) []corev1.Volume {
 
-	var config0644AccessMode int32 = 0644
 	return []corev1.Volume{
 		{
 			Name: "openstack-config",
@@ -129,23 +121,6 @@ func clientPodVolumes(
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: instance.Spec.OpenStackConfigSecret,
-				},
-			},
-		},
-		{
-			Name: "kolla-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					DefaultMode: &config0644AccessMode,
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: "openstackclient-sh",
-					},
-					Items: []corev1.KeyToPath{
-						{
-							Key:  "kolla_config.json",
-							Path: "config.json",
-						},
-					},
 				},
 			},
 		},
