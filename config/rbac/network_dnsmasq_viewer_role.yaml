@@ -1,0 +1,27 @@
+# permissions for end users to view dnsmasqs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: dnsmasq-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: infra-operator
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dnsmasq-viewer-role
+rules:
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - dnsmasqs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - dnsmasqs/status
+  verbs:
+  - get
