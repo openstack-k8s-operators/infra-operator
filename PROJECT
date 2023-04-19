@@ -57,4 +57,31 @@ resources:
     defaulting: true
     validation: true
     webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  group: network
+  kind: DNSMasq
+  path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1
+  version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  group: network
+  kind: DNSData
+  path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1
+  version: v1beta1
+- controller: true
+  domain: openstack.org
+  group: network
+  kind: Service
+  version: v1beta1
 version: "3"

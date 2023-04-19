@@ -51,6 +51,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-network-openstack-org-v1beta1-dnsmasq
+  failurePolicy: Fail
+  name: mdnsmasq.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dnsmasqs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   name: mredis.kb.io
@@ -111,6 +131,26 @@ webhooks:
     - UPDATE
     resources:
     - memcacheds
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-network-openstack-org-v1beta1-dnsmasq
+  failurePolicy: Fail
+  name: vdnsmasq.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dnsmasqs
   sideEffects: None
 - admissionReviewVersions:
   - v1
