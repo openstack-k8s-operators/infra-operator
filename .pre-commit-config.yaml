@@ -23,11 +23,7 @@ repos:
 - repo: https://github.com/dnephin/pre-commit-golang
   rev: v0.5.1
   hooks:
-    - id: go-fmt
-      exclude: ^vendor
-    - id: go-vet
     - id: go-mod-tidy
-    - id: go-lint
 
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v4.3.0
@@ -51,3 +47,9 @@ repos:
     - id: no-commit-to-branch
     - id: trailing-whitespace
       exclude: ^vendor
+
+- repo: https://github.com/golangci/golangci-lint
+  rev: v1.52.2
+  hooks:
+    - id: golangci-lint
+      args: ["-v"]
