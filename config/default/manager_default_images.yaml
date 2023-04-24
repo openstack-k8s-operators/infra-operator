@@ -12,8 +12,8 @@ spec:
       - name: manager
         env:
         - name: INFRA_CLIENT_IMAGE_URL_DEFAULT
-          value: quay.io/tripleozedcentos9/openstack-tripleoclient:current-tripleo
+          value: quay.io/podified-antelopecentos9/openstack-openstackclient:current-podified
         - name: INFRA_MEMCACHED_IMAGE_URL_DEFAULT
-          value: quay.io/tripleozedcentos9/openstack-memcached:current-tripleo
+          value: quay.io/podified-antelopecentos9/openstack-memcached:current-podified
         - name: INFRA_REDIS_IMAGE_URL_DEFAULT
           value: registry.redhat.io/rhel9/redis-6:latest
