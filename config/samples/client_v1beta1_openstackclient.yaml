@@ -3,6 +3,6 @@ kind: OpenStackClient
 metadata:
   name: test
 spec:
-  containerImage: quay.io/tripleozedcentos9/openstack-tripleoclient:current-tripleo
+  containerImage: quay.io/podified-antelopecentos9/openstack-openstackclient:current-podified
   openStackConfigMap: openstack-config
   openStackConfigSecret: openstack-config-secret
