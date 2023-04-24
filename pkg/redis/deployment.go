@@ -55,7 +55,7 @@ func Deployment(r *redisv1beta1.Redis) *appsv1.Deployment {
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "infra-operator-redis",
+					ServiceAccountName: r.RbacResourceName(),
 					Containers: []corev1.Container{{
 						Image: r.Spec.ContainerImage,
 						Name:  "redis",

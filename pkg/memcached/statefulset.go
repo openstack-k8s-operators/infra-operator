@@ -57,7 +57,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: "mariadb-operator-mariadb",
+					ServiceAccountName: m.RbacResourceName(),
 					Containers: []corev1.Container{{
 						Image:   m.Spec.ContainerImage,
 						Name:    "memcached",
