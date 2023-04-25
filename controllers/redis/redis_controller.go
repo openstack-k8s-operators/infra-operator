@@ -32,11 +32,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 
 	redis "github.com/openstack-k8s-operators/infra-operator/pkg/redis"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	commondeployment "github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
+	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 )
 
@@ -59,6 +61,14 @@ type Reconciler struct {
 
 // RBAC for services
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete;
+
+// service account, role, rolebinding
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update
+// service account permissions that are needed to grant permission to the above
+// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
+// +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
 
 // Reconcile - Redis
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -114,6 +124,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
 			// redis pods ready
 			condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
+			// service account, role, rolebinding conditions
+			condition.UnknownCondition(condition.ServiceAccountReadyCondition, condition.InitReason, condition.ServiceAccountReadyInitMessage),
+			condition.UnknownCondition(condition.RoleReadyCondition, condition.InitReason, condition.RoleReadyInitMessage),
+			condition.UnknownCondition(condition.RoleBindingReadyCondition, condition.InitReason, condition.RoleBindingReadyInitMessage),
 		)
 
 		instance.Status.Conditions.Init(&cl)
@@ -125,6 +139,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	//
 	// Create/Update all the resources associated to this Redis instance
 	//
+
+	// Service account, role, binding
+	rbacRules := []rbacv1.PolicyRule{
+		{
+			APIGroups:     []string{"security.openshift.io"},
+			ResourceNames: []string{"anyuid"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
+		},
+	}
+	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
+	if err != nil {
+		return rbacResult, err
+	} else if (rbacResult != ctrl.Result{}) {
+		return rbacResult, nil
+	}
 
 	// Service to expose Redis pods
 	commonsvc := commonservice.NewService(redis.Service(instance), map[string]string{}, time.Duration(5)*time.Second)

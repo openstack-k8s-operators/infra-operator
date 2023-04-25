@@ -22,11 +22,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	// ServiceAccount -
-	ServiceAccount = "infra-operator-openstackclient"
-)
-
 // ClientPod func
 func ClientPod(
 	instance *clientv1beta1.OpenStackClient,
@@ -51,7 +46,7 @@ func ClientPod(
 		Labels:    labels,
 	}
 	clientPod.Spec.TerminationGracePeriodSeconds = &terminationGracePeriodSeconds
-	clientPod.Spec.ServiceAccountName = ServiceAccount
+	clientPod.Spec.ServiceAccountName = instance.RbacResourceName()
 	clientPod.Spec.Containers = []corev1.Container{
 		{
 			Name:    "openstackclient",
