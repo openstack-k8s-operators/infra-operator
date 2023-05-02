@@ -165,3 +165,8 @@ func (instance DNSMasq) RbacNamespace() string {
 func (instance DNSMasq) RbacResourceName() string {
 	return "dnsmasq-" + instance.Name
 }
+
+// GetConditions returns the list of conditions from the status
+func (s DNSMasqStatus) GetConditions() condition.Conditions {
+	return s.Conditions
+}
