@@ -299,9 +299,7 @@ govet: get-ci-tools
 	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/govet.sh  ./apis
 
 # Run go test against code
-gotest: get-ci-tools
-	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/gotest.sh
-	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/gotest.sh  ./apis
+gotest: test
 
 # Run golangci-lint test against code
 golangci: get-ci-tools
