@@ -76,15 +76,15 @@ func init() {
 
 // RbacConditionsSet - set the conditions for the rbac object
 func (instance OpenStackClient) RbacConditionsSet(c *condition.Condition) {
-       instance.Status.Conditions.Set(c)
+	instance.Status.Conditions.Set(c)
 }
 
 // RbacNamespace - return the namespace
 func (instance OpenStackClient) RbacNamespace() string {
-       return instance.Namespace
+	return instance.Namespace
 }
 
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
 func (instance OpenStackClient) RbacResourceName() string {
-       return "openstackclient-" + instance.Name
+	return "openstackclient-" + instance.Name
 }

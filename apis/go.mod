@@ -3,8 +3,8 @@ module github.com/openstack-k8s-operators/infra-operator/apis
 go 1.19
 
 require (
-	github.com/onsi/ginkgo/v2 v2.6.0
-	github.com/onsi/gomega v1.24.1
+	github.com/onsi/ginkgo/v2 v2.6.1
+	github.com/onsi/gomega v1.24.2
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230424122542-a0a560750cba
 	k8s.io/api v0.26.2
 	k8s.io/apimachinery v0.26.2
@@ -46,7 +46,7 @@ require (
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
-	go.uber.org/multierr v1.6.0 // indirect
+	go.uber.org/multierr v1.7.0 // indirect
 	go.uber.org/zap v1.24.0 // indirect
 	golang.org/x/net v0.9.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220909003341-f21342109be1 // indirect

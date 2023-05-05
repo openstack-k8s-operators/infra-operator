@@ -73,12 +73,15 @@ func (instance Memcached) IsReady() bool {
 
 // RbacConditionsSet - set the conditions for the rbac object
 func (instance Memcached) RbacConditionsSet(c *condition.Condition) {
-    instance.Status.Conditions.Set(c)}
+	instance.Status.Conditions.Set(c)
+}
+
 // RbacNamespace - return the namespace
-func (instance Memcached) RbacNamespace() string {    return instance.Namespace
+func (instance Memcached) RbacNamespace() string {
+	return instance.Namespace
 }
 
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
 func (instance Memcached) RbacResourceName() string {
-    return "memcached-" + instance.Name
+	return "memcached-" + instance.Name
 }
