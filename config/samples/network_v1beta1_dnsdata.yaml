@@ -28,3 +28,18 @@ spec:
   - ip: 172.19.0.101
     hostnames:
     - edpm-compute-1.tenant
+  - ip: 172.17.0.80
+    hostnames:
+    - keystone-internal.openstack.svc
+    - placement-internal.openstack.svc
+    - cinder-internal.openstack.svc
+    - glance-internal.openstack.svc
+    - nova-internal.openstack.svc
+    - nova-metadata-internal.openstack.svc
+    - neutron-internal.openstack.svc
+  - ip: 172.17.0.85
+    hostnames:
+    - rabbitmq.openstack.svc
+  - ip: 172.17.0.86
+    hostnames:
+    - rabbitmq-cell1.openstack.svc
