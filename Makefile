@@ -89,7 +89,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: gowork controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases && \
-	rm -f apis/bases/* && cp -a config/crd/bases apis/
+	rm -rf apis/bases && cp -a config/crd/bases apis/
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
