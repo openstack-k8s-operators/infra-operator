@@ -196,21 +196,13 @@ var _ = Describe("DNSMasq controller", func() {
 				}
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
-					found := false
-					for _, vol := range depl.Spec.Template.Spec.Volumes {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeTrue())
+					g.Expect(depl.Spec.Template.Spec.Volumes).To(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
+
 					container := depl.Spec.Template.Spec.Containers[0]
-					found = false
-					for _, vol := range container.VolumeMounts {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeTrue())
+					g.Expect(container.VolumeMounts).To(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
+
 					configHash = GetEnvVarValue(container.Env, "CONFIG_HASH", "")
 					g.Expect(configHash).To(Not(Equal("")))
 				}, timeout, interval).Should(Succeed())
@@ -238,42 +230,24 @@ var _ = Describe("DNSMasq controller", func() {
 				}
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
-					found := false
-					for _, vol := range depl.Spec.Template.Spec.Volumes {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeTrue())
+					g.Expect(depl.Spec.Template.Spec.Volumes).To(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
+
 					container := depl.Spec.Template.Spec.Containers[0]
-					found = false
-					for _, vol := range container.VolumeMounts {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeTrue())
+					g.Expect(container.VolumeMounts).To(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
 				}, timeout, interval).Should(Succeed())
 
 				// Delete the cm providing dnsdata
 				th.DeleteConfigMap(dnsDataCM)
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
-					found := false
-					for _, vol := range depl.Spec.Template.Spec.Volumes {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeFalse())
+					g.Expect(depl.Spec.Template.Spec.Volumes).NotTo(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
+
 					container := depl.Spec.Template.Spec.Containers[0]
-					found = false
-					for _, vol := range container.VolumeMounts {
-						if vol.Name == dnsDataCM.Name {
-							found = true
-						}
-					}
-					g.Expect(found).To(BeFalse())
+					g.Expect(container.VolumeMounts).NotTo(
+						ContainElement(HaveField("Name", Equal(dnsDataCM.Name))))
 				}, timeout, interval).Should(Succeed())
 			})
 		})
