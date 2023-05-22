@@ -1,0 +1,45 @@
+apiVersion: network.openstack.org/v1beta1
+kind: DNSData
+metadata:
+  name: allhosts
+spec:
+  hosts:
+  - ip: 192.168.122.100
+    hostnames:
+    - edpm-compute-0.ctlplane
+  - ip: 172.17.0.100
+    hostnames:
+    - edpm-compute-0.internalapi
+  - ip: 172.18.0.100
+    hostnames:
+    - edpm-compute-0.storge
+  - ip: 172.19.0.100
+    hostnames:
+    - edpm-compute-0.tenant
+  - ip: 192.168.122.101
+    hostnames:
+    - edpm-compute-1.ctlplane
+  - ip: 172.17.0.101
+    hostnames:
+    - edpm-compute-1.internalapi
+  - ip: 172.18.0.101
+    hostnames:
+    - edpm-compute-1.storge
+  - ip: 172.19.0.101
+    hostnames:
+    - edpm-compute-1.tenant
+  - ip: 172.17.0.80
+    hostnames:
+    - keystone-internal.openstack.svc
+    - placement-internal.openstack.svc
+    - cinder-internal.openstack.svc
+    - glance-internal.openstack.svc
+    - nova-internal.openstack.svc
+    - nova-metadata-internal.openstack.svc
+    - neutron-internal.openstack.svc
+  - ip: 172.17.0.85
+    hostnames:
+    - rabbitmq.openstack.svc
+  - ip: 172.17.0.86
+    hostnames:
+    - rabbitmq-cell1.openstack.svc

@@ -4,4 +4,6 @@ resources:
 - client_v1beta1_openstackclient.yaml
 - memcached_v1beta1_memcached.yaml
 - redis_v1beta1_redis.yaml
+- network_v1beta1_dnsmasq.yaml
+- network_v1beta1_dnsdata.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
