@@ -113,6 +113,10 @@ var _ = BeforeSuite(func() {
 	// Start the controller-manager if goroutine
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
+		// NOTE(gibi): disable metrics reporting in test to allow
+		// parallel test execution. Otherwise each instance would like to
+		// bind to the same port
+		MetricsBindAddress: "0",
 	})
 	Expect(err).ToNot(HaveOccurred())
 
