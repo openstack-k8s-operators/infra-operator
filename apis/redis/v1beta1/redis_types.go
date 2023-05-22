@@ -18,7 +18,15 @@ package v1beta1
 
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// Container image fall-back defaults
+
+	// RedisContainerImage is the fall-back container image for Redis
+	RedisContainerImage = "registry.redhat.io/rhel9/redis-6:latest"
 )
 
 // RedisSpec defines the desired state of Redis
@@ -83,4 +91,14 @@ func (instance Redis) RbacNamespace() string {
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
 func (instance Redis) RbacResourceName() string {
 	return "redis-" + instance.Name
+}
+
+// SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
+func SetupDefaults() {
+	// Acquire environmental defaults and initialize Redis defaults with them
+	redisDefaults := RedisDefaults{
+		ContainerImageURL: util.GetEnvVar("INFRA_REDIS_IMAGE_URL_DEFAULT", RedisContainerImage),
+	}
+
+	SetupRedisDefaults(redisDefaults)
 }

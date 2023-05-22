@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,11 @@ const (
 
 	// DNSDataLabelSelectorKey - label selector to identify config maps with hosts data
 	DNSDataLabelSelectorKey = "dnsmasqhosts"
+
+	// Container image fall-back defaults
+
+	// DNSMasqContainerImage is the fall-back container image for DNSMasq
+	DNSMasqContainerImage = "quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified"
 )
 
 // DNSMasqOption defines allowed options for dnsmasq
@@ -169,4 +175,14 @@ func (instance DNSMasq) RbacResourceName() string {
 // GetConditions returns the list of conditions from the status
 func (s DNSMasqStatus) GetConditions() condition.Conditions {
 	return s.Conditions
+}
+
+// SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
+func SetupDefaults() {
+	// Acquire environmental defaults and initialize DNSMasq defaults with them
+	dnsMasqDefaults := DNSMasqDefaults{
+		ContainerImageURL: util.GetEnvVar("INFRA_DNSMASQ_IMAGE_URL_DEFAULT", DNSMasqContainerImage),
+	}
+
+	SetupDNSMasqDefaults(dnsMasqDefaults)
 }

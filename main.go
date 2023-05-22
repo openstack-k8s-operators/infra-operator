@@ -187,33 +187,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Acquire environmental defaults and initialize OpenStackClient defaults with them
-	openStackClientDefaults := clientv1beta1.OpenStackClientDefaults{
-		ContainerImageURL: os.Getenv("INFRA_CLIENT_IMAGE_URL_DEFAULT"),
-	}
-
-	clientv1beta1.SetupOpenStackClientDefaults(openStackClientDefaults)
-
-	// Acquire environmental defaults and initialize Memcached defaults with them
-	memcachedDefaults := memcachedv1.MemcachedDefaults{
-		ContainerImageURL: os.Getenv("INFRA_MEMCACHED_IMAGE_URL_DEFAULT"),
-	}
-
-	memcachedv1.SetupMemcachedDefaults(memcachedDefaults)
-
-	// Acquire environmental defaults and initialize Redis defaults with them
-	redisDefaults := redisv1.RedisDefaults{
-		ContainerImageURL: os.Getenv("INFRA_REDIS_IMAGE_URL_DEFAULT"),
-	}
-
-	redisv1.SetupRedisDefaults(redisDefaults)
-
-	// Acquire environmental defaults and initialize Redis defaults with them
-	networkDefaults := networkv1.DNSMasqDefaults{
-		ContainerImageURL: os.Getenv("INFRA_DNSMASQ_IMAGE_URL_DEFAULT"),
-	}
-
-	networkv1.SetupDNSMasqDefaults(networkDefaults)
+	// Acquire environmental defaults and initialize operator defaults with them
+	clientv1beta1.SetupDefaults()
+	memcachedv1.SetupDefaults()
+	redisv1.SetupDefaults()
+	networkv1.SetupDefaults()
 
 	// Setup webhooks if requested
 	if strings.ToLower(os.Getenv("ENABLE_WEBHOOKS")) != "false" {
