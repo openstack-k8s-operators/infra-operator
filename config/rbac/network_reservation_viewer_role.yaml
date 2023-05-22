@@ -1,0 +1,27 @@
+# permissions for end users to view reservations.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: reservation-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: infra-operator
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: reservation-viewer-role
+rules:
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - reservations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - reservations/status
+  verbs:
+  - get

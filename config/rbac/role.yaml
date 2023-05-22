@@ -221,6 +221,58 @@ rules:
 - apiGroups:
   - network.openstack.org
   resources:
+  - ipsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - ipsets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - ipsets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - netconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - reservations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - reservations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
   - services
   verbs:
   - create

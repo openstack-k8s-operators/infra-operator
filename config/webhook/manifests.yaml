@@ -71,6 +71,66 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-network-openstack-org-v1beta1-ipset
+  failurePolicy: Fail
+  name: mipset.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - ipsets
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-network-openstack-org-v1beta1-netconfig
+  failurePolicy: Fail
+  name: mnetconfig.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - netconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-network-openstack-org-v1beta1-reservation
+  failurePolicy: Fail
+  name: mreservation.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - reservations
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   name: mredis.kb.io
@@ -151,6 +211,66 @@ webhooks:
     - UPDATE
     resources:
     - dnsmasqs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-network-openstack-org-v1beta1-ipset
+  failurePolicy: Fail
+  name: vipset.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - ipsets
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-network-openstack-org-v1beta1-netconfig
+  failurePolicy: Fail
+  name: vnetconfig.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - netconfigs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-network-openstack-org-v1beta1-reservation
+  failurePolicy: Fail
+  name: vreservation.kb.io
+  rules:
+  - apiGroups:
+    - network.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - reservations
   sideEffects: None
 - admissionReviewVersions:
   - v1

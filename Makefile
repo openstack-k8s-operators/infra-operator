@@ -111,7 +111,7 @@ tidy: ## Run go mod tidy on every mod file in the repo
 
 .PHONY: test
 test: manifests generate gowork fmt vet envtest ginkgo ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" $(GINKGO) --trace --cover --coverpkg=../../pkg/dnsmasq,../../controllers,../../apis/network/v1beta1 --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/...
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" $(GINKGO) --trace --cover --coverpkg=../../pkg/dnsmasq,../../pkg/ipam,../../controllers,../../apis/network/v1beta1 --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/...
 
 ##@ Build
 
