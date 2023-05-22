@@ -1,0 +1,16 @@
+apiVersion: network.openstack.org/v1beta1
+kind: IPSet
+metadata:
+  name: edpm-compute-0
+spec:
+  networks:
+  - name: CtlPlane
+    subnetName: subnet1
+    defaultRoute: true
+  - name: InternalApi
+    subnetName: subnet1
+    fixedIP: 172.17.0.150
+  - name: Storage
+    subnetName: subnet1
+  - name: Tenant
+    subnetName: subnet1

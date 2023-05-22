@@ -1,0 +1,59 @@
+apiVersion: network.openstack.org/v1beta1
+kind: NetConfig
+metadata:
+  name: netconfig
+spec:
+  networks:
+  - name: CtlPlane
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 192.168.122.120
+        start: 192.168.122.100
+      - end: 192.168.122.200
+        start: 192.168.122.150
+      cidr: 192.168.122.0/24
+      gateway: 192.168.122.1
+  - name: InternalApi
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 172.17.0.250
+        start: 172.17.0.10
+      excludeAddresses:
+      - 172.17.0.10
+      - 172.17.0.12
+      cidr: 172.17.0.0/24
+      vlan: 20
+  - name: External
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 10.0.0.250
+        start: 10.0.0.10
+      cidr: 10.0.0.0/24
+      gateway: 10.0.0.1
+  - name: Storage
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 172.18.0.250
+        start: 172.18.0.10
+      cidr: 172.18.0.0/24
+      vlan: 30
+  - name: StorageMgmt
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 172.19.0.250
+        start: 172.19.0.10
+      cidr: 172.19.0.0/24
+      vlan: 40
+  - name: Tenant
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 172.20.0.250
+        start: 172.20.0.10
+      cidr: 172.20.0.0/24
+      vlan: 50
