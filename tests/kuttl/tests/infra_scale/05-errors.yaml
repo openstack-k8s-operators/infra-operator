@@ -15,8 +15,3 @@ kind: Pod
 metadata:
   name: test
   namespace: openstack
-
-
-
-
-
