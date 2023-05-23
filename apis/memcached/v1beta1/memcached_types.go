@@ -18,7 +18,15 @@ package v1beta1
 
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// Container image fall-back defaults
+
+	// MemcachedContainerImage is the fall-back container image for Memcached
+	MemcachedContainerImage = "quay.io/podified-antelope-centos9/openstack-memcached:current-podified"
 )
 
 // MemcachedSpec defines the desired state of Memcached
@@ -84,4 +92,14 @@ func (instance Memcached) RbacNamespace() string {
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
 func (instance Memcached) RbacResourceName() string {
 	return "memcached-" + instance.Name
+}
+
+// SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
+func SetupDefaults() {
+	// Acquire environmental defaults and initialize Memcached defaults with them
+	memcachedDefaults := MemcachedDefaults{
+		ContainerImageURL: util.GetEnvVar("INFRA_MEMCACHED_IMAGE_URL_DEFAULT", MemcachedContainerImage),
+	}
+
+	SetupMemcachedDefaults(memcachedDefaults)
 }

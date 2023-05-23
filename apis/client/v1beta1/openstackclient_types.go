@@ -18,7 +18,15 @@ package v1beta1
 
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// Container image fall-back defaults
+
+	// OpenStackClientContainerImage is the fall-back container image for OpenStackClient
+	OpenStackClientContainerImage = "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
 )
 
 // OpenStackClientSpec defines the desired state of OpenStackClient
@@ -87,4 +95,14 @@ func (instance OpenStackClient) RbacNamespace() string {
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
 func (instance OpenStackClient) RbacResourceName() string {
 	return "openstackclient-" + instance.Name
+}
+
+// SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
+func SetupDefaults() {
+	// Acquire environmental defaults and initialize OpenStackClient defaults with them
+	openStackClientDefaults := OpenStackClientDefaults{
+		ContainerImageURL: util.GetEnvVar("INFRA_CLIENT_IMAGE_URL_DEFAULT", OpenStackClientContainerImage),
+	}
+
+	SetupOpenStackClientDefaults(openStackClientDefaults)
 }

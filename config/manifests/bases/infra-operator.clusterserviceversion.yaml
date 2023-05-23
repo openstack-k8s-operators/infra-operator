@@ -10,10 +10,10 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: DNSData is the Schema for the dnsdatas API
+    - description: DNSData is the Schema for the dnsdata API
       displayName: DNSData
       kind: DNSData
-      name: dnsdatas.network.openstack.org
+      name: dnsdata.network.openstack.org
       version: v1beta1
     - description: DNSMasq is the Schema for the dnsmasqs API
       displayName: DNSMasq
