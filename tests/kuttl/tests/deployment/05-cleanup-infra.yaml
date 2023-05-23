@@ -5,4 +5,3 @@ delete:
   kind: OpenStackClient
   name: test
   namespace: openstack
-

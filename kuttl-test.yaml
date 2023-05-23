@@ -23,4 +23,3 @@ timeout: 180
 parallel: 1
 suppress:
   - events                     # Remove spammy event logs
-  -
