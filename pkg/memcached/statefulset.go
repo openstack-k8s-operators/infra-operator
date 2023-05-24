@@ -1,6 +1,8 @@
 package memcached
 
 import (
+	"fmt"
+
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,7 +15,7 @@ import (
 func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 	matchls := map[string]string{
 		"app":   "memcached",
-		"cr":    "memcached-" + m.Name,
+		"cr":    fmt.Sprintf("memcached-%s", m.Name),
 		"owner": "infra-operator",
 	}
 	ls := labels.GetLabels(m, "memcached", matchls)
@@ -43,7 +45,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 
 	sfs := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      m.Name,
+			Name:      fmt.Sprintf("memcached-%s", m.Name),
 			Namespace: m.Namespace,
 		},
 		Spec: appsv1.StatefulSetSpec{
@@ -91,7 +93,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: m.Name + "-memcached-config-data",
+										Name: fmt.Sprintf("%s-memcached-config-data", m.Name),
 									},
 									Items: []corev1.KeyToPath{
 										{
@@ -107,7 +109,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: m.Name + "-memcached-config-data",
+										Name: fmt.Sprintf("%s-memcached-config-data", m.Name),
 									},
 									Items: []corev1.KeyToPath{
 										{
