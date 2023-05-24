@@ -77,9 +77,9 @@ func init() {
 	SchemeBuilder.Register(&Memcached{}, &MemcachedList{})
 }
 
-// IsReady - returns true if service is ready to serve requests
+// IsReady - returns true if Memcached is reconciled successfully
 func (instance Memcached) IsReady() bool {
-	return instance.Status.Conditions.IsTrue(condition.DeploymentReadyCondition)
+	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
 }
 
 // RbacConditionsSet - set the conditions for the rbac object
