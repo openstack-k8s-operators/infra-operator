@@ -48,6 +48,12 @@ type MemcachedStatus struct {
 
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
+
+	// ServerList - List of memcached endpoints without inet(6) prefix
+	ServerList []string `json:"serverList,omitempty" optional:"true"`
+
+	// ServerListWithInet - List of memcached endpoints with inet(6) prefix
+	ServerListWithInet []string `json:"serverListWithInet,omitempty" optional:"true"`
 }
 
 // +kubebuilder:object:root=true

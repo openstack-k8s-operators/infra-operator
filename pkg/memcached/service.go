@@ -23,7 +23,7 @@ func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 		},
 		Port: service.GenericServicePort{
 			Name:     "memcached",
-			Port:     11211,
+			Port:     MemcachedPort,
 			Protocol: "TCP",
 		},
 		ClusterIP: "None",

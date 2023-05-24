@@ -106,6 +106,18 @@ spec:
                 description: ReadyCount of Memcached instances
                 format: int32
                 type: integer
+              serverList:
+                description: ServerList - List of memcached endpoints without inet(6)
+                  prefix
+                items:
+                  type: string
+                type: array
+              serverListWithInet:
+                description: ServerListWithInet - List of memcached endpoints with
+                  inet(6) prefix
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true

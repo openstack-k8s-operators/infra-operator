@@ -17,6 +17,8 @@ limitations under the License.
 package memcached
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -27,16 +29,12 @@ import (
 
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
-
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
-
-	"context"
-	"fmt"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -152,6 +150,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, nil
 	}
 
+	if instance.Status.ServerList == nil {
+		instance.Status.ServerList = []string{}
+	}
+	if instance.Status.ServerListWithInet == nil {
+		instance.Status.ServerListWithInet = []string{}
+	}
+
 	//
 	// Create/Update all the resources associated to this Memcached instance
 	//
@@ -203,6 +208,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			err.Error()))
 		return sres, serr
 	}
+
+	// TODO: We have to make sure this works properly in dual stack env (if we support it)
+	ipFamily := commonsvc.GetIPFamilies()[0]
+	serverList, serverListWithInet := r.GetServerLists(instance, ipFamily)
+	instance.Status.ServerList = serverList
+	instance.Status.ServerListWithInet = serverListWithInet
+
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
 	// Statefulset for stable names
@@ -262,4 +274,29 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Complete(r)
+}
+
+// GetServerLists returns list of memcached server without/with inet prefix
+func (r *Reconciler) GetServerLists(
+	instance *memcachedv1.Memcached,
+	ipFamily corev1.IPFamily,
+) ([]string, []string) {
+	var serverList []string
+	var serverListWithInet []string
+
+	prefix := "inet"
+	if ipFamily == corev1.IPv6Protocol {
+		prefix = "inet6"
+	}
+
+	for i := int32(0); i < instance.Spec.Replicas; i++ {
+		server := fmt.Sprintf("%s-memcached-%d.memcached", instance.Name, i)
+		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
+
+		// python-memcached requires inet(6) prefix according to the IP version
+		// used by the memcached server.
+		serverListWithInet = append(serverListWithInet, fmt.Sprintf("%s:[%s]:%d", prefix, server, memcached.MemcachedPort))
+	}
+
+	return serverList, serverListWithInet
 }

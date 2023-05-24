@@ -37,10 +37,10 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 
 	// TODO might want to disable probes in 'Debug' mode
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(11211)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: MemcachedPort},
 	}
 	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(11211)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: MemcachedPort},
 	}
 
 	sfs := &appsv1.StatefulSet{
@@ -81,7 +81,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							Name:      "kolla-config",
 						}},
 						Ports: []corev1.ContainerPort{{
-							ContainerPort: 11211,
+							ContainerPort: MemcachedPort,
 							Name:          "memcached",
 						}},
 						ReadinessProbe: readinessProbe,
