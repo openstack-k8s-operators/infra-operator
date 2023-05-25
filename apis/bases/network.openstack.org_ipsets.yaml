@@ -122,22 +122,52 @@ spec:
                   - type
                   type: object
                 type: array
-              reservation:
+              reservations:
                 description: Reservation
                 items:
-                  description: IPAddress -
+                  description: IPSetReservation defines reservation status per requested
+                    network
                   properties:
                     address:
                       description: Address contains the IP address
                       type: string
+                    cidr:
+                      description: Cidr the cidr to use for this network
+                      type: string
+                    gateway:
+                      description: Gateway optional gateway for the network
+                      type: string
+                    mtu:
+                      description: MTU of the network
+                      type: integer
                     network:
                       description: Network name
                       pattern: ^[a-zA-Z0-9][a-zA-Z0-9\-_]*[a-zA-Z0-9]$
                       type: string
+                    routes:
+                      description: Routes, list of networks that should be routed
+                        via network gateway.
+                      items:
+                        description: Route definition
+                        properties:
+                          destination:
+                            description: Destination, network CIDR
+                            type: string
+                          nexthop:
+                            description: Nexthop, gateway for the destination
+                            type: string
+                        required:
+                        - destination
+                        - nexthop
+                        type: object
+                      type: array
                     subnet:
                       description: Subnet name
                       pattern: ^[a-zA-Z0-9][a-zA-Z0-9\-_]*[a-zA-Z0-9]$
                       type: string
+                    vlan:
+                      description: Vlan ID
+                      type: integer
                   required:
                   - address
                   - network

@@ -56,7 +56,7 @@ type Subnet struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Maximum=4094
 	// Vlan ID
-	Vlan int `json:"vlan,omitempty"`
+	Vlan *int `json:"vlan,omitempty"`
 
 	// +kubebuilder:validation:Required
 	// AllocationRanges a list of AllocationRange for assignment. Allocation will start
