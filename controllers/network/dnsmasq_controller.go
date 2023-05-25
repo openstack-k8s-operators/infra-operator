@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/go-logr/logr"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
@@ -195,7 +194,7 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 // SetupWithManager sets up the controller with the Manager.
 func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
-	dnsmasqFN := handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
+	dnsmasqFN := handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 		result := []reconcile.Request{}
 
 		// For each ConfigMap create / update event get the list of all
@@ -224,7 +223,7 @@ func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return result
 		}
 		return nil
-	})
+	}))
 
 	// 'UpdateFunc' and 'CreateFunc' used to judge if a event about the object is
 	// what we want. If that is true, the event will be processed by the reconciler.
@@ -259,9 +258,11 @@ func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
-		Watches(&source.Kind{Type: &corev1.ConfigMap{}},
+		Watches(
+			&corev1.ConfigMap{},
 			dnsmasqFN,
-			builder.WithPredicates(p)).
+			builder.WithPredicates(p),
+		).
 		Complete(r)
 }
 
