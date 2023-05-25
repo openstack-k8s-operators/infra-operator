@@ -209,7 +209,7 @@ var _ = Describe("IPSet controller", func() {
 		It("should have created an IPSet with IP 172.17.0.201 on net-1", func() {
 			Eventually(func(g Gomega) {
 				res := GetReservationFromNet(ipSetName, "net-1")
-				g.Expect(res).To(Equal(networkv1.IPAddress{}))
+				g.Expect(res).To(Equal(networkv1.IPSetReservation{}))
 			}, timeout, interval).Should(Succeed())
 		})
 

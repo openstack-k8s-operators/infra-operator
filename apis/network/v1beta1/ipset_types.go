@@ -48,10 +48,37 @@ type IPSetSpec struct {
 	Networks []IPSetNetwork `json:"networks"`
 }
 
+// IPSetReservation defines reservation status per requested network
+type IPSetReservation struct {
+	// Network name
+	Network NetNameStr `json:"network"`
+
+	// Subnet name
+	Subnet NetNameStr `json:"subnet"`
+
+	// Address contains the IP address
+	Address string `json:"address"`
+
+	// MTU of the network
+	MTU int `json:"mtu,omitempty" optional:"true"`
+
+	// Cidr the cidr to use for this network
+	Cidr string `json:"cidr,omitempty" optional:"true"`
+
+	// Vlan ID
+	Vlan *int `json:"vlan,omitempty" optional:"true"`
+
+	// Gateway optional gateway for the network
+	Gateway *string `json:"gateway,omitempty" optional:"true"`
+
+	// Routes, list of networks that should be routed via network gateway.
+	Routes []Route `json:"routes,omitempty" optional:"true"`
+}
+
 // IPSetStatus defines the observed state of IPSet
 type IPSetStatus struct {
 	// Reservation
-	Reservation []IPAddress `json:"reservation,omitempty" optional:"true"`
+	Reservation []IPSetReservation `json:"reservations,omitempty" optional:"true"`
 
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`

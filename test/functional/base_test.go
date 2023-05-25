@@ -260,10 +260,11 @@ func GetDefaultNetConfigSpec() map[string]interface{} {
 
 func GetSubnet1(name string) networkv1.Subnet {
 	var gw string = "172.17.0.1"
+	var vlan int = 20
 	return networkv1.Subnet{
 		Name:    networkv1.NetNameStr(name),
 		Cidr:    "172.17.0.0/24",
-		Vlan:    20,
+		Vlan:    &vlan,
 		Gateway: &gw,
 		AllocationRanges: []networkv1.AllocationRange{
 			{
@@ -279,10 +280,11 @@ func GetSubnet1(name string) networkv1.Subnet {
 
 func GetSubnet2(name string) networkv1.Subnet {
 	var gw string = "172.18.0.1"
+	var vlan int = 21
 	return networkv1.Subnet{
 		Name:    networkv1.NetNameStr(name),
 		Cidr:    "172.18.0.0/24",
-		Vlan:    21,
+		Vlan:    &vlan,
 		Gateway: &gw,
 		AllocationRanges: []networkv1.AllocationRange{
 			{
@@ -294,10 +296,11 @@ func GetSubnet2(name string) networkv1.Subnet {
 }
 
 func GetSubnetWithWrongExcludeAddress() networkv1.Subnet {
+	var vlan int = 20
 	return networkv1.Subnet{
 		Name: subnet1,
 		Cidr: "172.17.0.0/24",
-		Vlan: 20,
+		Vlan: &vlan,
 		AllocationRanges: []networkv1.AllocationRange{
 			{
 				Start: "172.17.0.100",
@@ -362,9 +365,9 @@ func GetIPSetNet2() networkv1.IPSetNetwork {
 	}
 }
 
-func GetReservationFromNet(ipsetName types.NamespacedName, netName string) networkv1.IPAddress {
+func GetReservationFromNet(ipsetName types.NamespacedName, netName string) networkv1.IPSetReservation {
 	ipSet := &networkv1.IPSet{}
-	res := networkv1.IPAddress{}
+	res := networkv1.IPSetReservation{}
 	Eventually(func(g Gomega) {
 		ipSet = GetIPSet(ipsetName)
 		g.Expect(ipSet).To(Not(BeNil()))
