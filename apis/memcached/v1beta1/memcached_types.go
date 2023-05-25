@@ -43,6 +43,9 @@ type MemcachedSpec struct {
 
 // MemcachedStatus defines the observed state of Memcached
 type MemcachedStatus struct {
+	// ReadyCount of Memcached instances
+	ReadyCount int32 `json:"readyCount,omitempty"`
+
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
 }

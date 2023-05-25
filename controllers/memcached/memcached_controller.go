@@ -203,13 +203,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if sferr != nil {
 		return sfres, sferr
 	}
-	statefulset := commonstatefulset.GetStatefulSet()
 
 	//
-	// Reconstruct the state of the galera resource based on the replicaset and its pods
+	// Reconstruct the state of the memcached resource based on the statefulset and its pods
 	//
-
-	if statefulset.Status.ReadyReplicas > 0 {
+	instance.Status.ReadyCount = commonstatefulset.GetStatefulSet().Status.ReadyReplicas
+	if instance.Status.ReadyCount > 0 {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	}
 
