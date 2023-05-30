@@ -75,7 +75,7 @@ func init() {
 
 // IsReady - returns true if service is ready to serve requests
 func (instance Redis) IsReady() bool {
-	return instance.Status.Conditions.IsTrue(condition.DeploymentReadyCondition)
+	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
 }
 
 // RbacConditionsSet - set the conditions for the rbac object

@@ -20,7 +20,6 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -153,8 +152,7 @@ func init() {
 
 // IsReady returns true if DNSMasq reconciled successfully
 func (instance DNSMasq) IsReady() bool {
-	readyCond := instance.Status.Conditions.Get(condition.ReadyCondition)
-	return readyCond != nil && readyCond.Status == corev1.ConditionTrue
+	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
 }
 
 // RbacConditionsSet - set the conditions for the rbac object
