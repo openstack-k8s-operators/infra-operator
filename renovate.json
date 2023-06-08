@@ -1,0 +1,45 @@
+{
+"extends": [
+    "config:base"
+  ],
+  "dependencyDashboard": true,
+  "logFileLevel": "trace",
+  "enabledManagers": ["gomod"],
+  "postUpdateOptions": ["gomodTidy"],
+  "constraints": {
+    "go": "1.19"
+  },
+  "schedule":[
+    "every weekend"
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["github.com/openstack-k8s-operators/infra-operator/api"],
+      "enabled": false
+    },
+    {
+      "groupName": "openstack-k8s-operators",
+      "matchPackagePrefixes": ["github.com/openstack-k8s-operators"],
+      "excludePackageNames": ["github.com/openstack-k8s-operators/infra-operator/api"],
+      "schedule": [
+        "every weekend"
+      ]
+    },
+    {
+      "groupName": "k8s.io",
+      "matchPackagePrefixes": [
+        "k8s.io",
+        "sigs.k8s.io"
+      ],
+      "schedule": [
+        "every weekend"
+      ],
+      "allowedVersions": "< 1.0.0"
+    }
+  ],
+  "postUpgradeTasks": {
+    "commands": ["make gowork", "make tidy", "make manifests generate"],
+    "fileFilters": ["**/go.mod", "**/go.sum", "**/*.go", "**/*.yaml"],
+    "executionMode": "update"
+  }
+}
