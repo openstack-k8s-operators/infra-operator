@@ -48,6 +48,12 @@ type MemcachedStatus struct {
 
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
+
+	// ServerList - List of memcached endpoints without inet(6) prefix
+	ServerList []string `json:"serverList,omitempty" optional:"true"`
+
+	// ServerListWithInet - List of memcached endpoints with inet(6) prefix
+	ServerListWithInet []string `json:"serverListWithInet,omitempty" optional:"true"`
 }
 
 // +kubebuilder:object:root=true
@@ -77,9 +83,9 @@ func init() {
 	SchemeBuilder.Register(&Memcached{}, &MemcachedList{})
 }
 
-// IsReady - returns true if service is ready to serve requests
+// IsReady - returns true if Memcached is reconciled successfully
 func (instance Memcached) IsReady() bool {
-	return instance.Status.Conditions.IsTrue(condition.DeploymentReadyCondition)
+	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
 }
 
 // RbacConditionsSet - set the conditions for the rbac object

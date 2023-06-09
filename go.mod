@@ -9,7 +9,7 @@ require (
 	github.com/onsi/gomega v1.27.6
 	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-20230525130454-a7f0f8afe772
 	github.com/openstack-k8s-operators/keystone-operator/api v0.0.0-20230523051500-d40e4195d0d4
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230524134507-696d321a942e
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.0.0-20230606033311-3b01713e4d45
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.0.0-20230523095909-db05945b0b1e
 	github.com/openstack-k8s-operators/lib-common/modules/test-operators v0.0.0-20230523095909-db05945b0b1e
 	github.com/rabbitmq/cluster-operator v1.14.0
