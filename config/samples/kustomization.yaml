@@ -6,4 +6,6 @@ resources:
 - redis_v1beta1_redis.yaml
 - network_v1beta1_dnsmasq.yaml
 - network_v1beta1_dnsdata.yaml
+- network_v1beta1_netconfig.yaml
+- network_v1beta1_ipset.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

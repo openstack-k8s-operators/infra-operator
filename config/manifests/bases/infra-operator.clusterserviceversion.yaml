@@ -20,10 +20,20 @@ spec:
       kind: DNSMasq
       name: dnsmasqs.network.openstack.org
       version: v1beta1
+    - description: IPSet is the Schema for the ipsets API
+      displayName: IPSet
+      kind: IPSet
+      name: ipsets.network.openstack.org
+      version: v1beta1
     - description: Memcached is the Schema for the memcacheds API
       displayName: Memcached
       kind: Memcached
       name: memcacheds.memcached.openstack.org
+      version: v1beta1
+    - description: NetConfig is the Schema for the netconfigs API
+      displayName: Net Config
+      kind: NetConfig
+      name: netconfigs.network.openstack.org
       version: v1beta1
     - description: OpenStackClient is the Schema for the openstackclients API
       displayName: Open Stack Client
@@ -34,6 +44,11 @@ spec:
       displayName: Redis
       kind: Redis
       name: redises.redis.openstack.org
+      version: v1beta1
+    - description: Reservation is the Schema for the reservations API
+      displayName: Reservation
+      kind: Reservation
+      name: reservations.network.openstack.org
       version: v1beta1
     - description: TransportURL is the Schema for the transporturls API
       displayName: Transport URL

@@ -84,4 +84,41 @@ resources:
   group: network
   kind: Service
   version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: openstack.org
+  group: network
+  kind: NetConfig
+  path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1
+  version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: openstack.org
+  group: network
+  kind: Reservation
+  path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1
+  version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  group: network
+  kind: IPSet
+  path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1
+  version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
 version: "3"
