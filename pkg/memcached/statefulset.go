@@ -14,8 +14,8 @@ import (
 // StatefulSet returns a Stateful resource for the Memcached CR
 func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 	matchls := map[string]string{
-		"app":   "memcached",
-		"cr":    fmt.Sprintf("memcached-%s", m.Name),
+		"app":   fmt.Sprintf("memcached-%s", m.Name),
+		"cr":    m.Name,
 		"owner": "infra-operator",
 	}
 	ls := labels.GetLabels(m, "memcached", matchls)
