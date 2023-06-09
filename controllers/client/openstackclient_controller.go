@@ -90,7 +90,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	)
 	instance.Status.Conditions.Init(&cl)
 
-	h, err := helper.NewHelper(
+	helper, err := helper.NewHelper(
 		instance,
 		r.Client,
 		r.Kclient,
@@ -103,11 +103,19 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Always patch the instance status when exiting this function so we can persist any changes.
 	defer func() {
-		if instance.Status.Conditions.IsTrue(clientv1beta1.OpenStackClientReadyCondition) {
-			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+		// update the Ready condition based on the sub conditions
+		if instance.Status.Conditions.AllSubConditionIsTrue() {
+			instance.Status.Conditions.MarkTrue(
+				condition.ReadyCondition, condition.ReadyMessage)
+		} else {
+			// something is not ready so reset the Ready condition
+			instance.Status.Conditions.MarkUnknown(
+				condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage)
+			// and recalculate it based on the state of the rest of the conditions
+			instance.Status.Conditions.Set(
+				instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
-
-		err := h.PatchInstance(ctx, instance)
+		err := helper.PatchInstance(ctx, instance)
 		if err != nil {
 			_err = err
 			return
@@ -128,7 +136,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
 		},
 	}
-	rbacResult, err := common_rbac.ReconcileRbac(ctx, h, instance, rbacRules)
+	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
 	if err != nil {
 		return rbacResult, err
 	} else if (rbacResult != ctrl.Result{}) {
@@ -138,7 +146,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	//
 	// Validate that keystoneAPI is up
 	//
-	keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, h, instance.Namespace, map[string]string{})
+	keystoneAPI, err := keystonev1.GetKeystoneAPI(ctx, helper, instance.Namespace, map[string]string{})
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -167,7 +175,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: time.Duration(5) * time.Second}, nil
 	}
 
-	_, configMapHash, err := configmap.GetConfigMapAndHashWithName(ctx, h, instance.Spec.OpenStackConfigMap, instance.Namespace)
+	_, configMapHash, err := configmap.GetConfigMapAndHashWithName(ctx, helper, instance.Spec.OpenStackConfigMap, instance.Namespace)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -186,7 +194,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	_, secretHash, err := secret.GetSecret(ctx, h, instance.Spec.OpenStackConfigSecret, instance.Namespace)
+	_, secretHash, err := secret.GetSecret(ctx, helper, instance.Spec.OpenStackConfigSecret, instance.Namespace)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -237,7 +245,7 @@ func (r *OpenStackClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	if op != controllerutil.OperationResultNone {
 		util.LogForObject(
-			h,
+			helper,
 			fmt.Sprintf("Pod %s successfully reconciled - operation: %s", pod.Name, string(op)),
 			instance,
 		)
