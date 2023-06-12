@@ -1,0 +1,17 @@
+#
+# Check for:
+#
+# No Infra CR
+# No Pod
+
+apiVersion: client.openstack.org/v1beta1
+kind: OpenStackClient
+metadata:
+  name: test
+  namespace: openstack
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test
+  namespace: openstack
