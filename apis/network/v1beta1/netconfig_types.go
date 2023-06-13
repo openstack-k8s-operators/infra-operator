@@ -50,7 +50,6 @@ type Subnet struct {
 
 	// +kubebuilder:validation:Required
 	// Cidr the cidr to use for this network
-	// TODO: add validation to webhook
 	Cidr string `json:"cidr"`
 
 	// +kubebuilder:validation:Optional
@@ -66,12 +65,10 @@ type Subnet struct {
 	// +kubebuilder:validation:Optional
 	// ExcludeAddresses a set of IPs that should be excluded from used as reservation, for both dynamic
 	// and static via IPSet FixedIP parameter
-	// TODO: add validation to webhook
 	ExcludeAddresses []string `json:"excludeAddresses,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Gateway optional gateway for the network
-	// TODO: add validation to webhook
 	Gateway *string `json:"gateway,omitempty"`
 
 	// +kubebuilder:validation:Optional
@@ -83,12 +80,10 @@ type Subnet struct {
 type AllocationRange struct {
 	// +kubebuilder:validation:Required
 	// Start a set of IPs that are reserved and will not be assigned
-	// TODO: add validation to webhook
 	Start string `json:"start"`
 
 	// +kubebuilder:validation:Required
 	// End a set of IPs that are reserved and will not be assigned
-	// TODO: add validation to webhook
 	End string `json:"end"`
 }
 
