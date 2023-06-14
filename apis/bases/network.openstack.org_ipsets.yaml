@@ -58,7 +58,7 @@ spec:
                         can only be one default route defined per IPSet.
                       type: boolean
                     fixedIP:
-                      description: 'Fixed Ip TODO: add validation to webhook'
+                      description: Fixed Ip
                       type: string
                     name:
                       description: Network Name

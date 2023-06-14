@@ -18,16 +18,7 @@ spec:
     singular: netconfig
   scope: Namespaced
   versions:
-  - additionalPrinterColumns:
-    - description: Ready
-      jsonPath: .status.conditions[0].status
-      name: Ready
-      type: string
-    - description: Message
-      jsonPath: .status.conditions[0].message
-      name: Message
-      type: string
-    name: v1beta1
+  - name: v1beta1
     schema:
       openAPIV3Schema:
         description: NetConfig is the Schema for the netconfigs API
@@ -77,12 +68,10 @@ spec:
                               description: AllocationRange definition
                               properties:
                                 end:
-                                  description: End a set of IPs that are reserved
-                                    and will not be assigned
+                                  description: End IP for the AllocationRange
                                   type: string
                                 start:
-                                  description: Start a set of IPs that are reserved
-                                    and will not be assigned
+                                  description: Start IP for the AllocationRange
                                   type: string
                               required:
                               - end

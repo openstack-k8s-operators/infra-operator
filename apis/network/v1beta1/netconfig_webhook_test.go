@@ -20,7 +20,9 @@ import (
 	"testing"
 
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/pointer"
 )
 
@@ -65,6 +67,21 @@ var (
 		ExcludeAddresses: []string{
 			"172.17.1.5",
 			"172.17.1.15",
+		},
+	}
+	ipv4subnet3 = Subnet{
+		Name:    "subnet3",
+		Cidr:    "172.18.0.0/24",
+		Gateway: pointer.String("172.18.0.254"),
+		AllocationRanges: []AllocationRange{
+			{
+				Start: "172.18.0.1",
+				End:   "172.18.0.10",
+			},
+		},
+		ExcludeAddresses: []string{
+			"172.18.0.5",
+			"172.18.0.15",
 		},
 	}
 	ipv6Subnet1 = Subnet{
@@ -367,6 +384,74 @@ func subnet1BadRouteDestination(ipv4 bool) Subnet {
 	return *subnet
 }
 
+// return a default NetConfig with IPv4 networks
+func getDefaultIPv4NetConfigSpec() NetConfigSpec {
+	return NetConfigSpec{
+		Networks: []Network{
+			{
+				Name:      "net1",
+				DNSDomain: "net1.example.com",
+				MTU:       1500,
+				Subnets: []Subnet{
+					ipv4Subnet1,
+					ipv4subnet2,
+				},
+			},
+			{
+				Name:      "net2",
+				DNSDomain: "net2.example.com",
+				MTU:       1500,
+				Subnets: []Subnet{
+					ipv4subnet3,
+				},
+			},
+		},
+	}
+}
+
+// return a default NetConfig with IPv6 networks
+func getDefaultIPv6NetConfigSpec() NetConfigSpec {
+	return NetConfigSpec{
+		Networks: []Network{
+			{
+				Name:      "net1",
+				DNSDomain: "net1.example.com",
+				MTU:       1500,
+				Subnets: []Subnet{
+					ipv6Subnet1,
+					ipv6subnet2,
+				},
+			},
+		},
+	}
+}
+
+// return a default NetConfig with an IPv4 and IPV6 network
+func getDefaultIPv4IPv6NetConfigSpec() NetConfigSpec {
+	return NetConfigSpec{
+		Networks: []Network{
+			{
+				Name:      "net1",
+				DNSDomain: "net1.example.com",
+				MTU:       1500,
+				Subnets: []Subnet{
+					ipv4Subnet1,
+					ipv4subnet2,
+				},
+			},
+			{
+				Name:      "net2",
+				DNSDomain: "net2.example.com",
+				MTU:       1500,
+				Subnets: []Subnet{
+					ipv6Subnet1,
+					ipv6subnet2,
+				},
+			},
+		},
+	}
+}
+
 func TestNetConfigValidation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -381,19 +466,7 @@ func TestNetConfigValidation(t *testing.T) {
 					Name:      "netcfg",
 					Namespace: "foo",
 				},
-				Spec: NetConfigSpec{
-					Networks: []Network{
-						{
-							Name:      "net1",
-							DNSDomain: "net1.example.com",
-							MTU:       1500,
-							Subnets: []Subnet{
-								ipv4Subnet1,
-								ipv4subnet2,
-							},
-						},
-					},
-				},
+				Spec: getDefaultIPv4NetConfigSpec(),
 			},
 		},
 		{
@@ -404,19 +477,7 @@ func TestNetConfigValidation(t *testing.T) {
 					Name:      "netcfg",
 					Namespace: "foo",
 				},
-				Spec: NetConfigSpec{
-					Networks: []Network{
-						{
-							Name:      "net1",
-							DNSDomain: "net1.example.com",
-							MTU:       1500,
-							Subnets: []Subnet{
-								ipv6Subnet1,
-								ipv6subnet2,
-							},
-						},
-					},
-				},
+				Spec: getDefaultIPv6NetConfigSpec(),
 			},
 		},
 		{
@@ -1490,11 +1551,260 @@ func TestNetConfigValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := NewWithT(t)
+			basePath := field.NewPath("spec")
 
 			if tt.expectErr {
-				g.Expect(tt.c.ValidateCreate()).NotTo(Succeed())
+				g.Expect(len(valiateNetworks(tt.c.Spec.Networks, basePath))).Should(BeNumerically(">", 0))
 			} else {
-				g.Expect(tt.c.ValidateCreate()).To(Succeed())
+				g.Expect(len(valiateNetworks(tt.c.Spec.Networks, basePath))).Should(BeNumerically("==", 0))
+
+			}
+		})
+	}
+}
+
+func TestNetConfigUpdateValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		expectErr bool
+		newSpec   *NetConfigSpec
+		oldSpec   *NetConfigSpec
+	}{
+		{
+			name:      "should succeed when values and templates correct",
+			expectErr: false,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						MTU:       1500,
+						Subnets: []Subnet{
+							ipv4Subnet1,
+							ipv4subnet2,
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						MTU:       1500,
+						Subnets: []Subnet{
+							ipv4Subnet1,
+							ipv4subnet2,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail when the network gets removed",
+			expectErr: true,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						MTU:       1500,
+						Subnets: []Subnet{
+							ipv4Subnet1,
+							ipv4subnet2,
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						MTU:       1500,
+						Subnets: []Subnet{
+							ipv4Subnet1,
+							ipv4subnet2,
+						},
+					},
+					{
+						Name:      "net2",
+						DNSDomain: "net2.example.com",
+						MTU:       1500,
+						Subnets: []Subnet{
+							ipv4subnet3,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail when the subnet name changes",
+			expectErr: true,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "bar",
+								Cidr: "172.17.0.0/24",
+								Vlan: pointer.Int(1),
+							},
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "foo",
+								Cidr: "172.17.0.0/24",
+								Vlan: pointer.Int(1),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail when the cidr changes",
+			expectErr: true,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "foo",
+								Cidr: "172.17.1.0/24",
+								Vlan: pointer.Int(1),
+							},
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "foo",
+								Cidr: "172.17.0.0/24",
+								Vlan: pointer.Int(1),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail when the vlan changes",
+			expectErr: true,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "foo",
+								Cidr: "172.17.0.0/24",
+								Vlan: pointer.Int(2),
+							},
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name: "foo",
+								Cidr: "172.17.0.0/24",
+								Vlan: pointer.Int(1),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail when the gateway changes",
+			expectErr: true,
+			newSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name:    "foo",
+								Cidr:    "172.17.0.0/24",
+								Gateway: pointer.String("172.17.0.254"),
+							},
+						},
+					},
+				},
+			},
+			oldSpec: &NetConfigSpec{
+				Networks: []Network{
+					{
+						Name:      "net1",
+						DNSDomain: "net1.example.com",
+						Subnets: []Subnet{
+							{
+								Name:    "foo",
+								Cidr:    "172.17.0.0/24",
+								Gateway: pointer.String("172.17.0.1"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			basePath := field.NewPath("spec")
+
+			new := &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+				},
+				Spec: *tt.newSpec,
+			}
+
+			var err error
+
+			allErrs := valiateNetworks(tt.newSpec.Networks, basePath)
+			if len(allErrs) > 0 {
+				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), new.Name, allErrs)
+			}
+
+			allErrs = valiateNetworksChanged(tt.newSpec.Networks, tt.oldSpec.Networks, basePath)
+			if len(allErrs) > 0 {
+				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), new.Name, allErrs)
+			}
+
+			if tt.expectErr {
+				g.Expect(err).NotTo(Succeed())
+
+			} else {
+				g.Expect(err).To(Succeed())
 			}
 		})
 	}

@@ -20,8 +20,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/openstack-k8s-operators/lib-common/modules/test/helpers"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/pointer"
 
@@ -31,81 +33,38 @@ import (
 
 var _ = Describe("IPSet controller", func() {
 	var ipSetName types.NamespacedName
+	var netCfgName types.NamespacedName
 
 	When("an IPSet gets created with no NetConfig available", func() {
-		BeforeEach(func() {
-			// create IPSet
-			ipset := CreateIPSet(namespace, GetDefaultIPSetSpec())
-			ipSetName = types.NamespacedName{
-				Name:      ipset.GetName(),
-				Namespace: namespace,
+		It("it gets blocked by the webhook and fail", func() {
+
+			raw := map[string]interface{}{
+				"apiVersion": "network.openstack.org/v1beta1",
+				"kind":       "IPSet",
+				"metadata": map[string]interface{}{
+					"name":      "foo",
+					"namespace": namespace,
+				},
+				"spec": GetDefaultIPSetSpec(),
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-		})
-
-		It("is not Ready", func() {
-			th.ExpectCondition(
-				ipSetName,
-				ConditionGetterFunc(IPSetConditionGetter),
-				condition.InputReadyCondition,
-				corev1.ConditionFalse,
-			)
-
-			th.ExpectCondition(
-				ipSetName,
-				ConditionGetterFunc(IPSetConditionGetter),
-				networkv1.ReservationReadyCondition,
-				corev1.ConditionUnknown,
-			)
-
-			th.ExpectCondition(
-				ipSetName,
-				ConditionGetterFunc(IPSetConditionGetter),
-				condition.ReadyCondition,
-				corev1.ConditionFalse,
-			)
-		})
-
-		When("the NetConfig is created with all the expected fields", func() {
-			BeforeEach(func() {
-				netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
-
-				DeferCleanup(th.DeleteInstance, netCfg)
-			})
-
-			It("reports that input is ready", func() {
-				th.ExpectCondition(
-					ipSetName,
-					ConditionGetterFunc(IPSetConditionGetter),
-					condition.InputReadyCondition,
-					corev1.ConditionTrue,
-				)
-			})
-
-			It("reports the reservation is ready", func() {
-				th.ExpectCondition(
-					ipSetName,
-					ConditionGetterFunc(IPSetConditionGetter),
-					networkv1.ReservationReadyCondition,
-					corev1.ConditionTrue,
-				)
-			})
-
-			It("reports the overall state is ready", func() {
-				th.ExpectCondition(
-					ipSetName,
-					ConditionGetterFunc(IPSetConditionGetter),
-					condition.ReadyCondition,
-					corev1.ConditionTrue,
-				)
-			})
+			unstructuredObj := &unstructured.Unstructured{Object: raw}
+			_, err := controllerutil.CreateOrPatch(
+				th.Ctx, th.K8sClient, unstructuredObj, func() error { return nil })
+			Expect(err).To(HaveOccurred())
 		})
 	})
 
 	When("a GetDefaultIPSetSpec IPSet gets created", func() {
 		BeforeEach(func() {
 			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
 			ipset := CreateIPSet(namespace, GetDefaultIPSetSpec())
 
 			ipSetName = types.NamespacedName{
@@ -113,8 +72,10 @@ var _ = Describe("IPSet controller", func() {
 				Namespace: namespace,
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-			DeferCleanup(th.DeleteInstance, netCfg)
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
 		})
 
 		It("should have created an IPSet", func() {
@@ -138,14 +99,24 @@ var _ = Describe("IPSet controller", func() {
 	When("an IPSet with FixedIP inside AllocationRange gets created", func() {
 		BeforeEach(func() {
 			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
 			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.150")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-			DeferCleanup(th.DeleteInstance, netCfg)
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
 		})
 
 		It("should have created an IPSet with IP 172.17.0.150 on net-1", func() {
@@ -168,14 +139,24 @@ var _ = Describe("IPSet controller", func() {
 	When("an IPSet with FixedIP outside AllocationRange gets created", func() {
 		BeforeEach(func() {
 			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
 			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.220")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-			DeferCleanup(th.DeleteInstance, netCfg)
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
 		})
 
 		It("should have created an IPSet with IP 172.17.0.220 on net-1", func() {
@@ -198,14 +179,24 @@ var _ = Describe("IPSet controller", func() {
 	When("an IPSet with FixedIP requests IP listed in ExcludeAddresses", func() {
 		BeforeEach(func() {
 			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
 			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.201")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-			DeferCleanup(th.DeleteInstance, netCfg)
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
 		})
 
 		It("should have created an IPSet with IP 172.17.0.201 on net-1", func() {
@@ -255,8 +246,10 @@ var _ = Describe("IPSet controller", func() {
 				Namespace: namespace,
 			}
 
-			DeferCleanup(th.DeleteInstance, ipset)
-			DeferCleanup(th.DeleteInstance, netCfg)
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
 		})
 
 		It("should have created an IPSet with DNSDomain from subnet", func() {

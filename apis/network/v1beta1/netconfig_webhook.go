@@ -21,7 +21,10 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 
+	"golang.org/x/exp/slices"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -33,18 +36,6 @@ import (
 
 // log is for logging in this package.
 var netconfiglog = logf.Log.WithName("netconfig-resource")
-
-const (
-	errNotIPAddr          = "not an IP address"
-	errInvalidCidr        = "IP address prefix (CIDR) %s"
-	errNotInCidr          = "address not in IP address prefix (CIDR) %s"
-	errMixedAddressFamily = "cannot mix IPv4 and IPv6"
-	errInvalidRange       = "Start address: %s > End address %s"
-	errDupeNetworkName    = "network name %s already in use at %s, must be uniq"
-	errDupeCIDR           = "CIDR %s already in use at %s"
-	errInvalidDNSDomain   = "DNSDoman name %s is not valid"
-	errDupeDNSDomain      = "DNSDoman name %s already in use at %s, must be uniq"
-)
 
 // SetupWebhookWithManager -
 func (r *NetConfig) SetupWebhookWithManager(mgr ctrl.Manager) error {
@@ -64,13 +55,23 @@ func (r *NetConfig) Default() {
 	// TODO(user): fill in your defaulting logic.
 }
 
-//+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-netconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update,versions=v1beta1,name=vnetconfig.kb.io,admissionReviewVersions=v1
+//+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-netconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update;delete,versions=v1beta1,name=vnetconfig.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &NetConfig{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *NetConfig) ValidateCreate() error {
 	netconfiglog.Info("validate create", "name", r.Name)
+
+	// check if there is already a NetConfig in the namespace.
+	netcfg, err := getNetConfig(webhookClient, r)
+	if err != nil {
+		return err
+	}
+	// stop if there is already a NetConfig in the namespace.
+	if netcfg != nil {
+		return fmt.Errorf(fmt.Sprintf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace()))
+	}
 
 	allErrs := field.ErrorList{}
 	basePath := field.NewPath("spec")
@@ -89,17 +90,30 @@ func (r *NetConfig) ValidateCreate() error {
 func (r *NetConfig) ValidateUpdate(old runtime.Object) error {
 	netconfiglog.Info("validate update", "name", r.Name)
 
+	oldNetConfig, ok := old.(*NetConfig)
+	if !ok || oldNetConfig == nil {
+		return apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+	}
+
 	allErrs := field.ErrorList{}
 	basePath := field.NewPath("spec")
 
 	// common network validation
 	allErrs = append(allErrs, valiateNetworks(r.Spec.Networks, basePath)...)
 
+	// validate against the previous object only _if_ there are IPSets in the namespace.
+	// If there are none, the NetConfig could be updated to the needs without checking old <-> new.
+	ipsets, err := getIPSets(webhookClient, r)
+	if err != nil {
+		return err
+	}
+	if len(ipsets.Items) > 0 {
+		allErrs = append(allErrs, valiateNetworksChanged(r.Spec.Networks, oldNetConfig.Spec.Networks, basePath)...)
+	}
+
 	if len(allErrs) == 0 {
 		return nil
 	}
-
-	// TODO (mschuppert): update validation for content which must not change
 
 	return apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), r.Name, allErrs)
 }
@@ -108,10 +122,22 @@ func (r *NetConfig) ValidateUpdate(old runtime.Object) error {
 func (r *NetConfig) ValidateDelete() error {
 	netconfiglog.Info("validate delete", "name", r.Name)
 
-	// TODO (mschuppert): delete validation, no ipset and reservations should exist.
+	ipsets, err := getIPSets(webhookClient, r)
+	if err != nil {
+		return err
+	}
+	if len(ipsets.Items) > 0 {
+		return apierrors.NewBadRequest(fmt.Sprintf("unable to delete NetConfig while there are still %d IPSets in the namespace", len(ipsets.Items)))
+	}
+
 	return nil
 }
 
+// valiateNetworks
+// - networks have uniq names
+// - subnets within a network have uniq names
+// - common subnet validation
+// - validate uniq CIDRs on all subnets. While it would be possible to have same CIDR on different VLANs, we exlude this config
 func valiateNetworks(
 	networks []Network,
 	path *field.Path,
@@ -143,6 +169,76 @@ func valiateNetworks(
 			if err := valiateSubnet(_subnet, subnetNames, netCIDR, path); err != nil {
 				allErrs = append(allErrs, err...)
 			}
+		}
+	}
+
+	return allErrs
+}
+
+// valiateNetworksChanged
+// - validate if a network was removed
+// - subnet is still there
+// - cidr changed
+// - Vlan changed
+// - gateway changed
+func valiateNetworksChanged(
+	networks []Network,
+	oldNetworks []Network,
+	path *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	for oldNetIdx, _net := range oldNetworks {
+		path := path.Child("networks").Index(oldNetIdx)
+
+		// validate if networks are still there
+		f := func(n Network) bool {
+			return equality.Semantic.DeepEqual(n.Name, _net.Name)
+		}
+		netIdx := slices.IndexFunc(networks, f)
+		if netIdx < 0 {
+			// the network was removed
+			allErrs = append(allErrs, field.Invalid(path.Child("name"), _net.Name, fmt.Sprintf(errNetworkChanged, _net.Name)))
+			return allErrs
+		}
+
+		path = path.Child("subnets")
+		for oldSubnetIdx, _subnet := range _net.Subnets {
+			path := path.Index(oldSubnetIdx)
+
+			// validate if subnet is still there
+			f := func(n Subnet) bool {
+				return equality.Semantic.DeepEqual(n.Name, _subnet.Name)
+			}
+			subnetIdx := slices.IndexFunc(networks[netIdx].Subnets, f)
+			if subnetIdx < 0 {
+				allErrs = append(allErrs, field.Invalid(path.Child("name"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "name", _subnet.Name)))
+				return allErrs
+			}
+
+			// validate if cidr changed
+			if !equality.Semantic.DeepEqual(_subnet.Cidr, networks[netIdx].Subnets[subnetIdx].Cidr) {
+				allErrs = append(allErrs, field.Invalid(path.Child("cidr"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "cidr", _subnet.Cidr)))
+			}
+
+			// validate if Vlan changed
+			if !equality.Semantic.DeepEqual(_subnet.Vlan, networks[netIdx].Subnets[subnetIdx].Vlan) {
+				vlan := ""
+				if _subnet.Vlan != nil {
+					vlan = strconv.Itoa(*_subnet.Vlan)
+				}
+				allErrs = append(allErrs, field.Invalid(path.Child("vlan"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "vlan", vlan)))
+			}
+
+			// validate if gateway changed
+			if !equality.Semantic.DeepEqual(_subnet.Gateway, networks[netIdx].Subnets[subnetIdx].Gateway) {
+				gateway := ""
+				if _subnet.Gateway != nil {
+					gateway = *_subnet.Gateway
+				}
+				allErrs = append(allErrs, field.Invalid(path.Child("vlan"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "vlan", gateway)))
+			}
+
 		}
 	}
 
@@ -197,6 +293,10 @@ func valiateUniqCIDR(
 	return allErrs
 }
 
+// valiateSubnet
+// - CIDR is correct
+// - gateway is correct
+// - common subnet validation
 func valiateSubnet(
 	subnet Subnet,
 	subnetNames map[string]field.Path,
@@ -284,6 +384,10 @@ func validateDNSDomain(dnsName string) bool {
 	return regex.MatchString(dnsName)
 }
 
+// valiateAddress
+// - address is correct
+// - has the same IP version of the subnet cidr
+// - matches the CIDR of the subnet
 func valiateAddress(
 	addrStr string,
 	ipPrefix *net.IPNet,
@@ -319,6 +423,11 @@ func valiateAddress(
 	return allErrs
 }
 
+// valiateAllocationRange
+// - start/end address is correct
+// - start/end address have the same IP version of the subnet cidr
+// - start/end address matches the CIDR of the subnet
+// - start address is < end address
 func valiateAllocationRange(
 	allocRange AllocationRange,
 	ipPrefix *net.IPNet,

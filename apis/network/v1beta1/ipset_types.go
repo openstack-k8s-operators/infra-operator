@@ -34,7 +34,6 @@ type IPSetNetwork struct {
 
 	// +kubebuilder:validation:Optional
 	// Fixed Ip
-	// TODO: add validation to webhook
 	FixedIP *string `json:"fixedIP,omitempty"`
 
 	// +kubebuilder:validation:Optional
