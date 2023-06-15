@@ -427,6 +427,7 @@ func (r *IPSetReconciler) ensureReservation(
 			MTU:     netDef.MTU,
 			Cidr:    subnetDef.Cidr,
 			Vlan:    subnetDef.Vlan,
+			Gateway: subnetDef.Gateway,
 			Routes:  subnetDef.Routes,
 		}
 		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute {
