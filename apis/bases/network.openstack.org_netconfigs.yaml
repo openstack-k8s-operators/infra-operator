@@ -74,14 +74,12 @@ spec:
                               description: AllocationRange definition
                               properties:
                                 end:
-                                  description: 'End a set of IPs that are reserved
-                                    and will not be assigned TODO: add validation
-                                    to webhook'
+                                  description: End a set of IPs that are reserved
+                                    and will not be assigned
                                   type: string
                                 start:
-                                  description: 'Start a set of IPs that are reserved
-                                    and will not be assigned TODO: add validation
-                                    to webhook'
+                                  description: Start a set of IPs that are reserved
+                                    and will not be assigned
                                   type: string
                               required:
                               - end
@@ -89,20 +87,17 @@ spec:
                               type: object
                             type: array
                           cidr:
-                            description: 'Cidr the cidr to use for this network TODO:
-                              add validation to webhook'
+                            description: Cidr the cidr to use for this network
                             type: string
                           excludeAddresses:
-                            description: 'ExcludeAddresses a set of IPs that should
+                            description: ExcludeAddresses a set of IPs that should
                               be excluded from used as reservation, for both dynamic
-                              and static via IPSet FixedIP parameter TODO: add validation
-                              to webhook'
+                              and static via IPSet FixedIP parameter
                             items:
                               type: string
                             type: array
                           gateway:
-                            description: 'Gateway optional gateway for the network
-                              TODO: add validation to webhook'
+                            description: Gateway optional gateway for the network
                             type: string
                           name:
                             description: Name of the subnet
