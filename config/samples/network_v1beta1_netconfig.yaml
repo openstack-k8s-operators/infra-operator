@@ -40,20 +40,20 @@ spec:
       - end: 172.18.0.250
         start: 172.18.0.10
       cidr: 172.18.0.0/24
-      vlan: 30
+      vlan: 21
   - name: StorageMgmt
-    subnets:
-    - name: subnet1
-      allocationRanges:
-      - end: 172.19.0.250
-        start: 172.19.0.10
-      cidr: 172.19.0.0/24
-      vlan: 40
-  - name: Tenant
     subnets:
     - name: subnet1
       allocationRanges:
       - end: 172.20.0.250
         start: 172.20.0.10
       cidr: 172.20.0.0/24
-      vlan: 50
+      vlan: 23
+  - name: Tenant
+    subnets:
+    - name: subnet1
+      allocationRanges:
+      - end: 172.19.0.250
+        start: 172.19.0.10
+      cidr: 172.19.0.0/24
+      vlan: 22
