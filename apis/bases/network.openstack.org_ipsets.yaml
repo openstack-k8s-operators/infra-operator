@@ -134,6 +134,9 @@ spec:
                     cidr:
                       description: Cidr the cidr to use for this network
                       type: string
+                    dnsDomain:
+                      description: DNSDomain of the subnet
+                      type: string
                     gateway:
                       description: Gateway optional gateway for the network
                       type: string
@@ -170,6 +173,7 @@ spec:
                       type: integer
                   required:
                   - address
+                  - dnsDomain
                   - network
                   - subnet
                   type: object

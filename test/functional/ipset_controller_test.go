@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -120,6 +121,7 @@ var _ = Describe("IPSet controller", func() {
 			Eventually(func(g Gomega) {
 				res := GetReservationFromNet(ipSetName, "net-1")
 				g.Expect(res.Address).To(Equal("172.17.0.100"))
+				g.Expect(res.DNSDomain).To(Equal("net-1.example.com"))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -237,6 +239,40 @@ var _ = Describe("IPSet controller", func() {
 				ConditionGetterFunc(IPSetConditionGetter),
 				condition.ReadyCondition,
 				corev1.ConditionFalse,
+			)
+		})
+	})
+
+	When("a GetDefaultIPSetSpec IPSet gets created using a custom NetConfig", func() {
+		BeforeEach(func() {
+			netSpec := GetNetSpec(net1, GetSubnet1(subnet1))
+			netSpec.Subnets[0].DNSDomain = pointer.String("subnet1.net-1.example.com")
+			netCfg := CreateNetConfig(namespace, GetNetConfigSpec(netSpec))
+			ipset := CreateIPSet(namespace, GetDefaultIPSetSpec())
+
+			ipSetName = types.NamespacedName{
+				Name:      ipset.GetName(),
+				Namespace: namespace,
+			}
+
+			DeferCleanup(th.DeleteInstance, ipset)
+			DeferCleanup(th.DeleteInstance, netCfg)
+		})
+
+		It("should have created an IPSet with DNSDomain from subnet", func() {
+			Eventually(func(g Gomega) {
+				res := GetReservationFromNet(ipSetName, "net-1")
+				g.Expect(res.Address).To(Equal("172.17.0.100"))
+				g.Expect(res.DNSDomain).To(Equal("subnet1.net-1.example.com"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("reports the overall state is ready", func() {
+			th.ExpectCondition(
+				ipSetName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
 			)
 		})
 	})

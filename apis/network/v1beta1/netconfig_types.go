@@ -33,6 +33,10 @@ type Network struct {
 	// Name of the network, e.g. External, InternalApi, ...
 	Name NetNameStr `json:"name"`
 
+	// +kubebuilder:validation:Required
+	// DNSDomain name of the Network
+	DNSDomain string `json:"dnsDomain"`
+
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1500
 	// MTU of the network
@@ -52,6 +56,10 @@ type Subnet struct {
 	// +kubebuilder:validation:Required
 	// Cidr the cidr to use for this network
 	Cidr string `json:"cidr"`
+
+	// +kubebuilder:validation:Optional
+	// DNSDomain name of the subnet, allows to overwrite the DNSDomain of the Network
+	DNSDomain *string `json:"dnsDomain,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Maximum=4094

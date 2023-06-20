@@ -27,9 +27,10 @@ import (
 // IPv4
 var (
 	ipv4Subnet1 = Subnet{
-		Name:    "subnet1",
-		Cidr:    "172.17.0.0/24",
-		Gateway: pointer.String("172.17.0.1"),
+		Name:      "subnet1",
+		Cidr:      "172.17.0.0/24",
+		DNSDomain: pointer.String("subnet1.example.com"),
+		Gateway:   pointer.String("172.17.0.1"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "172.17.0.1",
@@ -52,8 +53,9 @@ var (
 		},
 	}
 	ipv4subnet2 = Subnet{
-		Name: "subnet2",
-		Cidr: "172.17.1.0/24",
+		Name:      "subnet2",
+		Cidr:      "172.17.1.0/24",
+		DNSDomain: pointer.String("subnet2.example.com"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "172.17.1.1",
@@ -66,9 +68,10 @@ var (
 		},
 	}
 	ipv6Subnet1 = Subnet{
-		Name:    "subnet1",
-		Cidr:    "fd00:fd00:fd00:2000::/64",
-		Gateway: pointer.String("fd00:fd00:fd00:2000::1"),
+		Name:      "subnet1",
+		Cidr:      "fd00:fd00:fd00:2000::/64",
+		DNSDomain: pointer.String("subnet1.example.com"),
+		Gateway:   pointer.String("fd00:fd00:fd00:2000::1"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "fd00:fd00:fd00:2000::1",
@@ -91,8 +94,9 @@ var (
 		},
 	}
 	ipv6subnet2 = Subnet{
-		Name: "subnet2",
-		Cidr: "fd00:fd00:fd00:2001::/64",
+		Name:      "subnet2",
+		Cidr:      "fd00:fd00:fd00:2001::/64",
+		DNSDomain: pointer.String("subnet2.example.com"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "fd00:fd00:fd00:2001::10",
@@ -380,8 +384,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								ipv4Subnet1,
 								ipv4subnet2,
@@ -402,8 +407,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								ipv6Subnet1,
 								ipv6subnet2,
@@ -424,8 +430,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadCIDR(true),
 							},
@@ -445,8 +452,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadCIDR(false),
 							},
@@ -466,8 +474,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadGatewayFormat(true),
 							},
@@ -487,8 +496,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadGatewayFormat(false),
 							},
@@ -508,8 +518,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1GatewayWrongIPVersion(true),
 							},
@@ -529,8 +540,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1GatewayWrongIPVersion(false),
 							},
@@ -550,8 +562,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1GatewayOutsideCIDR(true),
 							},
@@ -571,8 +584,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1GatewayOutsideCIDR(false),
 							},
@@ -592,8 +606,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadAllocationStart(true),
 							},
@@ -613,8 +628,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadAllocationStart(false),
 							},
@@ -634,8 +650,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadAllocationEnd(true),
 							},
@@ -655,8 +672,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadAllocationEnd(false),
 							},
@@ -676,8 +694,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationRangeWrongIPVersion(true),
 							},
@@ -697,8 +716,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationRangeWrongIPVersion(true),
 							},
@@ -718,8 +738,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationStartOutsideCIDR(true),
 							},
@@ -739,8 +760,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationStartOutsideCIDR(false),
 							},
@@ -760,8 +782,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationEndOutsideCIDR(true),
 							},
@@ -781,8 +804,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationEndOutsideCIDR(false),
 							},
@@ -802,8 +826,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationStartAfterEnd(true),
 							},
@@ -823,8 +848,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1AllocationStartAfterEnd(false),
 							},
@@ -844,8 +870,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadExcludeAddress(true),
 							},
@@ -865,8 +892,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadExcludeAddress(false),
 							},
@@ -886,8 +914,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1ExcludeAddressWrongIPVersion(true),
 							},
@@ -907,8 +936,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1ExcludeAddressWrongIPVersion(false),
 							},
@@ -928,8 +958,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1ExcludeAddressOutsideCIDR(true),
 							},
@@ -949,8 +980,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1ExcludeAddressOutsideCIDR(false),
 							},
@@ -970,8 +1002,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadRouteNexthop(true),
 							},
@@ -991,8 +1024,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadRouteNexthop(false),
 							},
@@ -1012,8 +1046,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1RouteNexthopWrongIPVersion(true),
 							},
@@ -1033,8 +1068,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1RouteNexthopWrongIPVersion(false),
 							},
@@ -1054,8 +1090,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1RouteNexthopOutsideCIDR(true),
 							},
@@ -1075,8 +1112,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1RouteNexthopOutsideCIDR(false),
 							},
@@ -1096,8 +1134,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadRouteDestination(true),
 							},
@@ -1117,8 +1156,9 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
-							MTU:  1500,
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							MTU:       1500,
 							Subnets: []Subnet{
 								subnet1BadRouteDestination(false),
 							},
@@ -1138,10 +1178,12 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 						},
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net2.example.com",
 						},
 					},
 				},
@@ -1158,7 +1200,8 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1185,7 +1228,8 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1194,7 +1238,8 @@ func TestNetConfigValidation(t *testing.T) {
 							},
 						},
 						{
-							Name: "net2",
+							Name:      "net2",
+							DNSDomain: "net2.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1217,7 +1262,8 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1244,7 +1290,8 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1253,7 +1300,8 @@ func TestNetConfigValidation(t *testing.T) {
 							},
 						},
 						{
-							Name: "net2",
+							Name:      "net2",
+							DNSDomain: "net2.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1276,7 +1324,8 @@ func TestNetConfigValidation(t *testing.T) {
 				Spec: NetConfigSpec{
 					Networks: []Network{
 						{
-							Name: "net1",
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
@@ -1286,12 +1335,149 @@ func TestNetConfigValidation(t *testing.T) {
 							},
 						},
 						{
-							Name: "net2",
+							Name:      "net2",
+							DNSDomain: "net2.example.com",
 							Subnets: []Subnet{
 								{
 									Name: "subnet1",
 									Cidr: "172.17.0.0/24",
 									Vlan: pointer.Int(2),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail with bad DNSDomain name - start with hyphen",
+			expectErr: true,
+			c: &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: NetConfigSpec{
+					Networks: []Network{
+						{
+							Name:      "net1",
+							DNSDomain: "-123net1.example.com",
+							Subnets: []Subnet{
+								{
+									Name: "subnet1",
+									Cidr: "172.17.0.0/24",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail with bad DNSDomain name - end with hyphen",
+			expectErr: true,
+			c: &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: NetConfigSpec{
+					Networks: []Network{
+						{
+							Name:      "net1",
+							DNSDomain: "123net1.example.com-",
+							Subnets: []Subnet{
+								{
+									Name: "subnet1",
+									Cidr: "172.17.0.0/24",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail with bad DNSDomain name - part too long",
+			expectErr: true,
+			c: &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: NetConfigSpec{
+					Networks: []Network{
+						{
+							Name:      "net1",
+							DNSDomain: "123456789012345678901234567890123456789012345678901234567890net1.example.com",
+							Subnets: []Subnet{
+								{
+									Name: "subnet1",
+									Cidr: "172.17.0.0/24",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail with duplicate DNSDomain names in different networks",
+			expectErr: true,
+			c: &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: NetConfigSpec{
+					Networks: []Network{
+						{
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							Subnets: []Subnet{
+								{
+									Name: "subnet1",
+									Cidr: "172.17.0.0/24",
+								},
+							},
+						},
+						{
+							Name:      "net2",
+							DNSDomain: "net1.example.com",
+							Subnets: []Subnet{
+								{
+									Name: "subnet1",
+									Cidr: "172.17.1.0/24",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:      "should fail with duplicate DNSDomain names in different subnets within a network",
+			expectErr: true,
+			c: &NetConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: NetConfigSpec{
+					Networks: []Network{
+						{
+							Name:      "net1",
+							DNSDomain: "net1.example.com",
+							Subnets: []Subnet{
+								{
+									Name:      "subnet1",
+									Cidr:      "172.17.0.0/24",
+									DNSDomain: pointer.String("foo.net1.example.com"),
+								},
+								{
+									Name:      "subnet2",
+									Cidr:      "172.17.1.0/24",
+									DNSDomain: pointer.String("foo.net1.example.com"),
 								},
 							},
 						},
