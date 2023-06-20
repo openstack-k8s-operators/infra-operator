@@ -98,9 +98,9 @@ type MetalLBConfig struct {
 	// SharedIP is true, but no SharedIPKey specified.
 	SharedIPKey string `json:"sharedIPKey"`
 
-	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation: Required
 	// LoadBalancerIPs, request given IPs from the pool if available. Using a list to allow dual stack (IPv4/IPv6) support
-	LoadBalancerIPs []string `json:"loadBalancerIPs,omitempty"`
+	LoadBalancerIPs []string `json:"loadBalancerIPs"`
 }
 
 // DNSMasqDebug defines the observed state of DNSMasq
@@ -121,6 +121,9 @@ type DNSMasqStatus struct {
 
 	// ReadyCount of dnsmasq deployment
 	ReadyCount int32 `json:"readyCount,omitempty"`
+
+	// DNSServer Addresses
+	DNSAddresses []string `json:"dnsAddresses,omitempty"`
 }
 
 //+kubebuilder:object:root=true

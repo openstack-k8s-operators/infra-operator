@@ -26,6 +26,7 @@ import (
 // log is for logging in this package.
 var ipsetlog = logf.Log.WithName("ipset-resource")
 
+// SetupWebhookWithManager sets up the webhook with the Manager
 func (r *IPSet) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).

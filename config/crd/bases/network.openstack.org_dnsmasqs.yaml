@@ -94,6 +94,7 @@ spec:
                       type: string
                   required:
                   - ipAddressPool
+                  - loadBalancerIPs
                   type: object
                 type: array
               nodeSelector:
@@ -184,6 +185,11 @@ spec:
                   - status
                   - type
                   type: object
+                type: array
+              dnsAddresses:
+                description: DNSServer Addresses
+                items:
+                  type: string
                 type: array
               hash:
                 additionalProperties:
