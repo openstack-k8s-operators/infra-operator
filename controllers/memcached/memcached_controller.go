@@ -289,7 +289,7 @@ func (r *Reconciler) GetServerLists(
 	}
 
 	for i := int32(0); i < instance.Spec.Replicas; i++ {
-		server := fmt.Sprintf("%s-memcached-%d.memcached", instance.Name, i)
+		server := fmt.Sprintf("memcached-%s-%d.%s", instance.Name, i, instance.Name)
 		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
 
 		// python-memcached requires inet(6) prefix according to the IP version
