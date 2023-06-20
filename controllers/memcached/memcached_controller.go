@@ -247,7 +247,7 @@ func (r *Reconciler) generateConfigMaps(
 	cms := []util.Template{
 		// ConfigMap
 		{
-			Name:          fmt.Sprintf("%s-memcached-config-data", instance.Name),
+			Name:          fmt.Sprintf("%s-config-data", instance.Name),
 			Namespace:     instance.Namespace,
 			Type:          util.TemplateTypeConfig,
 			InstanceType:  instance.Kind,
@@ -289,7 +289,7 @@ func (r *Reconciler) GetServerLists(
 	}
 
 	for i := int32(0); i < instance.Spec.Replicas; i++ {
-		server := fmt.Sprintf("%s-memcached-%d.memcached", instance.Name, i)
+		server := fmt.Sprintf("%s-%d.%s", instance.Name, i, instance.Name)
 		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
 
 		// python-memcached requires inet(6) prefix according to the IP version

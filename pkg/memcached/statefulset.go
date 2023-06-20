@@ -14,7 +14,7 @@ import (
 // StatefulSet returns a Stateful resource for the Memcached CR
 func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 	matchls := map[string]string{
-		"app":   fmt.Sprintf("memcached-%s", m.Name),
+		"app":   m.Name,
 		"cr":    m.Name,
 		"owner": "infra-operator",
 	}
@@ -45,7 +45,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 
 	sfs := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("memcached-%s", m.Name),
+			Name:      m.Name,
 			Namespace: m.Namespace,
 		},
 		Spec: appsv1.StatefulSetSpec{
@@ -93,7 +93,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: fmt.Sprintf("%s-memcached-config-data", m.Name),
+										Name: fmt.Sprintf("%s-config-data", m.Name),
 									},
 									Items: []corev1.KeyToPath{
 										{
@@ -109,7 +109,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							VolumeSource: corev1.VolumeSource{
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{
-										Name: fmt.Sprintf("%s-memcached-config-data", m.Name),
+										Name: fmt.Sprintf("%s-config-data", m.Name),
 									},
 									Items: []corev1.KeyToPath{
 										{
