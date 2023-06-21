@@ -439,6 +439,8 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, nil
 	}
 	// create Deployment - end
+	//Update status with LoadBalancerIPs
+	instance.Status.DNSAddresses = instance.Spec.ExternalEndpoints[0].LoadBalancerIPs
 
 	r.Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil

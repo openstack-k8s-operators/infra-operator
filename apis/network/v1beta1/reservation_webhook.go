@@ -26,6 +26,7 @@ import (
 // log is for logging in this package.
 var reservationlog = logf.Log.WithName("reservation-resource")
 
+// SetupWebhookWithManager sets up the webhook with the Manager
 func (r *Reservation) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).

@@ -23,6 +23,7 @@ import (
 )
 
 // +kubebuilder:validation:Pattern="^[a-zA-Z0-9][a-zA-Z0-9\\-_]*[a-zA-Z0-9]$"
+
 // NetNameStr is used for validation of a net name.
 type NetNameStr string
 
