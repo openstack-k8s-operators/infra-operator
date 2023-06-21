@@ -4,4 +4,3 @@ delete:
 - apiVersion: client.openstack.org/v1beta1
   kind: OpenStackClient
   name: test
-  namespace: openstack
