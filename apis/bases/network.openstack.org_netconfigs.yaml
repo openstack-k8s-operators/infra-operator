@@ -52,6 +52,9 @@ spec:
                 items:
                   description: Network definition
                   properties:
+                    dnsDomain:
+                      description: DNSDomain name of the Network
+                      type: string
                     mtu:
                       default: 1500
                       description: MTU of the network
@@ -88,6 +91,10 @@ spec:
                             type: array
                           cidr:
                             description: Cidr the cidr to use for this network
+                            type: string
+                          dnsDomain:
+                            description: DNSDomain name of the subnet, allows to overwrite
+                              the DNSDomain of the Network
                             type: string
                           excludeAddresses:
                             description: ExcludeAddresses a set of IPs that should
@@ -131,6 +138,7 @@ spec:
                         type: object
                       type: array
                   required:
+                  - dnsDomain
                   - name
                   - subnets
                   type: object

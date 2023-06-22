@@ -73,6 +73,9 @@ type IPSetReservation struct {
 
 	// Routes, list of networks that should be routed via network gateway.
 	Routes []Route `json:"routes,omitempty" optional:"true"`
+
+	// DNSDomain of the subnet
+	DNSDomain string `json:"dnsDomain"`
 }
 
 // IPSetStatus defines the observed state of IPSet

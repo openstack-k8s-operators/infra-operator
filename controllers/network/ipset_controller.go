@@ -421,17 +421,21 @@ func (r *IPSetReconciler) ensureReservation(
 		// add IP to the reservation and IPSet status reservations
 		reservationSpec.Reservation[string(ipsetNet.Name)] = *ip
 		ipsetRes := networkv1.IPSetReservation{
-			Network: ipsetNet.Name,
-			Subnet:  ipsetNet.SubnetName,
-			Address: ip.Address,
-			MTU:     netDef.MTU,
-			Cidr:    subnetDef.Cidr,
-			Vlan:    subnetDef.Vlan,
-			Gateway: subnetDef.Gateway,
-			Routes:  subnetDef.Routes,
+			Network:   ipsetNet.Name,
+			Subnet:    ipsetNet.SubnetName,
+			Address:   ip.Address,
+			MTU:       netDef.MTU,
+			Cidr:      subnetDef.Cidr,
+			Vlan:      subnetDef.Vlan,
+			Gateway:   subnetDef.Gateway,
+			Routes:    subnetDef.Routes,
+			DNSDomain: netDef.DNSDomain,
 		}
 		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute {
 			ipsetRes.Gateway = subnetDef.Gateway
+		}
+		if subnetDef.DNSDomain != nil {
+			ipsetRes.DNSDomain = *subnetDef.DNSDomain
 		}
 		ipset.Status.Reservation = append(ipset.Status.Reservation, ipsetRes)
 	}

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"fmt"
 	"net"
+	"regexp"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,6 +42,8 @@ const (
 	errInvalidRange       = "Start address: %s > End address %s"
 	errDupeNetworkName    = "network name %s already in use at %s, must be uniq"
 	errDupeCIDR           = "CIDR %s already in use at %s"
+	errInvalidDNSDomain   = "DNSDoman name %s is not valid"
+	errDupeDNSDomain      = "DNSDoman name %s already in use at %s, must be uniq"
 )
 
 // SetupWebhookWithManager -
@@ -118,26 +121,28 @@ func valiateNetworks(
 	netCIDR := map[string]field.Path{}
 
 	for netIdx, _net := range networks {
-		path := path.Child("networks")
+		path := path.Child("networks").Index(netIdx)
 
 		// validate uniqe network names
 		allErrs = append(allErrs, valiateUniqElement(netNames, string(_net.Name), path, "name", errDupeNetworkName)...)
 
-		path = path.Index(netIdx).Child("subnets")
+		// validate DNSDomain format is correct
+		if !validateDNSDomain(_net.DNSDomain) {
+			path := path.Child("dnsDomain")
+			allErrs = append(allErrs, field.Invalid(path.Child("dnsDomain"), _net.DNSDomain, fmt.Sprintf(errInvalidDNSDomain, _net.DNSDomain)))
+		}
+		// validate DNSDomain is uniq across networks
+		allErrs = append(allErrs, valiateUniqElement(netNames, string(_net.DNSDomain), path, "dnsDomain", errDupeDNSDomain)...)
+
+		path = path.Child("subnets")
 		subnetNames := map[string]field.Path{}
 		for subnetIdx, _subnet := range _net.Subnets {
 			path := path.Index(subnetIdx)
 
-			// validate uniqe subnet names
-			allErrs = append(allErrs, valiateUniqElement(subnetNames, string(_subnet.Name), path, "name", errDupeNetworkName)...)
-
-			// common subnet validation
-			if err := valiateSubnet(_subnet, path); err != nil {
+			// subnet validation
+			if err := valiateSubnet(_subnet, subnetNames, netCIDR, path); err != nil {
 				allErrs = append(allErrs, err...)
 			}
-
-			// validate uniq CIDRs on all subnets. While it would be possible to have same CIDR on different VLANs, we exlude this config
-			allErrs = append(allErrs, valiateUniqElement(netCIDR, _subnet.Cidr, path, "name", errDupeCIDR)...)
 		}
 	}
 
@@ -194,14 +199,23 @@ func valiateUniqCIDR(
 
 func valiateSubnet(
 	subnet Subnet,
+	subnetNames map[string]field.Path,
+	netCIDR map[string]field.Path,
 	path *field.Path,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	cidr := subnet.Cidr
 	gateway := subnet.Gateway
+	dnsDomain := subnet.DNSDomain
+
+	// validate uniqe subnet names
+	allErrs = append(allErrs, valiateUniqElement(subnetNames, string(subnet.Name), path, "name", errDupeNetworkName)...)
 
 	// validate CIDR
+	// validate uniq CIDRs on all subnets. While it would be possible to have same CIDR on different VLANs, we exlude this config
+	allErrs = append(allErrs, valiateUniqElement(netCIDR, subnet.Cidr, path, "name", errDupeCIDR)...)
+
 	_, ipPrefix, ipPrefixErr := net.ParseCIDR(cidr)
 	if ipPrefixErr != nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("cidr"), cidr, errInvalidCidr))
@@ -251,8 +265,23 @@ func valiateSubnet(
 			allErrs = append(allErrs, err...)
 		}
 	}
+	// validate DNSDomain
+	if dnsDomain != nil {
+		if !validateDNSDomain(*dnsDomain) {
+			path := path.Child("dnsDomain")
+			allErrs = append(allErrs, field.Invalid(path.Child("dnsDomain"), *dnsDomain, fmt.Sprintf(errInvalidDNSDomain, *dnsDomain)))
+		}
+		// validate DNSDomain is uniq across networks
+		allErrs = append(allErrs, valiateUniqElement(subnetNames, string(*dnsDomain), path, "dnsDomain", errDupeDNSDomain)...)
+	}
 
 	return allErrs
+}
+
+func validateDNSDomain(dnsName string) bool {
+	pattern := `^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`
+	regex := regexp.MustCompile(pattern)
+	return regex.MatchString(dnsName)
 }
 
 func valiateAddress(

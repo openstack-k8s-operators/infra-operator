@@ -5,6 +5,7 @@ metadata:
 spec:
   networks:
   - name: CtlPlane
+    dnsDomain: ctlplane.example.com
     subnets:
     - name: subnet1
       allocationRanges:
@@ -15,6 +16,7 @@ spec:
       cidr: 192.168.122.0/24
       gateway: 192.168.122.1
   - name: InternalApi
+    dnsDomain: internalapi.example.com
     subnets:
     - name: subnet1
       allocationRanges:
@@ -26,6 +28,7 @@ spec:
       cidr: 172.17.0.0/24
       vlan: 20
   - name: External
+    dnsDomain: external.example.com
     subnets:
     - name: subnet1
       allocationRanges:
@@ -34,6 +37,7 @@ spec:
       cidr: 10.0.0.0/24
       gateway: 10.0.0.1
   - name: Storage
+    dnsDomain: storage.example.com
     subnets:
     - name: subnet1
       allocationRanges:
@@ -42,6 +46,7 @@ spec:
       cidr: 172.18.0.0/24
       vlan: 21
   - name: StorageMgmt
+    dnsDomain: storagemgmt.example.com
     subnets:
     - name: subnet1
       allocationRanges:
@@ -50,6 +55,7 @@ spec:
       cidr: 172.20.0.0/24
       vlan: 23
   - name: Tenant
+    dnsDomain: tenant.example.com
     subnets:
     - name: subnet1
       allocationRanges:

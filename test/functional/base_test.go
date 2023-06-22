@@ -243,9 +243,10 @@ func GetNetConfigSpec(nets ...networkv1.Network) map[string]interface{} {
 
 func GetNetSpec(name string, subnets ...networkv1.Subnet) networkv1.Network {
 	net := networkv1.Network{
-		Name:    networkv1.NetNameStr(name),
-		MTU:     1400,
-		Subnets: []networkv1.Subnet{},
+		Name:      networkv1.NetNameStr(name),
+		DNSDomain: fmt.Sprintf("%s.example.com", name),
+		MTU:       1400,
+		Subnets:   []networkv1.Subnet{},
 	}
 
 	net.Subnets = append(net.Subnets, subnets...)
