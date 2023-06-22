@@ -48,6 +48,9 @@ spec:
           spec:
             description: IPSetSpec defines the desired state of IPSet
             properties:
+              immutable:
+                default: false
+                type: boolean
               networks:
                 description: Networks used to request IPs for
                 items:

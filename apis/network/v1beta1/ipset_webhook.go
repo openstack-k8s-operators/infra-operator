@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8snet "k8s.io/utils/net"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -95,6 +96,21 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) error {
 	oldIPSet, ok := old.(*IPSet)
 	if !ok || oldIPSet == nil {
 		return apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+	}
+
+	// Do not allow to update the Spec if the Immuatable was set on the existing object
+	if oldIPSet.Spec.Immutable && !equality.Semantic.DeepEqual(oldIPSet.Spec, r.Spec) {
+		return apierrors.NewForbidden(
+			schema.GroupResource{
+				Group:    GroupVersion.WithKind("IPSet").Group,
+				Resource: GroupVersion.WithKind("IPSet").Kind,
+			}, r.GetName(), &field.Error{
+				Type:     field.ErrorTypeForbidden,
+				Field:    "*",
+				BadValue: r.Name,
+				Detail:   "Invalid value: \"object\": Value is immutable",
+			},
+		)
 	}
 
 	allErrs := field.ErrorList{}

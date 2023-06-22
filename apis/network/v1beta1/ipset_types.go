@@ -43,6 +43,10 @@ type IPSetNetwork struct {
 
 // IPSetSpec defines the desired state of IPSet
 type IPSetSpec struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Immutable bool `json:"immutable"`
+
 	// Networks used to request IPs for
 	Networks []IPSetNetwork `json:"networks"`
 }

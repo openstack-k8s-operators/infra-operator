@@ -66,7 +66,7 @@ var _ = Describe("NetConfig webhook", func() {
 
 		When("a there is at least one IPSet", func() {
 			BeforeEach(func() {
-				ipset := CreateIPSet(netConfigName.Namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.201")))
+				ipset := CreateIPSet(netConfigName.Namespace, GetIPSetSpec(false, GetIPSetNet1WithFixedIP("172.17.0.201")))
 				ipSetName = types.NamespacedName{
 					Name:      ipset.GetName(),
 					Namespace: namespace,

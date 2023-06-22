@@ -107,7 +107,7 @@ var _ = Describe("IPSet controller", func() {
 				g.Expect(res).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
 
-			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.150")))
+			ipset := CreateIPSet(namespace, GetIPSetSpec(false, GetIPSetNet1WithFixedIP("172.17.0.150")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
@@ -147,7 +147,7 @@ var _ = Describe("IPSet controller", func() {
 				g.Expect(res).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
 
-			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.220")))
+			ipset := CreateIPSet(namespace, GetIPSetSpec(false, GetIPSetNet1WithFixedIP("172.17.0.220")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
@@ -187,7 +187,7 @@ var _ = Describe("IPSet controller", func() {
 				g.Expect(res).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
 
-			ipset := CreateIPSet(namespace, GetIPSetSpec(GetIPSetNet1WithFixedIP("172.17.0.201")))
+			ipset := CreateIPSet(namespace, GetIPSetSpec(false, GetIPSetNet1WithFixedIP("172.17.0.201")))
 			ipSetName = types.NamespacedName{
 				Name:      ipset.GetName(),
 				Namespace: namespace,
@@ -267,6 +267,59 @@ var _ = Describe("IPSet controller", func() {
 				condition.ReadyCondition,
 				corev1.ConditionTrue,
 			)
+		})
+	})
+
+	When("an IPSet with Immutable flag gets created", func() {
+		BeforeEach(func() {
+			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			ipset := CreateIPSet(namespace, GetIPSetSpec(true, GetIPSetNet1WithFixedIP("172.17.0.220")))
+			ipSetName = types.NamespacedName{
+				Name:      ipset.GetName(),
+				Namespace: namespace,
+			}
+
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
+		})
+
+		It("should have created an IPSet with IP 172.17.0.220 on net-1", func() {
+			Eventually(func(g Gomega) {
+				res := GetReservationFromNet(ipSetName, "net-1")
+				g.Expect(res.Address).To(Equal("172.17.0.220"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("reports the overall state is ready", func() {
+			th.ExpectCondition(
+				ipSetName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+
+		When("the IPSet gets updates", func() {
+			It("gets blocked by the webhook and fail", func() {
+				instance := &networkv1.IPSet{}
+
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
+					instance.Spec.Networks = append(instance.Spec.Networks, GetIPSetNet2())
+					err := th.K8sClient.Update(ctx, instance)
+					g.Expect(err.Error()).Should(ContainSubstring("Forbidden: Invalid value: \"object\": Value is immutable"))
+				}, timeout, interval).Should(Succeed())
+			})
 		})
 	})
 })
