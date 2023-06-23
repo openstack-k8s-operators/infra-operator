@@ -272,7 +272,9 @@ var _ = Describe("IPSet controller", func() {
 
 	When("an IPSet with Immutable flag gets created", func() {
 		BeforeEach(func() {
-			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			net1Spec := GetNetSpec(net1, GetSubnet1(subnet1))
+			net2Spec := GetNetSpec(net2, GetSubnet2(subnet1))
+			netCfg := CreateNetConfig(namespace, GetNetConfigSpec(net1Spec, net2Spec))
 			netCfgName.Name = netCfg.GetName()
 			netCfgName.Namespace = netCfg.GetNamespace()
 
@@ -309,7 +311,7 @@ var _ = Describe("IPSet controller", func() {
 			)
 		})
 
-		When("the IPSet gets updates", func() {
+		When("the IPSet Spec.Networks gets updates", func() {
 			It("gets blocked by the webhook and fail", func() {
 				instance := &networkv1.IPSet{}
 
@@ -317,7 +319,28 @@ var _ = Describe("IPSet controller", func() {
 					g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
 					instance.Spec.Networks = append(instance.Spec.Networks, GetIPSetNet2())
 					err := th.K8sClient.Update(ctx, instance)
-					g.Expect(err.Error()).Should(ContainSubstring("Forbidden: Invalid value: \"object\": Value is immutable"))
+					g.Expect(err.Error()).Should(ContainSubstring("Forbidden: Invalid value: \"object\": Spec.Networks is immutable"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("the IPSet Spec.Immutable gets flipped", func() {
+			BeforeEach(func() {
+				Eventually(func(g Gomega) {
+					instance := &networkv1.IPSet{}
+					g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
+					instance.Spec.Immutable = false
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("a network can bet added", func() {
+				instance := &networkv1.IPSet{}
+
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
+					instance.Spec.Networks = append(instance.Spec.Networks, GetIPSetNet2())
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 				}, timeout, interval).Should(Succeed())
 			})
 		})
