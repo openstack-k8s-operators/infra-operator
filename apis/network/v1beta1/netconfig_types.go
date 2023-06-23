@@ -88,11 +88,11 @@ type Subnet struct {
 // AllocationRange definition
 type AllocationRange struct {
 	// +kubebuilder:validation:Required
-	// Start a set of IPs that are reserved and will not be assigned
+	// Start IP for the AllocationRange
 	Start string `json:"start"`
 
 	// +kubebuilder:validation:Required
-	// End a set of IPs that are reserved and will not be assigned
+	// End IP for the AllocationRange
 	End string `json:"end"`
 }
 
@@ -121,8 +121,6 @@ type NetConfigStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:shortName=netcfg;netscfg
-//+kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[0].status",description="Ready"
-//+kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.conditions[0].message",description="Message"
 
 // NetConfig is the Schema for the netconfigs API
 type NetConfig struct {

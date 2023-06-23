@@ -330,18 +330,19 @@ func CreateIPSet(namespace string, spec map[string]interface{}) client.Object {
 	return th.CreateUnstructured(raw)
 }
 
-func GetIPSetSpec(nets ...networkv1.IPSetNetwork) map[string]interface{} {
+func GetIPSetSpec(immutable bool, nets ...networkv1.IPSetNetwork) map[string]interface{} {
 	spec := make(map[string]interface{})
 
 	networks := []networkv1.IPSetNetwork{}
 	networks = append(networks, nets...)
+	spec["immutable"] = immutable
 	spec["networks"] = interface{}(networks)
 
 	return spec
 }
 
 func GetDefaultIPSetSpec() map[string]interface{} {
-	return GetIPSetSpec(GetIPSetNet1())
+	return GetIPSetSpec(false, GetIPSetNet1())
 }
 
 func GetIPSetNet1() networkv1.IPSetNetwork {

@@ -249,6 +249,7 @@ webhooks:
     operations:
     - CREATE
     - UPDATE
+    - DELETE
     resources:
     - netconfigs
   sideEffects: None
