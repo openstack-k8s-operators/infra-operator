@@ -98,8 +98,8 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) error {
 		return apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
 	}
 
-	// Do not allow to update the Spec if the Immuatable was set on the existing object
-	if oldIPSet.Spec.Immutable && !equality.Semantic.DeepEqual(oldIPSet.Spec, r.Spec) {
+	// Do not allow to update of Spec.Networks if the Immuatable was set on the existing object
+	if oldIPSet.Spec.Immutable && !equality.Semantic.DeepEqual(oldIPSet.Spec.Networks, r.Spec.Networks) {
 		return apierrors.NewForbidden(
 			schema.GroupResource{
 				Group:    GroupVersion.WithKind("IPSet").Group,
@@ -108,7 +108,7 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) error {
 				Type:     field.ErrorTypeForbidden,
 				Field:    "*",
 				BadValue: r.Name,
-				Detail:   "Invalid value: \"object\": Value is immutable",
+				Detail:   "Invalid value: \"object\": Spec.Networks is immutable",
 			},
 		)
 	}
