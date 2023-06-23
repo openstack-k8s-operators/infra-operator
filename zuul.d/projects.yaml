@@ -1,0 +1,10 @@
+---
+- project:
+    name: openstack-k8s-operators/infra-operator
+    github-check:
+      jobs:
+        - infra-operator-content-provider
+        - infra-operator-crc-podified-edpm-baremetal: &content_provider
+            dependencies:
+              - infra-operator-content-provider
+        - infra-operator-crc-podified-edpm-deployment: *content_provider
