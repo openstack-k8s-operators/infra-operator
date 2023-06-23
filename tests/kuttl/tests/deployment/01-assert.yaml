@@ -22,4 +22,3 @@ metadata:
    labels:
       app: openstackclient
    name: test
-   namespace: openstack
