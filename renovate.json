@@ -14,13 +14,13 @@
   ],
   "packageRules": [
     {
-      "matchPackageNames": ["github.com/openstack-k8s-operators/infra-operator/api"],
+      "matchPackageNames": ["github.com/openstack-k8s-operators/infra-operator/apis"],
       "enabled": false
     },
     {
       "groupName": "openstack-k8s-operators",
       "matchPackagePrefixes": ["github.com/openstack-k8s-operators"],
-      "excludePackageNames": ["github.com/openstack-k8s-operators/infra-operator/api"],
+      "excludePackageNames": ["github.com/openstack-k8s-operators/infra-operator/apis"],
       "schedule": [
         "every weekend"
       ]
