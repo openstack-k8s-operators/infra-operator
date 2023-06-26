@@ -45,6 +45,9 @@ type IPSetNetwork struct {
 type IPSetSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
+	// Immutable, if `true` the validation webhook will block any update to the Spec, except of Spec.Immutable.
+	// This allows the caller to add safety mechanism to the object. If a change is required to the object,
+	// an extra update needs to be done to make updates possible.
 	Immutable bool `json:"immutable"`
 
 	// Networks used to request IPs for
