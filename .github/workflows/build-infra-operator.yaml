@@ -1,4 +1,4 @@
-name: OpenStack Infra image builder
+name: Infra Operator image builder
 
 on:
   push:
