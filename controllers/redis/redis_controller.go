@@ -207,5 +207,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&redisv1beta1.Redis{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Complete(r)
 }
