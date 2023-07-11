@@ -19,7 +19,6 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 		"owner": "infra-operator",
 	}
 	ls := labels.GetLabels(m, "memcached", matchls)
-	replicas := m.Spec.Replicas
 	runAsUser := int64(0)
 
 	livenessProbe := &corev1.Probe{
@@ -50,7 +49,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 		},
 		Spec: appsv1.StatefulSetSpec{
 			ServiceName: m.Name,
-			Replicas:    &replicas,
+			Replicas:    m.Spec.Replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: matchls,
 			},
