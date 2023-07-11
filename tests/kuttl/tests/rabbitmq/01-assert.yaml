@@ -1,0 +1,22 @@
+#
+# Check for:
+#
+# - 1 TransportURL CR
+# - 1 Secret for TransporURL CR
+#
+
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: TransportURL
+metadata:
+  name: cinder
+spec:
+  rabbitmqClusterName: rabbitmq
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-transport-url-cinder
+  ownerReferences:
+  - apiVersion: rabbitmq.openstack.org/v1beta1
+    kind: TransportURL
+    name: cinder
