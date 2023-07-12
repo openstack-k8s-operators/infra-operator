@@ -3,4 +3,4 @@ kind: TestStep
 delete:
 - apiVersion: rabbitmq.openstack.org/v1beta1
   kind: TransportURL
-  name: cinder
+  name: transporturl

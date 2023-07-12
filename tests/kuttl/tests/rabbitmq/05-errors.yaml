@@ -8,9 +8,9 @@
 apiVersion: rabbitmq.openstack.org/v1beta1
 kind: TransportURL
 metadata:
-  name: cinder
+  name: transporturl
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: rabbitmq-transport-url-cinder
+  name: rabbitmq-transport-url-transporturl
