@@ -223,7 +223,7 @@ var _ = Describe("DNSMasq controller", func() {
 
 		When("the DNSData CM gets deleted", func() {
 			It("the ConfigMap gets removed from the deployment", func() {
-				th.AssertConfigMapExists(dnsDataCM)
+				th.GetConfigMap(dnsDataCM)
 				deploymentName = types.NamespacedName{
 					Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name),
 					Namespace: namespace,
