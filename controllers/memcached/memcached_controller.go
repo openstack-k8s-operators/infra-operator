@@ -272,6 +272,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&memcachedv1.Memcached{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Complete(r)
 }
 
