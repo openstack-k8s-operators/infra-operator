@@ -433,6 +433,8 @@ func (r *IPSetReconciler) ensureReservation(
 		}
 		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute {
 			ipsetRes.Gateway = subnetDef.Gateway
+			ipsetRes.Routes = append(ipsetRes.Routes,
+				networkv1.Route{Destination: "0.0.0.0/0", Nexthop: *subnetDef.Gateway})
 		}
 		if subnetDef.DNSDomain != nil {
 			ipsetRes.DNSDomain = *subnetDef.DNSDomain
