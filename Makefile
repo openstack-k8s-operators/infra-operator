@@ -333,8 +333,6 @@ operator-lint: gowork ## Runs operator-lint
 # webhook definitions are removed from the csv before running
 # this. Also, cleanup the webhook configuration for local testing
 # before deplying with olm again.
-# $oc delete validatingwebhookconfiguration/vopenstackclient.kb.io
-# $oc delete mutatingwebhookconfiguration/mopenstackclient.kb.io
 # $oc delete validatingwebhookconfiguration/vmemcached.kb.io
 # $oc delete mutatingwebhookconfiguration/mmemcached.kb.io
 # $oc delete validatingwebhookconfiguration/vdnsmasq.kb.io

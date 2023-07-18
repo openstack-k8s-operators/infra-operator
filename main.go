@@ -37,13 +37,11 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	clientv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/client/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	networkv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
-	clientcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/client"
 	memcachedcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
 	networkcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
@@ -61,7 +59,6 @@ func init() {
 
 	utilruntime.Must(rabbitmqv1beta1.AddToScheme(scheme))
 	utilruntime.Must(rabbitmqclusterv1.AddToScheme(scheme))
-	utilruntime.Must(clientv1beta1.AddToScheme(scheme))
 	utilruntime.Must(keystonev1.AddToScheme(scheme))
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	utilruntime.Must(redisv1.AddToScheme(scheme))
@@ -131,15 +128,6 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "TransportURL")
 		os.Exit(1)
 	}
-	if err = (&clientcontrollers.OpenStackClientReconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("OpenStackClient"),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "OpenStackClient")
-		os.Exit(1)
-	}
 	if err = (&memcachedcontrollers.Reconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
@@ -199,17 +187,12 @@ func main() {
 	}
 
 	// Acquire environmental defaults and initialize operator defaults with them
-	clientv1beta1.SetupDefaults()
 	memcachedv1.SetupDefaults()
 	redisv1.SetupDefaults()
 	networkv1.SetupDefaults()
 
 	// Setup webhooks if requested
 	if strings.ToLower(os.Getenv("ENABLE_WEBHOOKS")) != "false" {
-		if err = (&clientv1beta1.OpenStackClient{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "OpenStackClient")
-			os.Exit(1)
-		}
 		if err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
 			os.Exit(1)

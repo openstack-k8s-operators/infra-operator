@@ -11,8 +11,6 @@ spec:
       containers:
       - name: manager
         env:
-        - name: INFRA_CLIENT_IMAGE_URL_DEFAULT
-          value: quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified
         - name: INFRA_MEMCACHED_IMAGE_URL_DEFAULT
           value: quay.io/podified-antelope-centos9/openstack-memcached:current-podified
         - name: INFRA_REDIS_IMAGE_URL_DEFAULT
