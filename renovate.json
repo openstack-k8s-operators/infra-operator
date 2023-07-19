@@ -20,21 +20,23 @@
     {
       "groupName": "openstack-k8s-operators",
       "matchPackagePrefixes": ["github.com/openstack-k8s-operators"],
-      "excludePackageNames": ["github.com/openstack-k8s-operators/infra-operator/apis"],
+      "excludePackageNames": ["github.com/openstack-k8s-operators/keystone-operator/api"],
       "schedule": [
         "every weekend"
       ]
     },
     {
       "groupName": "k8s.io",
-      "matchPackagePrefixes": [
-        "k8s.io",
-        "sigs.k8s.io"
-      ],
-      "schedule": [
-        "every weekend"
-      ],
-      "allowedVersions": "< 1.0.0"
+      "matchPackagePatterns": ["^k8s.io"],
+      "excludePackagePatterns": ["^k8s.io/kube-openapi"],
+      "allowedVersions": "< 0.27.0",
+      "enabled": true
+    },
+    {
+      "groupName": "sigs.k8s.io/controller-runtime",
+      "matchPackagePatterns": ["^sigs.k8s.io/controller-runtime"],
+      "allowedVersions": "< 0.15.0",
+      "enabled": true
     }
   ],
   "postUpgradeTasks": {
