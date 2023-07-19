@@ -21,10 +21,7 @@ spec:
     - name: subnet1
       allocationRanges:
       - end: 172.17.0.250
-        start: 172.17.0.10
-      excludeAddresses:
-      - 172.17.0.10
-      - 172.17.0.12
+        start: 172.17.0.100
       cidr: 172.17.0.0/24
       vlan: 20
   - name: External
@@ -33,7 +30,7 @@ spec:
     - name: subnet1
       allocationRanges:
       - end: 10.0.0.250
-        start: 10.0.0.10
+        start: 10.0.0.100
       cidr: 10.0.0.0/24
       gateway: 10.0.0.1
   - name: Storage
@@ -42,7 +39,7 @@ spec:
     - name: subnet1
       allocationRanges:
       - end: 172.18.0.250
-        start: 172.18.0.10
+        start: 172.18.0.100
       cidr: 172.18.0.0/24
       vlan: 21
   - name: StorageMgmt
@@ -51,7 +48,7 @@ spec:
     - name: subnet1
       allocationRanges:
       - end: 172.20.0.250
-        start: 172.20.0.10
+        start: 172.20.0.100
       cidr: 172.20.0.0/24
       vlan: 23
   - name: Tenant
@@ -60,6 +57,6 @@ spec:
     - name: subnet1
       allocationRanges:
       - end: 172.19.0.250
-        start: 172.19.0.10
+        start: 172.19.0.100
       cidr: 172.19.0.0/24
       vlan: 22
