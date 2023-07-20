@@ -1,0 +1,19 @@
+#
+# Check for:
+#
+# - 1 Memcached CR
+#
+
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
+spec:
+  containerImage: quay.io/podified-antelope-centos9/openstack-memcached:current-podified
+  replicas: 1
+status:
+  readyCount: 1
+  serverList:
+  - 'memcached-0.memcached:11211'
+  serverListWithInet:
+  - 'inet:[memcached-0.memcached]:11211'

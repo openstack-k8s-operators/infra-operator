@@ -1,0 +1,6 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+delete:
+- apiVersion: memcached.openstack.org/v1beta1
+  kind: Memcached
+  name: memcached

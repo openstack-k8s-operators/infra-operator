@@ -1,0 +1,10 @@
+#
+# Check for:
+#
+# - No Memcached CR
+#
+
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
