@@ -38,7 +38,7 @@ type RedisSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
 	// Size of the redis cluster
-	Replicas int32 `json:"replicas"`
+	Replicas *int32 `json:"replicas"`
 }
 
 // RedisStatus defines the observed state of Redis

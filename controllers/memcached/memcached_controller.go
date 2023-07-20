@@ -291,7 +291,7 @@ func (r *Reconciler) GetServerLists(
 		prefix = "inet6"
 	}
 
-	for i := int32(0); i < instance.Spec.Replicas; i++ {
+	for i := int32(0); i < *(instance.Spec.Replicas); i++ {
 		server := fmt.Sprintf("%s-%d.%s", instance.Name, i, instance.Name)
 		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
 

@@ -38,7 +38,7 @@ type MemcachedSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
 	// Size of the memcached cluster
-	Replicas int32 `json:"replicas"`
+	Replicas *int32 `json:"replicas"`
 }
 
 // MemcachedStatus defines the observed state of Memcached

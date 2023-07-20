@@ -17,7 +17,6 @@ func Deployment(r *redisv1beta1.Redis) *appsv1.Deployment {
 		"owner": "infra-operator",
 	}
 	ls := labels.GetLabels(r, "redis", matchls)
-	replicas := r.Spec.Replicas
 
 	livenessProbe := &corev1.Probe{
 		// TODO might need tuning
@@ -46,7 +45,7 @@ func Deployment(r *redisv1beta1.Redis) *appsv1.Deployment {
 			Namespace: r.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
+			Replicas: r.Spec.Replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: matchls,
 			},

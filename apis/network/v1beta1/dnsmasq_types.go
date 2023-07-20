@@ -52,7 +52,7 @@ type DNSMasqSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
 	// Replicas - DNSMasq Replicas
-	Replicas int32 `json:"replicas"`
+	Replicas *int32 `json:"replicas"`
 
 	// +kubebuilder:validation:Optional
 	// Debug - enable debug for different deploy stages. If an init container is used, it runs and the
