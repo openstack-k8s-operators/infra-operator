@@ -43,7 +43,7 @@ import (
 
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 
-	. "github.com/openstack-k8s-operators/lib-common/modules/test-operators/helpers"
+	. "github.com/openstack-k8s-operators/lib-common/modules/test/helpers"
 	//+kubebuilder:scaffold:imports
 )
 
