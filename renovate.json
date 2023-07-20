@@ -20,7 +20,7 @@
     {
       "groupName": "openstack-k8s-operators",
       "matchPackagePrefixes": ["github.com/openstack-k8s-operators"],
-      "excludePackageNames": ["github.com/openstack-k8s-operators/keystone-operator/api"],
+      "excludePackageNames": ["github.com/openstack-k8s-operators/infra-operator/apis"],
       "schedule": [
         "every weekend"
       ]
