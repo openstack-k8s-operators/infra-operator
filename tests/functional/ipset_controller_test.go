@@ -19,7 +19,7 @@ package functional_test
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/openstack-k8s-operators/lib-common/modules/test/helpers"
+	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1 "k8s.io/api/core/v1"
