@@ -39,8 +39,12 @@ import (
 type ServiceReconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *ServiceReconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
 }
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=services,verbs=get;list;watch;create;update;patch;delete
@@ -59,8 +63,6 @@ type ServiceReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.13.0/pkg/reconcile
 func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
-
 	// Get a list of DNSMasq CRs which are in the same namespace the Service
 	// is in to add the Service to those DNSMasqs.
 	dnsmasqs := &networkv1.DNSMasqList{}
@@ -157,6 +159,8 @@ func (r *ServiceReconciler) createOrPatchDNSData(
 	dnsmasq *networkv1.DNSMasq,
 	svcDNSHosts []networkv1.DNSHost,
 ) error {
+	Log := r.GetLogger(ctx)
+
 	svcDNSData := &networkv1.DNSData{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dnsmasq.GetName() + "-svc",
@@ -182,7 +186,7 @@ func (r *ServiceReconciler) createOrPatchDNSData(
 	}
 
 	if op != controllerutil.OperationResultNone {
-		r.Log.Info(fmt.Sprintf("%s - operation: %s", svcDNSData.Name, string(op)))
+		Log.Info("operation:", "svcDNSData name", svcDNSData.Name, "Operation", string(op))
 	}
 
 	return nil

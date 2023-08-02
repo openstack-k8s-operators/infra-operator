@@ -42,11 +42,15 @@ import (
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 )
 
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
+}
+
 // Reconciler reconciles a Redis object
 type Reconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
 }
 
@@ -72,7 +76,7 @@ type Reconciler struct {
 
 // Reconcile - Redis
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
+	Log := r.GetLogger(ctx)
 
 	// Fetch the Redis instance
 	instance := &redisv1beta1.Redis{}
@@ -93,7 +97,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err

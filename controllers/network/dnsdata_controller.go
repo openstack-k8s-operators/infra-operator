@@ -18,11 +18,9 @@ package network
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/go-logr/logr"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -31,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/go-logr/logr"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -48,8 +47,12 @@ import (
 type DNSDataReconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *DNSDataReconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
 }
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata,verbs=get;list;watch;create;update;patch;delete
@@ -63,7 +66,7 @@ type DNSDataReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.13.0/pkg/reconcile
 func (r *DNSDataReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
+	Log := r.GetLogger(ctx)
 
 	// Fetch the DNSData instance
 	instance := &networkv1.DNSData{}
@@ -84,7 +87,7 @@ func (r *DNSDataReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -149,17 +152,21 @@ func (r *DNSDataReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *DNSDataReconciler) reconcileDelete(ctx context.Context, instance *networkv1.DNSData, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service delete")
+	Log := r.GetLogger(ctx)
+
+	Log.Info("Reconciling Service delete")
 
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
-	r.Log.Info("Reconciled Service delete successfully")
+	Log.Info("Reconciled Service delete successfully")
 
 	return ctrl.Result{}, nil
 }
 
 func (r *DNSDataReconciler) reconcileNormal(ctx context.Context, instance *networkv1.DNSData, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service")
+	Log := r.GetLogger(ctx)
+
+	Log.Info("Reconciling Service")
 
 	configMapVars := make(map[string]env.Setter)
 
@@ -183,12 +190,12 @@ func (r *DNSDataReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	}
 	if hash != instance.Status.Hash {
 		instance.Status.Hash = hash
-		r.Log.Info(fmt.Sprintf("Input maps hash %s - %s", common.InputHashName, hash))
+		Log.Info("Input maps hash", "HashName", common.InputHashName, "Hash", hash)
 	}
 
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.InputReadyMessage)
 
-	r.Log.Info("Reconciled Service successfully")
+	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
 }
 

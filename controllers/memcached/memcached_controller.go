@@ -50,8 +50,12 @@ import (
 type Reconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("memcached")
 }
 
 // RBAC for memcached resources
@@ -76,7 +80,7 @@ type Reconciler struct {
 
 // Reconcile - Memcached
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
+	Log := r.GetLogger(ctx)
 
 	// Fetch the Memcached instance
 	instance := &memcachedv1.Memcached{}
@@ -97,7 +101,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -250,6 +254,8 @@ func (r *Reconciler) generateConfigMaps(
 	instance *memcachedv1.Memcached,
 	envVars *map[string]env.Setter,
 ) error {
+	Log := r.GetLogger(ctx)
+
 	templateParameters := make(map[string]interface{})
 	customData := make(map[string]string)
 
@@ -268,7 +274,7 @@ func (r *Reconciler) generateConfigMaps(
 
 	err := configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
 	if err != nil {
-		util.LogErrorForObject(h, err, "Unable to retrieve or create config maps", instance)
+		Log.Error(err, "Unable to retrieve or create config maps")
 		return err
 	}
 

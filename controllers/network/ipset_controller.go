@@ -48,8 +48,12 @@ import (
 type IPSetReconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *IPSetReconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
 }
 
 //+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets,verbs=get;list;watch;create;update;patch;delete
@@ -65,8 +69,7 @@ type IPSetReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.13.0/pkg/reconcile
 func (r *IPSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
-
+	Log := r.GetLogger(ctx)
 	// Fetch the IPSet instance
 	instance := &networkv1.IPSet{}
 	err := r.Client.Get(ctx, req.NamespacedName, instance)
@@ -86,7 +89,7 @@ func (r *IPSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -146,8 +149,9 @@ func (r *IPSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *IPSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *IPSetReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	ipsetFN := handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
+		Log := r.GetLogger(ctx)
 		result := []reconcile.Request{}
 
 		// For each NetConfig update event get the list of all
@@ -157,8 +161,8 @@ func (r *IPSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		listOpts := []client.ListOption{
 			client.InNamespace(o.GetNamespace()),
 		}
-		if err := r.Client.List(context.Background(), ipsets, listOpts...); err != nil {
-			r.Log.Error(err, "Unable to retrieve IPSetList %w")
+		if err := r.Client.List(ctx, ipsets, listOpts...); err != nil {
+			Log.Error(err, "Unable to retrieve IPSetList")
 			return nil
 		}
 
@@ -171,7 +175,7 @@ func (r *IPSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			result = append(result, reconcile.Request{NamespacedName: name})
 		}
 		if len(result) > 0 {
-			r.Log.Info(fmt.Sprintf("Reconcile request for: %+v", result))
+			Log.Info("Reconcile request for:", "result", result)
 
 			return result
 		}
@@ -186,7 +190,8 @@ func (r *IPSetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *IPSetReconciler) reconcileDelete(ctx context.Context, instance *networkv1.IPSet, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service delete")
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service delete")
 
 	// Remove finalizer from reservation
 	res, err := r.getReservation(ctx, instance)
@@ -201,13 +206,14 @@ func (r *IPSetReconciler) reconcileDelete(ctx context.Context, instance *network
 
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
-	r.Log.Info("Reconciled Service delete successfully")
+	Log.Info("Reconciled Service delete successfully")
 
 	return ctrl.Result{}, nil
 }
 
 func (r *IPSetReconciler) reconcileNormal(ctx context.Context, instance *networkv1.IPSet, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service")
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service")
 
 	opts := &client.ListOptions{
 		Namespace: instance.Namespace,
@@ -276,7 +282,7 @@ func (r *IPSetReconciler) reconcileNormal(ctx context.Context, instance *network
 
 		instance.Status.Conditions.MarkTrue(networkv1.ReservationReadyCondition, networkv1.ReservationReadyMessage)
 
-		r.Log.Info(fmt.Sprintf("IPSet is ready: %s - %+v", instance.Name, ipSetRes.Spec.Reservation))
+		Log.Info("IPSet is ready:", "instance", instance.Name, "ipSetRes", ipSetRes.Spec.Reservation)
 	} else {
 		instance.Status.Conditions.MarkFalse(
 			condition.InputReadyCondition,
@@ -287,7 +293,7 @@ func (r *IPSetReconciler) reconcileNormal(ctx context.Context, instance *network
 		return ctrl.Result{}, err
 	}
 
-	r.Log.Info("Reconciled Service successfully")
+	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
 }
 
@@ -316,6 +322,7 @@ func (r *IPSetReconciler) patchReservation(
 	labels map[string]string,
 	spec networkv1.ReservationSpec,
 ) (*networkv1.Reservation, error) {
+	Log := r.GetLogger(ctx)
 	res := &networkv1.Reservation{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      name.Name,
@@ -343,7 +350,7 @@ func (r *IPSetReconciler) patchReservation(
 	}
 
 	if op != controllerutil.OperationResultNone {
-		r.Log.Info(fmt.Sprintf("%s reservation - operation: %s", res.Name, string(op)))
+		Log.Info(fmt.Sprintf("reservation %s operation %s", res.Name, string(op)))
 	}
 
 	return res, nil
