@@ -53,6 +53,7 @@ import (
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
+	service "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 )
 
@@ -444,6 +445,18 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	// create Deployment - end
 	//Update status with LoadBalancerIPs
 	instance.Status.DNSAddresses = instance.Spec.ExternalEndpoints[0].LoadBalancerIPs
+
+	// Update status with Cluster Addresses
+	poolName := instance.Spec.ExternalEndpoints[0].IPAddressPool
+	serviceName := fmt.Sprintf("%s-%s-%s", dnsmasq.ServiceName, instance.Name, poolName)
+	svc, err := service.GetServiceWithName(ctx, helper, serviceName, instance.Namespace)
+
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if svc != nil {
+		instance.Status.DNSClusterAddresses = svc.Spec.ClusterIPs
+	}
 
 	r.Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil

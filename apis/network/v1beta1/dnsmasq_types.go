@@ -124,6 +124,9 @@ type DNSMasqStatus struct {
 
 	// DNSServer Addresses
 	DNSAddresses []string `json:"dnsAddresses,omitempty"`
+
+	// DNSServer Cluster Addresses
+	DNSClusterAddresses []string `json:"dnsClusterAddresses,omitempty"`
 }
 
 //+kubebuilder:object:root=true
