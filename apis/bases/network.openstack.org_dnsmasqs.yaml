@@ -191,6 +191,11 @@ spec:
                 items:
                   type: string
                 type: array
+              dnsClusterAddresses:
+                description: DNSServer Cluster Addresses
+                items:
+                  type: string
+                type: array
               hash:
                 additionalProperties:
                   type: string
