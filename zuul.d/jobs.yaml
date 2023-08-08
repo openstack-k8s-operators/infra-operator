@@ -9,7 +9,7 @@
           src: "~/src/github.com/{{ cifmw_operator_build_org }}/openstack-operator"
           image_base: infra
     irrelevant-files: &irrev
-      - tests/kuttl
+      - tests/
       - docs
       - containers/ci
       - .github/workflows
