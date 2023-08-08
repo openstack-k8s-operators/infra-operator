@@ -35,10 +35,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
@@ -99,13 +95,7 @@ var _ = BeforeSuite(func() {
 	// Keep this in synch with DNSMasqReconciler.SetupWithManager,
 	// otherwise the reconciler loop will silently not start
 	// in the test env.
-	err = corev1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-	err = appsv1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
 	err = networkv1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-	err = rbacv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	//+kubebuilder:scaffold:scheme
 
