@@ -74,8 +74,8 @@ spec:
   - Infrastructure
   links:
   - name: Infra Operator
-    url: https://infra-operator.domain
-  maturity: alpha
+    url: https://github.com/openstack-k8s-operators/infra-operator
+  maturity: beta
   provider:
     name: Red Hat Inc.
     url: https://redhat.com/
