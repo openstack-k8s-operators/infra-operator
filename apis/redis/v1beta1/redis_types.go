@@ -97,7 +97,7 @@ func (instance Redis) RbacResourceName() string {
 func SetupDefaults() {
 	// Acquire environmental defaults and initialize Redis defaults with them
 	redisDefaults := RedisDefaults{
-		ContainerImageURL: util.GetEnvVar("INFRA_REDIS_IMAGE_URL_DEFAULT", RedisContainerImage),
+		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INFRA_REDIS_IMAGE_URL_DEFAULT", RedisContainerImage),
 	}
 
 	SetupRedisDefaults(redisDefaults)
