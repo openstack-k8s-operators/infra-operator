@@ -475,9 +475,12 @@ func (r *DNSMasqReconciler) generateServiceConfigMaps(
 
 	var cfg string
 	for _, option := range instance.Spec.Options {
-		cfg += option.Key + "="
-		values := strings.Join(option.Values, ",")
-		cfg += values + "\n"
+		cfg += option.Key
+		if len(option.Values) > 0 {
+			values := strings.Join(option.Values, ",")
+			cfg += "=" + values
+		}
+		cfg += "\n"
 	}
 	configMapData[instance.Name] = cfg
 
