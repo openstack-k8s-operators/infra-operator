@@ -128,6 +128,8 @@ var _ = Describe("DNSMasq controller", func() {
 			Expect(configData).ShouldNot(BeNil())
 			Expect(configData.Data[dnsMasqName.Name]).Should(
 				ContainSubstring("server=1.1.1.1"))
+			Expect(configData.Data[dnsMasqName.Name]).Should(
+				ContainSubstring("no-negcache\n"))
 			Expect(configData.Labels["dnsmasq.openstack.org/name"]).To(Equal(dnsMasqName.Name))
 		})
 
