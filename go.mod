@@ -11,7 +11,7 @@ require (
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.1.0
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.1.1
 	github.com/rabbitmq/cluster-operator v1.14.0
-	go.uber.org/zap v1.24.0
+	go.uber.org/zap v1.25.0
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
 	k8s.io/api v0.26.6
 	k8s.io/apimachinery v0.26.6
@@ -59,8 +59,7 @@ require (
 	github.com/prometheus/common v0.37.0 // indirect
 	github.com/prometheus/procfs v0.8.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	go.uber.org/atomic v1.9.0 // indirect
-	go.uber.org/multierr v1.8.0 // indirect
+	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/net v0.10.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220909003341-f21342109be1 // indirect
 	golang.org/x/sys v0.9.0 // indirect
