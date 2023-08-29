@@ -124,6 +124,7 @@ spec:
                       - dns-rr
                       - auth-zone
                       - synth-domain
+                      - no-negcache
                       type: string
                     values:
                       items:

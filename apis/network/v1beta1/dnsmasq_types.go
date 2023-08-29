@@ -38,7 +38,7 @@ const (
 
 // DNSMasqOption defines allowed options for dnsmasq
 type DNSMasqOption struct {
-	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain
+	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache
 	Key    string   `json:"key"`
 	Values []string `json:"values"`
 }
