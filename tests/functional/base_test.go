@@ -70,6 +70,10 @@ func GetDefaultDNSMasqSpec() map[string]interface{} {
 			Key:    "server",
 			Values: []string{"1.1.1.1"},
 		},
+		{
+			Key:    "no-negcache",
+			Values: []string{},
+		},
 	})
 
 	var externalEndpoints []interface{}
