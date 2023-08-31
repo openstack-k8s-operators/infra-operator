@@ -10,7 +10,9 @@ require (
 	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-20230720153501-076b82bb4427
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.1.0
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.1.1
-	github.com/rabbitmq/cluster-operator v1.14.0
+	// this is the commit pointed by v2.2.0 but we cannot import v2 directly
+	// as they are not properly releasing it. See https://github.com/rabbitmq/cluster-operator/issues/1407
+	github.com/rabbitmq/cluster-operator v1.14.1-0.20230315100854-bb4f20d175bc
 	go.uber.org/zap v1.24.0
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
 	k8s.io/api v0.26.6
@@ -76,7 +78,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.26.6 // indirect
 	k8s.io/component-base v0.26.6 // indirect
-	k8s.io/klog/v2 v2.80.1 // indirect
+	k8s.io/klog/v2 v2.90.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20230308215209-15aac26d736a // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.2.3 // indirect
