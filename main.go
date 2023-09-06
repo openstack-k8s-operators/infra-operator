@@ -38,7 +38,6 @@ import (
 
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
-	networkv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	memcachedcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
@@ -61,7 +60,6 @@ func init() {
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	utilruntime.Must(redisv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
-	utilruntime.Must(networkv1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -208,11 +206,11 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "NetConfig")
 			os.Exit(1)
 		}
-		if err = (&networkv1beta1.Reservation{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = (&networkv1.Reservation{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Reservation")
 			os.Exit(1)
 		}
-		if err = (&networkv1beta1.IPSet{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = (&networkv1.IPSet{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "IPSet")
 			os.Exit(1)
 		}
