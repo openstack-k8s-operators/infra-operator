@@ -48,7 +48,6 @@ import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	configmap "github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	deployment "github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
-	endpoint "github.com/openstack-k8s-operators/lib-common/modules/common/endpoint"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
@@ -357,33 +356,27 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	instance.Status.Hash[common.InputHashName] = inputHash
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
 
-	// expose the service (create service, route and return the created endpoint URLs)
-	var dnsEndpointCfg = map[endpoint.Endpoint]endpoint.Data{}
-
-	protocolUDP := corev1.ProtocolUDP
-	for _, metallbcfg := range instance.Spec.ExternalEndpoints {
-		name := fmt.Sprintf("%s-%s", instance.Name, metallbcfg.IPAddressPool)
-		portCfg := endpoint.Data{
-			MetalLB: &endpoint.MetalLBData{
-				IPAddressPool:   metallbcfg.IPAddressPool,
-				SharedIP:        metallbcfg.SharedIP,
-				SharedIPKey:     metallbcfg.SharedIPKey,
-				LoadBalancerIPs: metallbcfg.LoadBalancerIPs,
-				Protocol:        &protocolUDP,
-			},
-			Port: dnsmasq.DNSPort,
-		}
-
-		dnsEndpointCfg[endpoint.Endpoint(name)] = portCfg
+	// expose the service
+	svcOverride := instance.Spec.Override.Service
+	if svcOverride == nil {
+		svcOverride = &service.OverrideSpec{}
 	}
 
-	_, ctrlResult, err := endpoint.ExposeEndpoints(
-		ctx,
-		helper,
-		dnsmasq.ServiceName,
-		serviceLabels,
-		dnsEndpointCfg,
-		time.Duration(5)*time.Second,
+	// Create the service
+	svc, err := service.NewService(
+		service.GenericService(&service.GenericServiceDetails{
+			Name:      dnsmasq.ServiceName + "-" + instance.Name,
+			Namespace: instance.Namespace,
+			Labels:    serviceLabels,
+			Selector:  serviceLabels,
+			Port: service.GenericServicePort{
+				Name:     dnsmasq.ServiceName,
+				Port:     dnsmasq.DNSPort,
+				Protocol: corev1.ProtocolUDP,
+			},
+		}),
+		5,
+		svcOverride,
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -392,6 +385,23 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			condition.SeverityWarning,
 			condition.ExposeServiceReadyErrorMessage,
 			err.Error()))
+
+		return ctrl.Result{}, err
+	}
+
+	svc.AddAnnotation(map[string]string{
+		service.AnnotationIngressCreateKey: "false",
+	})
+
+	ctrlResult, err := svc.CreateOrPatch(ctx, helper)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ExposeServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ExposeServiceReadyErrorMessage,
+			err.Error()))
+
 		return ctrlResult, err
 	} else if (ctrlResult != ctrl.Result{}) {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -401,6 +411,15 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			condition.ExposeServiceReadyRunningMessage))
 		return ctrlResult, nil
 	}
+
+	// Update status with LoadBalancerIPs
+	instance.Status.DNSAddresses = svc.GetExternalIPs()
+
+	// Update status with Cluster Addresses
+	instance.Status.DNSClusterAddresses = svc.GetClusterIPs()
+
+	// create service - end
+
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
 	// Define a new Deployment object
@@ -443,20 +462,6 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, nil
 	}
 	// create Deployment - end
-	//Update status with LoadBalancerIPs
-	instance.Status.DNSAddresses = instance.Spec.ExternalEndpoints[0].LoadBalancerIPs
-
-	// Update status with Cluster Addresses
-	poolName := instance.Spec.ExternalEndpoints[0].IPAddressPool
-	serviceName := fmt.Sprintf("%s-%s-%s", dnsmasq.ServiceName, instance.Name, poolName)
-	svc, err := service.GetServiceWithName(ctx, helper, serviceName, instance.Namespace)
-
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if svc != nil {
-		instance.Status.DNSClusterAddresses = svc.Spec.ClusterIPs
-	}
 
 	r.Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil

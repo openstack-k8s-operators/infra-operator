@@ -76,14 +76,26 @@ func GetDefaultDNSMasqSpec() map[string]interface{} {
 		},
 	})
 
-	var externalEndpoints []interface{}
-	externalEndpoints = append(
-		externalEndpoints, map[string]interface{}{
-			"ipAddressPool":   "ctlplane",
-			"loadBalancerIPs": []string{"internal-lb-ip-1", "internal-lb-ip-2"},
+	serviceOverride := interface{}(map[string]interface{}{
+		"metadata": map[string]map[string]string{
+			"annotations": {
+				"metallb.universe.tf/address-pool":    "ctlplane",
+				"metallb.universe.tf/allow-shared-ip": "ctlplane",
+				"metallb.universe.tf/loadBalancerIPs": "internal-lb-ip-1,internal-lb-ip-2",
+			},
+			"labels": {
+				"foo":     "bar",
+				"service": "dnsmasq",
+			},
 		},
-	)
-	spec["externalEndpoints"] = externalEndpoints
+		"spec": map[string]interface{}{
+			"type": "LoadBalancer",
+		},
+	})
+
+	spec["override"] = map[string]interface{}{
+		"service": serviceOverride,
+	}
 
 	return spec
 }

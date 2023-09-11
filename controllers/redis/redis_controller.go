@@ -169,7 +169,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	// Service to expose Redis pods
-	commonsvc := commonservice.NewService(redis.Service(instance), map[string]string{}, time.Duration(5)*time.Second)
+	commonsvc, err := commonservice.NewService(redis.Service(instance), time.Duration(5)*time.Second, nil)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ExposeServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ExposeServiceReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
 	sres, serr := commonsvc.CreateOrPatch(ctx, helper)
 	if serr != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
