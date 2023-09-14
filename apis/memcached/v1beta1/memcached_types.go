@@ -107,7 +107,7 @@ func (instance Memcached) RbacResourceName() string {
 func SetupDefaults() {
 	// Acquire environmental defaults and initialize Memcached defaults with them
 	memcachedDefaults := MemcachedDefaults{
-		ContainerImageURL: util.GetEnvVar("INFRA_MEMCACHED_IMAGE_URL_DEFAULT", MemcachedContainerImage),
+		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INFRA_MEMCACHED_IMAGE_URL_DEFAULT", MemcachedContainerImage),
 	}
 
 	SetupMemcachedDefaults(memcachedDefaults)

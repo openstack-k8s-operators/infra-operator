@@ -11,10 +11,10 @@ spec:
       containers:
       - name: manager
         env:
-        - name: INFRA_MEMCACHED_IMAGE_URL_DEFAULT
+        - name: RELATED_IMAGE_INFRA_MEMCACHED_IMAGE_URL_DEFAULT
           value: quay.io/podified-antelope-centos9/openstack-memcached:current-podified
-        - name: INFRA_REDIS_IMAGE_URL_DEFAULT
+        - name: RELATED_IMAGE_INFRA_REDIS_IMAGE_URL_DEFAULT
           value: registry.redhat.io/rhel9/redis-6:latest
         # TODO create its own container image, instead of using neutron one
-        - name: INFRA_DNSMASQ_IMAGE_URL_DEFAULT
+        - name: RELATED_IMAGE_INFRA_DNSMASQ_IMAGE_URL_DEFAULT
           value: quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified

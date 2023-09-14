@@ -185,7 +185,7 @@ func (s DNSMasqStatus) GetConditions() condition.Conditions {
 func SetupDefaults() {
 	// Acquire environmental defaults and initialize DNSMasq defaults with them
 	dnsMasqDefaults := DNSMasqDefaults{
-		ContainerImageURL: util.GetEnvVar("INFRA_DNSMASQ_IMAGE_URL_DEFAULT", DNSMasqContainerImage),
+		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INFRA_DNSMASQ_IMAGE_URL_DEFAULT", DNSMasqContainerImage),
 	}
 
 	SetupDNSMasqDefaults(dnsMasqDefaults)

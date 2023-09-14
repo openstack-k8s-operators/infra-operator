@@ -9,7 +9,6 @@ kind: Memcached
 metadata:
   name: memcached
 spec:
-  containerImage: quay.io/podified-antelope-centos9/openstack-memcached:current-podified
   replicas: 1
 status:
   readyCount: 1
