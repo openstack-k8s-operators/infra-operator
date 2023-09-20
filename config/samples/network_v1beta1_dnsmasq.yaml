@@ -3,10 +3,6 @@ kind: DNSMasq
 metadata:
   name: dnsmasq
 spec:
-  externalEndpoints:
-  - ipAddressPool: ctlplane
-    loadBalancerIPs:
-    - 192.168.122.80
   replicas: 1
   options:
   - key: server
@@ -14,3 +10,12 @@ spec:
     - 192.168.122.1
   debug:
     service: false
+  override:
+    service:
+      metadata:
+        annotations:
+          metallb.universe.tf/address-pool: ctlplane
+          metallb.universe.tf/allow-shared-ip: ctlplane
+          metallb.universe.tf/loadBalancerIPs: 192.168.122.80
+      spec:
+        type: LoadBalancer

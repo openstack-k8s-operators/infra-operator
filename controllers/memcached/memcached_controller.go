@@ -196,7 +196,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
 
 	// Service to expose Memcached pods
-	commonsvc := commonservice.NewService(memcached.HeadlessService(instance), map[string]string{}, time.Duration(5)*time.Second)
+	commonsvc, err := commonservice.NewService(memcached.HeadlessService(instance), time.Duration(5)*time.Second, nil)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ExposeServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ExposeServiceReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
 	sres, serr := commonsvc.CreateOrPatch(ctx, helper)
 	if serr != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(

@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,37 +71,19 @@ type DNSMasqSpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// ExternalEndpoints, expose a VIP using a pre-created IPAddressPool
-	ExternalEndpoints []MetalLBConfig `json:"externalEndpoints,omitempty"`
-
-	// +kubebuilder:validation:Optional
 	// +kubebuilder:default="dnsdata"
 	// Value of the DNSDataLabelSelectorKey which was set on the configmaps containing hosts information
 	DNSDataLabelSelectorValue string `json:"dnsDataLabelSelectorValue"`
+
+	// +kubebuilder:validation:Optional
+	// Override, provides the ability to override the generated manifest of several child resources.
+	Override DNSMasqOverrideSpec `json:"override,omitempty"`
 }
 
-// MetalLBConfig to configure the MetalLB loadbalancer service
-type MetalLBConfig struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// IPAddressPool expose VIP via MetalLB on the IPAddressPool
-	IPAddressPool string `json:"ipAddressPool"`
-
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=true
-	// SharedIP if true, VIP/VIPs get shared with multiple services
-	SharedIP bool `json:"sharedIP"`
-
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=""
-	// SharedIPKey specifies the sharing key which gets set as the annotation on the LoadBalancer service.
-	// Services which share the same VIP must have the same SharedIPKey. Defaults to the IPAddressPool if
-	// SharedIP is true, but no SharedIPKey specified.
-	SharedIPKey string `json:"sharedIPKey"`
-
-	// +kubebuilder:validation: Required
-	// LoadBalancerIPs, request given IPs from the pool if available. Using a list to allow dual stack (IPv4/IPv6) support
-	LoadBalancerIPs []string `json:"loadBalancerIPs"`
+// DNSMasqOverrideSpec to override the generated manifest of several child resources.
+type DNSMasqOverrideSpec struct {
+	// Override configuration for the Service created to serve traffic to the cluster.
+	Service *service.OverrideSpec `json:"service,omitempty"`
 }
 
 // DNSMasqDebug defines the observed state of DNSMasq

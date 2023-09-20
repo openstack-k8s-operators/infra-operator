@@ -150,7 +150,7 @@ var _ = Describe("DNSMasq controller", func() {
 
 			svc := th.GetService(types.NamespacedName{
 				Namespace: namespace,
-				Name:      fmt.Sprintf("dnsmasq-%s-ctlplane", dnsMasqName.Name)})
+				Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name)})
 			Expect(svc.Labels["service"]).To(Equal("dnsmasq"))
 		})
 
