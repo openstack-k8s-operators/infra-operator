@@ -43,7 +43,7 @@ type Network struct {
 	MTU int `json:"mtu"`
 
 	// +kubebuilder:validation:Required
-	// Subnets of the tripleo network
+	// Subnets of the network
 	Subnets []Subnet `json:"subnets"`
 }
 
@@ -110,7 +110,7 @@ type Route struct {
 // NetConfigSpec defines the desired state of NetConfig
 type NetConfigSpec struct {
 	// +kubebuilder:validation:Required
-	// Networks, list of all tripleo networks of the deployment
+	// Networks, list of all networks of the deployment
 	Networks []Network `json:"networks"`
 }
 
