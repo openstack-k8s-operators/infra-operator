@@ -39,7 +39,7 @@ spec:
             description: NetConfigSpec defines the desired state of NetConfig
             properties:
               networks:
-                description: Networks, list of all tripleo networks of the deployment
+                description: Networks, list of all networks of the deployment
                 items:
                   description: Network definition
                   properties:
@@ -56,7 +56,7 @@ spec:
                       pattern: ^[a-zA-Z0-9][a-zA-Z0-9\-_]*[a-zA-Z0-9]$
                       type: string
                     subnets:
-                      description: Subnets of the tripleo network
+                      description: Subnets of the network
                       items:
                         description: Subnet definition
                         properties:
