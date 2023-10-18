@@ -90,6 +90,7 @@ spec:
                       - auth-zone
                       - synth-domain
                       - no-negcache
+                      - local
                       type: string
                     values:
                       items:
