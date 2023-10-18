@@ -8,6 +8,9 @@ spec:
   - key: server
     values:
     - 192.168.122.1
+  - key: local
+    values:
+    - '/example.com/'
   debug:
     service: false
   override:
