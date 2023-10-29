@@ -25,7 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -237,7 +237,7 @@ var _ = Describe("IPSet controller", func() {
 	When("a GetDefaultIPSetSpec IPSet gets created using a custom NetConfig", func() {
 		BeforeEach(func() {
 			netSpec := GetNetSpec(net1, GetSubnet1(subnet1))
-			netSpec.Subnets[0].DNSDomain = pointer.String("subnet1.net-1.example.com")
+			netSpec.Subnets[0].DNSDomain = ptr.To("subnet1.net-1.example.com")
 			netCfg := CreateNetConfig(namespace, GetNetConfigSpec(netSpec))
 			ipset := CreateIPSet(namespace, GetDefaultIPSetSpec())
 
