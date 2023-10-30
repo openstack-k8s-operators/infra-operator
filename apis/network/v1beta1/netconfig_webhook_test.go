@@ -23,7 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 // IPv4
@@ -31,8 +31,8 @@ var (
 	ipv4Subnet1 = Subnet{
 		Name:      "subnet1",
 		Cidr:      "172.17.0.0/24",
-		DNSDomain: pointer.String("subnet1.example.com"),
-		Gateway:   pointer.String("172.17.0.1"),
+		DNSDomain: ptr.To("subnet1.example.com"),
+		Gateway:   ptr.To("172.17.0.1"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "172.17.0.1",
@@ -57,7 +57,7 @@ var (
 	ipv4subnet2 = Subnet{
 		Name:      "subnet2",
 		Cidr:      "172.17.1.0/24",
-		DNSDomain: pointer.String("subnet2.example.com"),
+		DNSDomain: ptr.To("subnet2.example.com"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "172.17.1.1",
@@ -72,7 +72,7 @@ var (
 	ipv4subnet3 = Subnet{
 		Name:    "subnet3",
 		Cidr:    "172.18.0.0/24",
-		Gateway: pointer.String("172.18.0.254"),
+		Gateway: ptr.To("172.18.0.254"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "172.18.0.1",
@@ -87,8 +87,8 @@ var (
 	ipv6Subnet1 = Subnet{
 		Name:      "subnet1",
 		Cidr:      "fd00:fd00:fd00:2000::/64",
-		DNSDomain: pointer.String("subnet1.example.com"),
-		Gateway:   pointer.String("fd00:fd00:fd00:2000::1"),
+		DNSDomain: ptr.To("subnet1.example.com"),
+		Gateway:   ptr.To("fd00:fd00:fd00:2000::1"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "fd00:fd00:fd00:2000::1",
@@ -113,7 +113,7 @@ var (
 	ipv6subnet2 = Subnet{
 		Name:      "subnet2",
 		Cidr:      "fd00:fd00:fd00:2001::/64",
-		DNSDomain: pointer.String("subnet2.example.com"),
+		DNSDomain: ptr.To("subnet2.example.com"),
 		AllocationRanges: []AllocationRange{
 			{
 				Start: "fd00:fd00:fd00:2001::10",
@@ -148,10 +148,10 @@ func subnet1BadGatewayFormat(ipv4 bool) Subnet {
 
 	if ipv4 {
 		subnet = ipv4Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("172.17.0.0.1")
+		subnet.Gateway = ptr.To("172.17.0.0.1")
 	} else {
 		subnet = ipv6Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("fd00:fd00:fd00:20000::1")
+		subnet.Gateway = ptr.To("fd00:fd00:fd00:20000::1")
 	}
 
 	return *subnet
@@ -163,10 +163,10 @@ func subnet1GatewayWrongIPVersion(ipv4 bool) Subnet {
 
 	if ipv4 {
 		subnet = ipv4Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("fd00:fd00:fd00:2000::1")
+		subnet.Gateway = ptr.To("fd00:fd00:fd00:2000::1")
 	} else {
 		subnet = ipv6Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("172.17.0.1")
+		subnet.Gateway = ptr.To("172.17.0.1")
 	}
 
 	return *subnet
@@ -178,10 +178,10 @@ func subnet1GatewayOutsideCIDR(ipv4 bool) Subnet {
 
 	if ipv4 {
 		subnet = ipv4Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("172.17.1.1")
+		subnet.Gateway = ptr.To("172.17.1.1")
 	} else {
 		subnet = ipv6Subnet1.DeepCopy()
-		subnet.Gateway = pointer.String("fd00:fd00:fd00:2001::1")
+		subnet.Gateway = ptr.To("fd00:fd00:fd00:2001::1")
 	}
 
 	return *subnet
@@ -1391,7 +1391,7 @@ func TestNetConfigValidation(t *testing.T) {
 								{
 									Name: "subnet1",
 									Cidr: "172.17.0.0/24",
-									Vlan: pointer.Int(1),
+									Vlan: ptr.To(1),
 								},
 							},
 						},
@@ -1402,7 +1402,7 @@ func TestNetConfigValidation(t *testing.T) {
 								{
 									Name: "subnet1",
 									Cidr: "172.17.0.0/24",
-									Vlan: pointer.Int(2),
+									Vlan: ptr.To(2),
 								},
 							},
 						},
@@ -1533,12 +1533,12 @@ func TestNetConfigValidation(t *testing.T) {
 								{
 									Name:      "subnet1",
 									Cidr:      "172.17.0.0/24",
-									DNSDomain: pointer.String("foo.net1.example.com"),
+									DNSDomain: ptr.To("foo.net1.example.com"),
 								},
 								{
 									Name:      "subnet2",
 									Cidr:      "172.17.1.0/24",
-									DNSDomain: pointer.String("foo.net1.example.com"),
+									DNSDomain: ptr.To("foo.net1.example.com"),
 								},
 							},
 						},
@@ -1650,7 +1650,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "bar",
 								Cidr: "172.17.0.0/24",
-								Vlan: pointer.Int(1),
+								Vlan: ptr.To(1),
 							},
 						},
 					},
@@ -1665,7 +1665,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "foo",
 								Cidr: "172.17.0.0/24",
-								Vlan: pointer.Int(1),
+								Vlan: ptr.To(1),
 							},
 						},
 					},
@@ -1684,7 +1684,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "foo",
 								Cidr: "172.17.1.0/24",
-								Vlan: pointer.Int(1),
+								Vlan: ptr.To(1),
 							},
 						},
 					},
@@ -1699,7 +1699,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "foo",
 								Cidr: "172.17.0.0/24",
-								Vlan: pointer.Int(1),
+								Vlan: ptr.To(1),
 							},
 						},
 					},
@@ -1718,7 +1718,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "foo",
 								Cidr: "172.17.0.0/24",
-								Vlan: pointer.Int(2),
+								Vlan: ptr.To(2),
 							},
 						},
 					},
@@ -1733,7 +1733,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name: "foo",
 								Cidr: "172.17.0.0/24",
-								Vlan: pointer.Int(1),
+								Vlan: ptr.To(1),
 							},
 						},
 					},
@@ -1752,7 +1752,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name:    "foo",
 								Cidr:    "172.17.0.0/24",
-								Gateway: pointer.String("172.17.0.254"),
+								Gateway: ptr.To("172.17.0.254"),
 							},
 						},
 					},
@@ -1767,7 +1767,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 							{
 								Name:    "foo",
 								Cidr:    "172.17.0.0/24",
-								Gateway: pointer.String("172.17.0.1"),
+								Gateway: ptr.To("172.17.0.1"),
 							},
 						},
 					},

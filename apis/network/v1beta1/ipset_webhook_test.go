@@ -23,7 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func TestIPSetValiateIPSetNetwork(t *testing.T) {
@@ -46,7 +46,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("172.17.0.10"),
+							FixedIP:    ptr.To("172.17.0.10"),
 						},
 					},
 				},
@@ -104,7 +104,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("172.17.0.0.10"),
+							FixedIP:    ptr.To("172.17.0.0.10"),
 						},
 					},
 				},
@@ -124,7 +124,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("fd00:fd00:fd00:20000::10"),
+							FixedIP:    ptr.To("fd00:fd00:fd00:20000::10"),
 						},
 					},
 				},
@@ -144,7 +144,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("fd00:fd00:fd00:2000::10"),
+							FixedIP:    ptr.To("fd00:fd00:fd00:2000::10"),
 						},
 					},
 				},
@@ -164,7 +164,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("172.17.0.10"),
+							FixedIP:    ptr.To("172.17.0.10"),
 						},
 					},
 				},
@@ -184,7 +184,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("172.17.1.10"),
+							FixedIP:    ptr.To("172.17.1.10"),
 						},
 					},
 				},
@@ -204,7 +204,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:       "net1",
 							SubnetName: "subnet1",
-							FixedIP:    pointer.String("fd00:fd00:fd00:2001::10"),
+							FixedIP:    ptr.To("fd00:fd00:fd00:2001::10"),
 						},
 					},
 				},
@@ -224,12 +224,12 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:         "net1",
 							SubnetName:   "subnet1",
-							DefaultRoute: pointer.Bool(true),
+							DefaultRoute: ptr.To(true),
 						},
 						{
 							Name:         "net2",
 							SubnetName:   "subnet3",
-							DefaultRoute: pointer.Bool(true),
+							DefaultRoute: ptr.To(true),
 						},
 					},
 				},
@@ -249,12 +249,12 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 						{
 							Name:         "net1",
 							SubnetName:   "subnet1",
-							DefaultRoute: pointer.Bool(true),
+							DefaultRoute: ptr.To(true),
 						},
 						{
 							Name:         "net2",
 							SubnetName:   "subnet1",
-							DefaultRoute: pointer.Bool(true),
+							DefaultRoute: ptr.To(true),
 						},
 					},
 				},
@@ -300,13 +300,13 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 					{
 						Name:       "net2",
 						SubnetName: "subnet3",
-						FixedIP:    pointer.String("172.18.0.10"),
+						FixedIP:    ptr.To("172.18.0.10"),
 					},
 				},
 			},
@@ -315,13 +315,13 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 					{
 						Name:       "net2",
 						SubnetName: "subnet3",
-						FixedIP:    pointer.String("172.18.0.10"),
+						FixedIP:    ptr.To("172.18.0.10"),
 					},
 				},
 			},
@@ -335,8 +335,8 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 				},
 			},
@@ -345,13 +345,13 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 					{
 						Name:       "net2",
 						SubnetName: "subnet3",
-						FixedIP:    pointer.String("172.18.0.10"),
+						FixedIP:    ptr.To("172.18.0.10"),
 					},
 				},
 			},
@@ -365,13 +365,13 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 					{
 						Name:       "net2",
 						SubnetName: "subnet3",
-						FixedIP:    pointer.String("172.18.0.10"),
+						FixedIP:    ptr.To("172.18.0.10"),
 					},
 				},
 			},
@@ -380,13 +380,13 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet2",
-						FixedIP:      pointer.String("172.17.1.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.1.10"),
+						DefaultRoute: ptr.To(true),
 					},
 					{
 						Name:       "net2",
 						SubnetName: "subnet3",
-						FixedIP:    pointer.String("172.18.0.10"),
+						FixedIP:    ptr.To("172.18.0.10"),
 					},
 				},
 			},
@@ -400,8 +400,8 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.11"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.11"),
+						DefaultRoute: ptr.To(true),
 					},
 				},
 			},
@@ -410,8 +410,8 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 				},
 			},
@@ -425,8 +425,8 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:         "net1",
 						SubnetName:   "subnet1",
-						FixedIP:      pointer.String("172.17.0.10"),
-						DefaultRoute: pointer.Bool(true),
+						FixedIP:      ptr.To("172.17.0.10"),
+						DefaultRoute: ptr.To(true),
 					},
 				},
 			},
@@ -435,7 +435,7 @@ func TestIPSetUpdateValidation(t *testing.T) {
 					{
 						Name:       "net1",
 						SubnetName: "subnet1",
-						FixedIP:    pointer.String("172.17.0.10"),
+						FixedIP:    ptr.To("172.17.0.10"),
 					},
 				},
 			},
