@@ -1,0 +1,30 @@
+apiVersion: network.openstack.org/v1beta1
+kind: Reservation
+metadata:
+  name: edpm-compute-0
+spec:
+  ipSetRef:
+    name: edpm-compute-0
+    namespace: openstack
+    uid: 56753ffb-e486-43ab-a79a-f85f27b2ac14
+  reservation:
+    CtlPlane:
+      address: 192.168.122.100
+      network: CtlPlane
+      subnet: subnet1
+    InternalApi:
+      address: 172.17.0.100
+      network: InternalApi
+      subnet: subnet1
+    Storage:
+      address: 172.18.0.100
+      network: Storage
+      subnet: subnet1
+    StorageMgmt:
+      address: 172.20.0.100
+      network: StorageMgmt
+      subnet: subnet1
+    Tenant:
+      address: 172.19.0.100
+      network: Tenant
+      subnet: subnet1
