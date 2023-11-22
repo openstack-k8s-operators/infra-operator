@@ -50,9 +50,9 @@ func (r *TransportURLReconciler) GetKClient() kubernetes.Interface {
 	return r.Kclient
 }
 
-// GetLogger -
-func (r *TransportURLReconciler) GetLogger() logr.Logger {
-	return r.Log
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func GetLog(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("TransportURL")
 }
 
 // GetScheme -
@@ -64,8 +64,12 @@ func (r *TransportURLReconciler) GetScheme() *runtime.Scheme {
 type TransportURLReconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
 }
 
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls,verbs=get;list;watch;create;update;patch;delete
@@ -76,8 +80,7 @@ type TransportURLReconciler struct {
 
 // Reconcile - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
-
+	Log := r.GetLogger(ctx)
 	// Fetch the TransportURL instance
 	instance := &rabbitmqv1beta1.TransportURL{}
 	err := r.Client.Get(ctx, req.NamespacedName, instance)
@@ -113,7 +116,7 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err

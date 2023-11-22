@@ -60,8 +60,12 @@ import (
 type DNSMasqReconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
-	Log     logr.Logger
 	Scheme  *runtime.Scheme
+}
+
+// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
+func (r *DNSMasqReconciler) GetLogger(ctx context.Context) logr.Logger {
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
 }
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsmasqs,verbs=get;list;watch;create;update;patch;delete
@@ -85,7 +89,7 @@ type DNSMasqReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.13.0/pkg/reconcile
 func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-	_ = log.FromContext(ctx)
+	Log := r.GetLogger(ctx)
 
 	// Fetch the DNSMasq instance
 	instance := &networkv1.DNSMasq{}
@@ -106,7 +110,7 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		r.Client,
 		r.Kclient,
 		r.Scheme,
-		r.Log,
+		Log,
 	)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -193,8 +197,8 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
+func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+	Log := r.GetLogger(ctx)
 	dnsmasqFN := handler.EnqueueRequestsFromMapFunc(func(o client.Object) []reconcile.Request {
 		result := []reconcile.Request{}
 
@@ -205,8 +209,8 @@ func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		listOpts := []client.ListOption{
 			client.InNamespace(o.GetNamespace()),
 		}
-		if err := r.Client.List(context.Background(), dnsmasqs, listOpts...); err != nil {
-			r.Log.Error(err, "Unable to retrieve DNSMasqList %w")
+		if err := r.Client.List(ctx, dnsmasqs, listOpts...); err != nil {
+			Log.Error(err, "Unable to retrieve DNSMasqList")
 			return nil
 		}
 
@@ -219,7 +223,7 @@ func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			result = append(result, reconcile.Request{NamespacedName: name})
 		}
 		if len(result) > 0 {
-			r.Log.Info(fmt.Sprintf("Reconcile request for: %+v", result))
+			Log.Info("Reconcile request for:", "result", result)
 
 			return result
 		}
@@ -269,17 +273,19 @@ func (r *DNSMasqReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 func (r *DNSMasqReconciler) reconcileDelete(ctx context.Context, instance *networkv1.DNSMasq, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service delete")
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service delete")
 
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
-	r.Log.Info("Reconciled Service delete successfully")
+	Log.Info("Reconciled Service delete successfully")
 
 	return ctrl.Result{}, nil
 }
 
 func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *networkv1.DNSMasq, helper *helper.Helper) (ctrl.Result, error) {
-	r.Log.Info("Reconciling Service")
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service")
 
 	serviceLabels := map[string]string{
 		common.AppSelector: dnsmasq.ServiceName,
@@ -338,7 +344,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		configMapVars[cm.Name] = env.SetValue(hash)
 		cmNames = append(cmNames, cm.GetName())
 	}
-	r.Log.Info(fmt.Sprintf("ConfigMaps providing host information: %s", cmNames))
+	Log.Info("ConfigMaps providing host information:", "ConfigMaps", cmNames)
 	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, condition.InputReadyMessage)
 
 	// create hash over all the different input resources to identify if any of
@@ -449,10 +455,10 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	instance.Status.ReadyCount = depl.GetDeployment().Status.ReadyReplicas
 
 	if instance.Status.ReadyCount > 0 {
-		r.Log.Info(fmt.Sprintf("Deployment is ready: %s", instance.Name))
+		Log.Info("Deployment is ready: ", "Deployment", instance.Name)
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	} else {
-		r.Log.Info(fmt.Sprintf("Deployment is not ready: %s - %+v", instance.Name, depl.GetDeployment().Status))
+		Log.Info("Deployment is not ready:", "Name", instance.Name, "deployment", depl.GetDeployment().Status)
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
 			condition.RequestedReason,
@@ -463,7 +469,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	}
 	// create Deployment - end
 
-	r.Log.Info("Reconciled Service successfully")
+	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
 }
 

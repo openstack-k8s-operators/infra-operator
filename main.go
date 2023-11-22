@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -129,7 +130,6 @@ func main() {
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("TransportURL"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TransportURL")
 		os.Exit(1)
@@ -137,7 +137,6 @@ func main() {
 	if err = (&memcachedcontrollers.Reconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("Memcached"),
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Memcached")
@@ -146,7 +145,6 @@ func main() {
 	if err = (&rediscontrollers.Reconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("Redis"),
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Redis")
@@ -156,9 +154,8 @@ func main() {
 	if err = (&networkcontrollers.DNSMasqReconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("DNSMasq"),
 		Scheme:  mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(context.Background(), mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DNSMasq")
 		os.Exit(1)
 	}
@@ -166,7 +163,6 @@ func main() {
 	if err = (&networkcontrollers.DNSDataReconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("DNSData"),
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DNSData")
@@ -176,7 +172,6 @@ func main() {
 	if err = (&networkcontrollers.ServiceReconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("Service"),
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Service")
@@ -185,9 +180,8 @@ func main() {
 	if err = (&networkcontrollers.IPSetReconciler{
 		Client:  mgr.GetClient(),
 		Kclient: kclient,
-		Log:     ctrl.Log.WithName("controllers").WithName("IPSet"),
 		Scheme:  mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).SetupWithManager(context.Background(), mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPSet")
 		os.Exit(1)
 	}
