@@ -69,7 +69,7 @@ type TransportURLReconciler struct {
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
+	return log.FromContext(ctx).WithName("Controllers").WithName("TransportURL")
 }
 
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls,verbs=get;list;watch;create;update;patch;delete
@@ -148,6 +148,8 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 }
 
 func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1beta1.TransportURL, helper *helper.Helper) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service")
 
 	//TODO (implement a watch on the rabbitmq cluster resources to update things if there are changes)
 	rabbit, err := getRabbitmqCluster(ctx, helper, instance)
@@ -174,8 +176,16 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// TODO(dprince): Future we may want to use vhosts for each OpenStackService instead.
 	// vhosts would likely require use of https://github.com/rabbitmq/messaging-topology-operator/ which we do not yet include
-	username, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "username")
+	rabbitSecret, _, err := oko_secret.GetSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1beta1.TransportURLReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				rabbitmqv1beta1.TransportURLInProgressMessage))
+			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
 			condition.ErrorReason,
@@ -183,12 +193,13 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			rabbitmqv1beta1.TransportURLReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
 	}
 
-	password, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "password")
-	if err != nil {
+	var username string
+	if u, ok := rabbitSecret.Data["username"]; ok {
+		username = string(u)
+	} else {
+		err := fmt.Errorf("username does not exist in rabbitmq secret %s", rabbitSecret.Name)
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
 			condition.ErrorReason,
@@ -196,12 +207,13 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			rabbitmqv1beta1.TransportURLReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
 	}
 
-	host, ctrlResult, err := oko_secret.GetDataFromSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, time.Duration(10)*time.Second, "host")
-	if err != nil {
+	var password string
+	if p, ok := rabbitSecret.Data["password"]; ok {
+		password = string(p)
+	} else {
+		err := fmt.Errorf("password does not exist in rabbitmq secret %s", rabbitSecret.Name)
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1beta1.TransportURLReadyCondition,
 			condition.ErrorReason,
@@ -209,12 +221,44 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			rabbitmqv1beta1.TransportURLReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
 	}
+
+	var host string
+	if h, ok := rabbitSecret.Data["host"]; ok {
+		host = string(h)
+	} else {
+		err := fmt.Errorf("host does not exist in rabbitmq secret %s", rabbitSecret.Name)
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1beta1.TransportURLReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			rabbitmqv1beta1.TransportURLReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	var port string
+	if p, ok := rabbitSecret.Data["port"]; ok {
+		port = string(p)
+	} else {
+		err := fmt.Errorf("port does not exist in rabbitmq secret %s", rabbitSecret.Name)
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1beta1.TransportURLReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			rabbitmqv1beta1.TransportURLReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	tlsEnabled := false
+	if rabbit.Spec.TLS.SecretName != "" {
+		tlsEnabled = true
+	}
+	Log.Info(fmt.Sprintf("rabbitmq cluster %s has TLS enabled: %t", rabbit.Name, tlsEnabled))
 
 	// Create a new secret with the transport URL for this CR
-	secret := r.createTransportURLSecret(instance, string(username), string(password), string(host))
+	secret := r.createTransportURLSecret(instance, string(username), string(password), string(host), string(port), tlsEnabled)
 	_, op, err := oko_secret.CreateOrPatchSecret(ctx, helper, instance, secret)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -239,12 +283,26 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	instance.Status.Conditions.MarkTrue(rabbitmqv1beta1.TransportURLReadyCondition, rabbitmqv1beta1.TransportURLReadyMessage)
 
+	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
-
 }
 
 // Create k8s secret with transport URL
-func (r *TransportURLReconciler) createTransportURLSecret(instance *rabbitmqv1beta1.TransportURL, username string, password string, host string) *corev1.Secret {
+func (r *TransportURLReconciler) createTransportURLSecret(
+	instance *rabbitmqv1beta1.TransportURL,
+	username string,
+	password string,
+	host string,
+	port string,
+	tlsEnabled bool,
+) *corev1.Secret {
+	query := ""
+	if tlsEnabled {
+		query += "?ssl=1"
+	} else {
+		query += "?ssl=0"
+	}
+
 	// Create a new secret with the transport URL for this CR
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -252,7 +310,7 @@ func (r *TransportURLReconciler) createTransportURLSecret(instance *rabbitmqv1be
 			Namespace: instance.Namespace,
 		},
 		Data: map[string][]byte{
-			"transport_url": []byte(fmt.Sprintf("rabbit://%s:%s@%s:5672", username, password, host)),
+			"transport_url": []byte(fmt.Sprintf("rabbit://%s:%s@%s:%s/%s", username, password, host, port, query)),
 		},
 	}
 }
