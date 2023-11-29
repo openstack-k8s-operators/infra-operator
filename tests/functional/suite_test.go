@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -36,8 +37,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
+	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
 
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
+	rabbitmq_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
+
+	infra_test "github.com/openstack-k8s-operators/infra-operator/apis/test/helpers"
+	test "github.com/openstack-k8s-operators/lib-common/modules/test"
 
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	//+kubebuilder:scaffold:imports
@@ -49,12 +56,14 @@ import (
 var (
 	cfg       *rest.Config
 	k8sClient client.Client // You'll be using this client in your tests.
+	dynClient *dynamic.DynamicClient
 	testEnv   *envtest.Environment
 	ctx       context.Context
 	cancel    context.CancelFunc
 	logger    logr.Logger
 	th        *TestHelper
 	namespace string
+	infra     *infra_test.TestHelper
 )
 
 func TestAPIs(t *testing.T) {
@@ -70,10 +79,15 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
+	rabbitmqv2CRDs, err := test.GetCRDDirFromModule(
+		"github.com/rabbitmq/cluster-operator", "../../go.mod", "config/crd/bases")
+	Expect(err).ShouldNot(HaveOccurred())
+
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
+			rabbitmqv2CRDs,
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
@@ -86,7 +100,6 @@ var _ = BeforeSuite(func() {
 	}
 
 	// cfg is defined in this file globally.
-	var err error
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
@@ -97,6 +110,10 @@ var _ = BeforeSuite(func() {
 	// in the test env.
 	err = networkv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
+	err = rabbitmqv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = rabbitmqclusterv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
 	//+kubebuilder:scaffold:scheme
 
 	logger = ctrl.Log.WithName("---Test---")
@@ -106,6 +123,8 @@ var _ = BeforeSuite(func() {
 	Expect(k8sClient).NotTo(BeNil())
 	th = NewTestHelper(ctx, k8sClient, timeout, interval, logger)
 	Expect(th).NotTo(BeNil())
+	infra = infra_test.NewTestHelper(ctx, k8sClient, timeout, interval, logger)
+	Expect(infra).NotTo(BeNil())
 
 	// Start the controller-manager if goroutine
 	webhookInstallOptions := &testEnv.WebhookInstallOptions
@@ -124,6 +143,10 @@ var _ = BeforeSuite(func() {
 
 	kclient, err := kubernetes.NewForConfig(cfg)
 	Expect(err).ToNot(HaveOccurred(), "failed to create kclient")
+
+	dynClient, err = dynamic.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(dynClient).NotTo(BeNil())
 
 	err = (&networkv1.NetConfig{}).SetupWebhookWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
@@ -160,6 +183,13 @@ var _ = BeforeSuite(func() {
 		Scheme:  k8sManager.GetScheme(),
 		Kclient: kclient,
 	}).SetupWithManager(context.Background(), k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&rabbitmq_ctrl.TransportURLReconciler{
+		Client:  k8sManager.GetClient(),
+		Scheme:  k8sManager.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	go func() {

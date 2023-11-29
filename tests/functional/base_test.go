@@ -25,13 +25,18 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
 )
 
 const (
@@ -136,6 +141,195 @@ func GetDefaultDNSDataSpec() map[string]interface{} {
 	return spec
 }
 
+func CreateTransportURL(name types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "TransportURL",
+		"metadata": map[string]interface{}{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func CreateRabbitMQCluster(name types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "rabbitmq.com/v1beta1",
+		"kind":       "RabbitmqCluster",
+		"metadata": map[string]interface{}{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func UpdateRabbitMQClusterToTLS(name types.NamespacedName) {
+	Eventually(func(g Gomega) {
+		mq := GetRabbitMQCluster(name)
+		g.Expect(mq).ToNot(BeNil())
+
+		_, err := controllerutil.CreateOrPatch(
+			th.Ctx, th.K8sClient, mq, func() error {
+				mq.Spec.TLS = rabbitmqclusterv1.TLSSpec{
+					CaSecretName:           "rootca-internal",
+					DisableNonTLSListeners: true,
+					SecretName:             "cert-rabbitmq-svc",
+				}
+				return nil
+			})
+		g.Expect(err).ShouldNot(HaveOccurred())
+	}, th.Timeout, th.Interval).Should(Succeed())
+}
+
+func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]interface{} {
+	spec := make(map[string]interface{})
+	spec["delayStartSeconds"] = "30"
+	spec["image"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
+	if tlsEnabled {
+		spec["tls"] = map[string]interface{}{
+			"caSecretName":           "rootca-internal",
+			"disableNonTLSListeners": true,
+			"secretName":             "cert-rabbitmq-svc",
+		}
+	}
+
+	return spec
+}
+
+// DeleteRabbitMQCluster deletes a RabbitMQCluster instance from the Kubernetes cluster.
+func DeleteRabbitMQCluster(name types.NamespacedName) {
+	Eventually(func(g Gomega) {
+		mq := &rabbitmqclusterv1.RabbitmqCluster{}
+		err := th.K8sClient.Get(th.Ctx, name, mq)
+		// if it is already gone that is OK
+		if k8s_errors.IsNotFound(err) {
+			return
+		}
+		g.Expect(err).NotTo(HaveOccurred())
+
+		g.Expect(th.K8sClient.Delete(th.Ctx, mq)).Should(Succeed())
+
+		err = th.K8sClient.Get(th.Ctx, name, mq)
+		g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+	}, th.Timeout, th.Interval).Should(Succeed())
+}
+
+func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmqclusterv1.RabbitmqCluster) {
+	Eventually(func(g Gomega) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name.Name,
+				Namespace: name.Namespace,
+			},
+		}
+
+		// create rabbitmq-secret secret
+		secretData := map[string][]byte{
+			"host":     []byte(fmt.Sprintf("host.%s.svc", namespace)),
+			"password": []byte("12345678"),
+			"username": []byte("user"),
+			"port":     []byte("5672"),
+		}
+
+		// if tls is enabled for rabbitmq cluster port will be 5671
+		if mq.Spec.TLS.SecretName != "" {
+			secretData["port"] = []byte("5671")
+		}
+
+		_, err := controllerutil.CreateOrPatch(
+			th.Ctx, th.K8sClient, secret, func() error {
+				secret.Data = secretData
+				return nil
+			})
+		g.Expect(err).ShouldNot(HaveOccurred())
+	}, th.Timeout, th.Interval).Should(Succeed())
+}
+
+// SimulateRabbitMQClusterReady function updates the RabbitMQCluster object
+// status to have AllReplicasReady condition, statusDefaultUser reference
+// and creates the secret referenced there containing host, password and user.
+//
+// Example usage:
+//
+//	SimulateRabbitMQClusterReady(types.NamespacedName{Name: "test-mq", Namespace: "test-namespace"})
+func SimulateRabbitMQClusterReady(name types.NamespacedName) {
+	Eventually(func(g Gomega) {
+		secretName := types.NamespacedName{Name: name.Name + "-default-user", Namespace: namespace}
+
+		mq := GetRabbitMQCluster(name)
+		g.Expect(mq).ToNot(BeNil())
+
+		// create/update rabbitmq secret
+		CreateOrUpdateRabbitMQClusterSecret(secretName, mq)
+
+		raw := map[string]interface{}{
+			"apiVersion": "rabbitmq.com/v1beta1",
+			"kind":       "RabbitmqCluster",
+			"metadata": map[string]interface{}{
+				"name":      name.Name,
+				"namespace": name.Namespace,
+			},
+		}
+
+		status := make(map[string]interface{})
+
+		// add AllReplicasReady condition
+		statusCondition := []map[string]interface{}{
+			{
+				"reason": "AllPodsAreReady",
+				"status": "True",
+				"type":   "AllReplicasReady",
+			},
+		}
+
+		// add status.defaultUser which is used to get the
+		// secret holding username/password/host
+		statusDefaultUser := map[string]interface{}{
+			"secretReference": map[string]interface{}{
+				"keys": map[string]interface{}{
+					"password": "password",
+					"username": "username",
+				},
+				"name":      secretName.Name,
+				"namespace": name.Namespace,
+			},
+			"serviceReference": map[string]interface{}{
+				"name":      name.Name,
+				"namespace": name.Namespace,
+			},
+		}
+
+		status["conditions"] = statusCondition
+		status["defaultUser"] = statusDefaultUser
+		raw["status"] = status
+
+		un := &unstructured.Unstructured{Object: raw}
+		deploymentRes := schema.GroupVersionResource{
+			Group:    "rabbitmq.com",
+			Version:  "v1beta1",
+			Resource: "rabbitmqclusters",
+		}
+
+		// Patch status
+		result, err := dynClient.Resource(deploymentRes).Namespace(namespace).ApplyStatus(
+			th.Ctx, name.Name, un, metav1.ApplyOptions{FieldManager: "application/apply-patch"})
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(result).ToNot(BeNil())
+
+		mq = GetRabbitMQCluster(name)
+		g.Expect(mq.Status.Conditions).ToNot(BeNil())
+		g.Expect(mq.Status.DefaultUser).ToNot(BeNil())
+
+	}, th.Timeout, th.Interval).Should(Succeed())
+	th.Logger.Info("Simulated RabbitMQCluster ready", "on", name)
+}
+
 func GetDNSMasq(name types.NamespacedName) *networkv1.DNSMasq {
 	instance := &networkv1.DNSMasq{}
 	Eventually(func(g Gomega) {
@@ -176,6 +370,14 @@ func GetReservation(name types.NamespacedName) *networkv1.Reservation {
 	return instance
 }
 
+func GetRabbitMQCluster(name types.NamespacedName) *rabbitmqclusterv1.RabbitmqCluster {
+	mq := &rabbitmqclusterv1.RabbitmqCluster{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, mq)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return mq
+}
+
 func DNSMasqConditionGetter(name types.NamespacedName) condition.Conditions {
 	instance := GetDNSMasq(name)
 	return instance.Status.Conditions
@@ -188,6 +390,11 @@ func DNSDataConditionGetter(name types.NamespacedName) condition.Conditions {
 
 func IPSetConditionGetter(name types.NamespacedName) condition.Conditions {
 	instance := GetIPSet(name)
+	return instance.Status.Conditions
+}
+
+func TransportURLConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := infra.GetTransportURL(name)
 	return instance.Status.Conditions
 }
 
