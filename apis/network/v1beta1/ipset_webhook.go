@@ -31,6 +31,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // log is for logging in this package.
@@ -64,17 +65,17 @@ func (r *IPSet) Default() {
 var _ webhook.Validator = &IPSet{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *IPSet) ValidateCreate() error {
+func (r *IPSet) ValidateCreate() (admission.Warnings, error) {
 	ipsetlog.Info("validate create", "name", r.Name)
 
 	// check if there is already a NetConfig in the namespace.
 	netcfg, err := getNetConfig(webhookClient, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// stop if there is no NetConfig in the namespace.
 	if netcfg == nil {
-		return fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
+		return nil, fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
 	}
 
 	allErrs := field.ErrorList{}
@@ -84,24 +85,24 @@ func (r *IPSet) ValidateCreate() error {
 	allErrs = append(allErrs, valiateIPSetNetwork(r.Spec.Networks, basePath, &netcfg.Spec)...)
 
 	if len(allErrs) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), r.Name, allErrs)
+	return nil, apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), r.Name, allErrs)
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *IPSet) ValidateUpdate(old runtime.Object) error {
+func (r *IPSet) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 	ipsetlog.Info("validate update", "name", r.Name)
 
 	oldIPSet, ok := old.(*IPSet)
 	if !ok || oldIPSet == nil {
-		return apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+		return nil, apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
 	}
 
 	// Do not allow to update of Spec.Networks if the Immuatable was set on the existing object
 	if oldIPSet.Spec.Immutable && !equality.Semantic.DeepEqual(oldIPSet.Spec.Networks, r.Spec.Networks) {
-		return apierrors.NewForbidden(
+		return nil, apierrors.NewForbidden(
 			schema.GroupResource{
 				Group:    GroupVersion.WithKind("IPSet").Group,
 				Resource: GroupVersion.WithKind("IPSet").Kind,
@@ -121,11 +122,11 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) error {
 		// check if there is already a NetConfig in the namespace.
 		netcfg, err := getNetConfig(webhookClient, r)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// stop if there is no NetConfig in the namespace.
 		if netcfg == nil {
-			return fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
+			return nil, fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
 		}
 
 		basePath := field.NewPath("spec")
@@ -138,18 +139,18 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) error {
 	}
 
 	if len(allErrs) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), r.Name, allErrs)
+	return nil, apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), r.Name, allErrs)
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *IPSet) ValidateDelete() error {
+func (r *IPSet) ValidateDelete() (admission.Warnings, error) {
 	ipsetlog.Info("validate delete", "name", r.Name)
 
 	// TODO(user): fill in your validation logic upon object deletion.
-	return nil
+	return nil, nil
 }
 
 // valiateIPSetNetwork
