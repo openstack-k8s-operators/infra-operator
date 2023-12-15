@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -150,14 +149,13 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}()
 
 	return r.reconcileNormal(ctx, instance, helper)
-
 }
 
 func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.TransportURL, helper *helper.Helper) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling Service")
 
-	//TODO (implement a watch on the rabbitmq cluster resources to update things if there are changes)
+	// TODO (implement a watch on the rabbitmq cluster resources to update things if there are changes)
 	rabbit, err := getRabbitmqCluster(ctx, helper, instance)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -326,11 +324,9 @@ const (
 	rabbitmqClusterNameField = ".spec.rabbitmqClusterName"
 )
 
-var (
-	allWatchFields = []string{
-		rabbitmqClusterNameField,
-	}
-)
+var allWatchFields = []string{
+	rabbitmqClusterNameField,
+}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -350,14 +346,14 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&rabbitmqv1.TransportURL{}).
 		Owns(&corev1.Secret{}).
 		Watches(
-			&source.Kind{Type: &rabbitmqclusterv1.RabbitmqCluster{}},
+			&rabbitmqclusterv1.RabbitmqCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		Complete(r)
 }
 
-func (r *TransportURLReconciler) findObjectsForSrc(src client.Object) []reconcile.Request {
+func (r *TransportURLReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 
 	for _, field := range allWatchFields {
