@@ -33,6 +33,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
 	"k8s.io/client-go/kubernetes"
@@ -92,12 +95,18 @@ func main() {
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "c8c223a1.openstack.org",
+		WebhookServer: webhook.NewServer(
+			webhook.Options{
+				Port:    9443,
+				TLSOpts: []func(config *tls.Config){disableHTTP2},
+			}),
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -194,9 +203,6 @@ func main() {
 	// Setup webhooks if requested
 	checker := healthz.Ping
 	if strings.ToLower(os.Getenv("ENABLE_WEBHOOKS")) != "false" {
-		// overriding the default values
-		srv := mgr.GetWebhookServer()
-		srv.TLSOpts = []func(config *tls.Config){disableHTTP2}
 
 		if err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
