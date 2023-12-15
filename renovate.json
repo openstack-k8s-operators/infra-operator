@@ -1,21 +1,34 @@
 {
-  "extends": [
-    "github>openstack-k8s-operators/renovate-config:default.json5"
-  ],
-  "constraints": {
-    "go": "1.19"
-  },
-  "baseBranches": ["main"],
-  "useBaseBranchConfig": "merge",
-  "packageRules": [
-    {
-      "matchPackageNames": ["github.com/openstack-k8s-operators/infra-operator/apis"],
-      "enabled": false
-    }
-  ],
-  "postUpgradeTasks": {
-    "commands": ["make gowork", "make tidy", "make manifests generate"],
-    "fileFilters": ["**/go.mod", "**/go.sum", "**/*.go", "**/*.yaml"],
-    "executionMode": "update"
-  }
+	"extends": [
+		"github>openstack-k8s-operators/renovate-config:default.json5"
+	],
+	"constraints": {
+		"go": "1.21"
+	},
+	"baseBranches": [
+		"main"
+	],
+	"useBaseBranchConfig": "merge",
+	"packageRules": [
+		{
+			"matchPackageNames": [
+				"github.com/openstack-k8s-operators/infra-operator/apis"
+			],
+			"enabled": false
+		}
+	],
+	"postUpgradeTasks": {
+		"commands": [
+			"make gowork",
+			"make tidy",
+			"make manifests generate"
+		],
+		"fileFilters": [
+			"**/go.mod",
+			"**/go.sum",
+			"**/*.go",
+			"**/*.yaml"
+		],
+		"executionMode": "update"
+	}
 }
