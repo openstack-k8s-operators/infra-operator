@@ -1,0 +1,137 @@
+#
+# Check for:
+#
+# - 1 Redis CR
+# - 1 stateful set to manage redis pod
+# - 1 pod
+# - 1 config map for the scripts
+# - 1 config map for the generated redis config
+# - 1 Headless Service for the cluster
+# - 1 Service exposing the Redis port
+#
+
+apiVersion: redis.openstack.org/v1beta1
+kind: Redis
+metadata:
+  name: redis
+spec:
+  replicas: 1
+status:
+  conditions:
+    - message: Setup complete
+      reason: Ready
+      status: "True"
+      type: Ready
+    - message: Deployment completed
+      reason: Ready
+      status: "True"
+      type: DeploymentReady
+    - message: Exposing service completed
+      reason: Ready
+      status: "True"
+      type: ExposeServiceReady
+    - message: RoleBinding created
+      reason: Ready
+      status: "True"
+      type: RoleBindingReady
+    - message: Role created
+      reason: Ready
+      status: "True"
+      type: RoleReady
+    - message: ServiceAccount created
+      reason: Ready
+      status: "True"
+      type: ServiceAccountReady
+    - message: Service config create completed
+      reason: Ready
+      status: "True"
+      type: ServiceConfigReady
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      service: redis
+      redis/name: redis
+  serviceName: redis-redis
+  template:
+    metadata:
+      labels:
+        service: redis
+        owner: redis
+        redis/name: redis
+    spec:
+      containers:
+      - name: redis
+        ports:
+        - containerPort: 6379
+          name: redis
+          protocol: TCP
+      - name: sentinel
+        ports:
+        - containerPort: 26379
+          name: sentinel
+          protocol: TCP
+      serviceAccount: redis-redis
+      serviceAccountName: redis-redis
+status:
+  availableReplicas: 1
+  readyReplicas: 1
+  replicas: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-redis-0
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config-data
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-redis
+spec:
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+  - name: sentinel
+    port: 26379
+    protocol: TCP
+    targetPort: 26379
+  selector:
+    service: redis
+    owner: redis
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+  selector:
+    service: redis
+    owner: redis
+    redis/master: "true"
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis

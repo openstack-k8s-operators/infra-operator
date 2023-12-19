@@ -26,7 +26,7 @@ const (
 	// Container image fall-back defaults
 
 	// RedisContainerImage is the fall-back container image for Redis
-	RedisContainerImage = "registry.redhat.io/rhel9/redis-6:latest"
+	RedisContainerImage = "quay.io/podified-antelope-centos9/openstack-redis:current-podified"
 )
 
 // RedisSpec defines the desired state of Redis
