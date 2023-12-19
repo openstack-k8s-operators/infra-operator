@@ -1,7 +1,7 @@
 package redis
 
 import (
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -10,7 +10,7 @@ import (
 )
 
 // Deployment returns a Deployment resource for the Redis CR
-func Deployment(r *redisv1beta1.Redis) *appsv1.Deployment {
+func Deployment(r *redisv1.Redis) *appsv1.Deployment {
 	matchls := map[string]string{
 		"app":   "redis",
 		"cr":    "redis-" + r.Name,

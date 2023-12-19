@@ -3,7 +3,7 @@ package redis
 import (
 	"strconv"
 
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	appsv1 "k8s.io/api/apps/v1"
@@ -13,7 +13,7 @@ import (
 )
 
 // Deployment returns a Deployment resource for the Redis CR
-func StatefulSet(r *redisv1beta1.Redis) *appsv1.StatefulSet {
+func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 	matchls := map[string]string{
 		common.AppSelector:   "redis",
 		common.OwnerSelector: r.Name,
@@ -93,7 +93,7 @@ func StatefulSet(r *redisv1beta1.Redis) *appsv1.StatefulSet {
 						Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
 						Name:         "redis",
 						Env:          commonEnvVars,
-						VolumeMounts: getRedisVolumeMounts(),
+						VolumeMounts: getRedisVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: 6379,
 							Name:          "redis",
@@ -121,7 +121,7 @@ func StatefulSet(r *redisv1beta1.Redis) *appsv1.StatefulSet {
 							Name:  "SENTINEL_QUORUM",
 							Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
 						}),
-						VolumeMounts: getSentinelVolumeMounts(),
+						VolumeMounts: getSentinelVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: 26379,
 							Name:          "sentinel",

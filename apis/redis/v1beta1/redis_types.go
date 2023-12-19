@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -34,15 +35,20 @@ type RedisSpec struct {
 	// +kubebuilder:validation:Required
 	// Name of the redis container image to run (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
-
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
 	// Size of the redis cluster
 	Replicas *int32 `json:"replicas"`
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// TLS settings for Redis service and internal Redis replication
+	TLS tls.SimpleService `json:"tls,omitempty"`
 }
 
 // RedisStatus defines the observed state of Redis
 type RedisStatus struct {
+	// Map of hashes to track input changes
+	Hash map[string]string `json:"hash,omitempty"`
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
 }
