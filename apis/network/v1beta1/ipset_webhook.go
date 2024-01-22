@@ -19,6 +19,7 @@ package v1beta1
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -179,14 +180,14 @@ func valiateIPSetNetwork(
 
 		// validate if requested network is in NetConfig
 		f := func(n Network) bool {
-			return n.Name == _net.Name
+			return strings.EqualFold(string(n.Name), string(_net.Name))
 		}
 		netIdx := slices.IndexFunc(netCfgSpec.Networks, f)
 
 		if netIdx >= 0 {
 			// validate if requested subnet is in NetConfig
 			f := func(n Subnet) bool {
-				return n.Name == _net.SubnetName
+				return strings.EqualFold(string(n.Name), string(_net.SubnetName))
 			}
 			subNetIdx := slices.IndexFunc(netCfgSpec.Networks[netIdx].Subnets, f)
 

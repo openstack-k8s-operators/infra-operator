@@ -408,7 +408,7 @@ func (r *IPSetReconciler) ensureReservation(
 
 		ipDetails := ipam.AssignIPDetails{
 			IPSet:       ipset.Name,
-			NetName:     string(ipsetNet.Name),
+			NetName:     string(netDef.Name),
 			SubNet:      subnetDef,
 			Reservelist: reservations,
 		}
@@ -416,20 +416,20 @@ func (r *IPSetReconciler) ensureReservation(
 		if ipsetNet.FixedIP != nil {
 			ipDetails.FixedIP = net.ParseIP(string(*ipsetNet.FixedIP))
 			if ipDetails.FixedIP == nil {
-				return nil, fmt.Errorf("Failed parse FixedIP %s", string(*ipsetNet.FixedIP))
+				return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
 			}
 		}
 
 		ip, err := ipDetails.AssignIP()
 		if err != nil {
-			return nil, fmt.Errorf("Failed to do ip reservation: %w", err)
+			return nil, fmt.Errorf("failed to do ip reservation: %w", err)
 		}
 
 		// add IP to the reservation and IPSet status reservations
 		reservationSpec.Reservation[string(ipsetNet.Name)] = *ip
 		ipsetRes := networkv1.IPSetReservation{
-			Network:   ipsetNet.Name,
-			Subnet:    ipsetNet.SubnetName,
+			Network:   netDef.Name,
+			Subnet:    subnetDef.Name,
 			Address:   ip.Address,
 			MTU:       netDef.MTU,
 			Cidr:      subnetDef.Cidr,

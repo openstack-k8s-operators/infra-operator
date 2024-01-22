@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"fmt"
+	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -147,11 +148,11 @@ func init() {
 // GetNet returns the network with name
 func (instance NetConfig) GetNet(name NetNameStr) (*Network, error) {
 	for _, net := range instance.Spec.Networks {
-		if net.Name == name {
+		if strings.EqualFold(string(net.Name), string(name)) {
 			return &net, nil
 		}
 	}
-	return nil, fmt.Errorf("No network with name: %s", name)
+	return nil, fmt.Errorf("no network with name: %s", name)
 }
 
 // GetNetAndSubnet returns the network and subnet with name
@@ -161,9 +162,9 @@ func (instance NetConfig) GetNetAndSubnet(name NetNameStr, subnetName NetNameStr
 		return nil, nil, err
 	}
 	for _, subnet := range net.Subnets {
-		if subnet.Name == subnetName {
+		if strings.EqualFold(string(subnet.Name), string(subnetName)) {
 			return net, &subnet, nil
 		}
 	}
-	return nil, nil, fmt.Errorf("No subnet found with name: %s in network: %s", subnetName, name)
+	return nil, nil, fmt.Errorf("no subnet found with name: %s in network: %s", subnetName, name)
 }

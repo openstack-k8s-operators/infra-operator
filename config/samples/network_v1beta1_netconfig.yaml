@@ -4,7 +4,7 @@ metadata:
   name: netconfig
 spec:
   networks:
-  - name: CtlPlane
+  - name: ctlplane
     dnsDomain: ctlplane.example.com
     subnets:
     - name: subnet1
@@ -15,7 +15,7 @@ spec:
         start: 192.168.122.150
       cidr: 192.168.122.0/24
       gateway: 192.168.122.1
-  - name: InternalApi
+  - name: internalapi
     dnsDomain: internalapi.example.com
     subnets:
     - name: subnet1
@@ -24,7 +24,7 @@ spec:
         start: 172.17.0.100
       cidr: 172.17.0.0/24
       vlan: 20
-  - name: External
+  - name: external
     dnsDomain: external.example.com
     subnets:
     - name: subnet1
@@ -33,7 +33,7 @@ spec:
         start: 10.0.0.100
       cidr: 10.0.0.0/24
       gateway: 10.0.0.1
-  - name: Storage
+  - name: storage
     dnsDomain: storage.example.com
     subnets:
     - name: subnet1
@@ -42,7 +42,7 @@ spec:
         start: 172.18.0.100
       cidr: 172.18.0.0/24
       vlan: 21
-  - name: StorageMgmt
+  - name: storagemgmt
     dnsDomain: storagemgmt.example.com
     subnets:
     - name: subnet1
@@ -51,7 +51,7 @@ spec:
         start: 172.20.0.100
       cidr: 172.20.0.0/24
       vlan: 23
-  - name: Tenant
+  - name: tenant
     dnsDomain: tenant.example.com
     subnets:
     - name: subnet1
