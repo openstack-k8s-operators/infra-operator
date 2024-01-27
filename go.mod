@@ -9,7 +9,7 @@ require (
 	github.com/onsi/gomega v1.30.0
 	github.com/openstack-k8s-operators/infra-operator/apis v0.1.1-0.20230920125017-2c76cd203b44
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240124141114-55d029e4658b
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.0
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240124141114-55d029e4658b
 	github.com/rabbitmq/cluster-operator v1.14.0
 	go.uber.org/zap v1.26.0
 	golang.org/x/exp v0.0.0-20240119083558-1b970713d09a
