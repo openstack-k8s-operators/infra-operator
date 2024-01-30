@@ -18,6 +18,7 @@ package functional_test
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/gomega"
@@ -44,10 +45,12 @@ const (
 	interval       = timeout / 100
 	containerImage = "test-dnsmasq-container-image"
 
-	net1    = "net-1"
-	net2    = "net-2"
-	subnet1 = "subnet1"
-	host1   = "host1"
+	net1     = "net-1"
+	uNet1    = "Net-1"
+	net2     = "net-2"
+	subnet1  = "subnet1"
+	uSubnet1 = "Subnet1"
+	host1    = "host1"
 )
 
 func CreateDNSMasq(namespace string, spec map[string]interface{}) client.Object {
@@ -467,7 +470,7 @@ func GetNetConfigSpec(nets ...networkv1.Network) map[string]interface{} {
 func GetNetSpec(name string, subnets ...networkv1.Subnet) networkv1.Network {
 	net := networkv1.Network{
 		Name:      networkv1.NetNameStr(name),
-		DNSDomain: fmt.Sprintf("%s.example.com", name),
+		DNSDomain: fmt.Sprintf("%s.example.com", strings.ToLower(name)),
 		MTU:       1400,
 		Subnets:   []networkv1.Subnet{},
 	}
@@ -570,8 +573,8 @@ func GetDefaultIPSetSpec() map[string]interface{} {
 
 func GetIPSetNet1() networkv1.IPSetNetwork {
 	return networkv1.IPSetNetwork{
-		Name:       net1,
-		SubnetName: subnet1,
+		Name:       uNet1,
+		SubnetName: uSubnet1,
 	}
 }
 
@@ -599,7 +602,7 @@ func GetReservationFromNet(ipsetName types.NamespacedName, netName string) netwo
 	}, timeout, interval).Should(Succeed())
 
 	for _, ipSetRes := range ipSet.Status.Reservation {
-		if string(ipSetRes.Network) == netName {
+		if strings.EqualFold(string(ipSetRes.Network), netName) {
 			res = ipSetRes
 			break
 		}
