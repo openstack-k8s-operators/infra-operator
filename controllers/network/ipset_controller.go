@@ -426,7 +426,7 @@ func (r *IPSetReconciler) ensureReservation(
 		}
 
 		// add IP to the reservation and IPSet status reservations
-		reservationSpec.Reservation[string(ipsetNet.Name)] = *ip
+		reservationSpec.Reservation[string(netDef.Name)] = *ip
 		ipsetRes := networkv1.IPSetReservation{
 			Network:   netDef.Name,
 			Subnet:    subnetDef.Name,
