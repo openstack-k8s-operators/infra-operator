@@ -1,0 +1,6 @@
+# delete the redis master (always the first pod right after deployment)
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      oc -n $NAMESPACE delete pod redis-redis-0

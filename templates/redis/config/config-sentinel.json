@@ -1,0 +1,20 @@
+{
+  "command": "redis-sentinel /var/lib/redis/sentinel.conf",
+  "config_files": [
+    {
+      "dest": "/",
+      "merge": true,
+      "preserve_properties": true,
+      "optional": true,
+      "source": "/var/lib/config-data/generated/*"
+    }
+  ],
+  "permissions": [
+    {
+      "owner": "redis:redis",
+      "perm": "0755",
+      "path": "/var/lib/redis",
+      "recursive": true
+    }
+  ]
+}

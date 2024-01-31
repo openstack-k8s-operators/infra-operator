@@ -18,6 +18,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,7 +29,10 @@ import (
 
 	"github.com/go-logr/logr"
 	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,14 +41,16 @@ import (
 
 	redis "github.com/openstack-k8s-operators/infra-operator/pkg/redis"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
-	commondeployment "github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
+
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
+	commonstatefulset "github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
+	return log.FromContext(ctx).WithName("Controllers").WithName("Redis")
 }
 
 // Reconciler reconciles a Redis object
@@ -133,6 +139,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		cl := condition.CreateList(
 			// endpoint for adoption redirect
 			condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
+			// configmap generation
+			condition.UnknownCondition(condition.ServiceConfigReadyCondition, condition.InitReason, condition.ServiceConfigReadyInitMessage),
 			// redis pods ready
 			condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
 			// service account, role, rolebinding conditions
@@ -172,6 +180,36 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return rbacResult, nil
 	}
 
+	// Redis config maps
+	configMapVars := make(map[string]env.Setter)
+	err = r.generateConfigMaps(ctx, helper, instance, &configMapVars)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("error calculating configmap hash: %w", err)
+	}
+	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+
+	// the headless service provides DNS entries for pods
+	// the name of the resource must match the name of the app selector
+	pkghl := redis.HeadlessService(instance)
+	headless := &corev1.Service{ObjectMeta: pkghl.ObjectMeta}
+	_, err = controllerutil.CreateOrPatch(ctx, r.Client, headless, func() error {
+		headless.Spec = pkghl.Spec
+		err := controllerutil.SetOwnerReference(instance, headless, r.Client.Scheme())
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Service to expose Redis pods
 	commonsvc, err := commonservice.NewService(redis.Service(instance), time.Duration(5)*time.Second, nil)
 	if err != nil {
@@ -195,30 +233,70 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
-	// Deployment
-	commondeployment := commondeployment.NewDeployment(redis.Deployment(instance), time.Duration(5)*time.Second)
-	sfres, sferr := commondeployment.CreateOrPatch(ctx, helper)
-	if sferr != nil {
-		return sfres, sferr
-	}
-	deployment := commondeployment.GetDeployment()
-
 	//
 	// Reconstruct the state of the redis resource based on the deployment and its pods
 	//
 
-	if deployment.Status.ReadyReplicas > 0 {
+	// Statefulset
+	commonstatefulset := commonstatefulset.NewStatefulSet(redis.StatefulSet(instance), 5)
+	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
+	if sferr != nil {
+		return sfres, sferr
+	}
+	statefulset := commonstatefulset.GetStatefulSet()
+
+	if statefulset.Status.ReadyReplicas > 0 {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	}
 
 	return ctrl.Result{}, nil
 }
 
+// generateConfigMaps returns the config map resource for a galera instance
+func (r *Reconciler) generateConfigMaps(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *redisv1beta1.Redis,
+	envVars *map[string]env.Setter,
+) error {
+	templateParameters := make(map[string]interface{})
+	customData := make(map[string]string)
+
+	cms := []util.Template{
+		// ScriptsConfigMap
+		{
+			Name:         fmt.Sprintf("%s-scripts", instance.Name),
+			Namespace:    instance.Namespace,
+			Type:         util.TemplateTypeScripts,
+			InstanceType: instance.Kind,
+			Labels:       map[string]string{},
+		},
+		// ConfigMap
+		{
+			Name:          fmt.Sprintf("%s-config-data", instance.Name),
+			Namespace:     instance.Namespace,
+			Type:          util.TemplateTypeConfig,
+			InstanceType:  instance.Kind,
+			CustomData:    customData,
+			ConfigOptions: templateParameters,
+			Labels:        map[string]string{},
+		},
+	}
+
+	err := configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
+	if err != nil {
+		util.LogErrorForObject(h, err, "Unable to retrieve or create config maps", instance)
+		return err
+	}
+
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&redisv1beta1.Redis{}).
-		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
