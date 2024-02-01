@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	configmap "github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	commonstatefulset "github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
@@ -34,22 +36,43 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	memcached "github.com/openstack-k8s-operators/infra-operator/pkg/memcached"
+)
+
+// fields to index to reconcile on CR change
+const (
+	serviceSecretNameField = ".spec.tls.genericService.SecretName"
+	caSecretNameField      = ".spec.tls.ca.caBundleSecretName"
+)
+
+var (
+	allWatchFields = []string{
+		serviceSecretNameField,
+		caSecretNameField,
+	}
 )
 
 // Reconciler reconciles a Memcached object
 type Reconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
+	config  *rest.Config
 	Scheme  *runtime.Scheme
 }
 
@@ -135,6 +158,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions = condition.Conditions{}
 		// initialize conditions used later as Status=Unknown
 		cl := condition.CreateList(
+			// TLS cert secrets
+			condition.UnknownCondition(condition.TLSInputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
 			// endpoint for adoption redirect
 			condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
 			// configmap generation
@@ -185,9 +210,41 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return rbacResult, nil
 	}
 
+	// Hash of all resources that may cause a service restart
+	inputHashEnv := make(map[string]env.Setter)
+
+	// Check and hash inputs
+	var certHash, caHash string
+	specTLS := &instance.Spec.TLS
+	if specTLS.Enabled() {
+		certHash, _, err = specTLS.GenericService.ValidateCertSecret(ctx, helper, instance.Namespace)
+	}
+	if err == nil && specTLS.Enabled() && specTLS.Ca.CaBundleSecretName != "" {
+		caName := types.NamespacedName{
+			Name:      specTLS.Ca.CaBundleSecretName,
+			Namespace: instance.Namespace,
+		}
+		caHash, _, err = tls.ValidateCACertSecret(ctx, helper.GetClient(), caName)
+	}
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.TLSInputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.TLSInputErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("error calculating input hash: %w", err)
+	}
+	if certHash != "" {
+		inputHashEnv["Cert"] = env.SetValue(certHash)
+	}
+	if caHash != "" {
+		inputHashEnv["CA"] = env.SetValue(caHash)
+	}
+	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
+
 	// Memcached config maps
-	configMapVars := make(map[string]env.Setter)
-	err = r.generateConfigMaps(ctx, helper, instance, &configMapVars)
+	err = r.generateConfigMaps(ctx, helper, instance, &inputHashEnv)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ServiceConfigReadyCondition,
@@ -198,6 +255,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("error calculating configmap hash: %w", err)
 	}
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+
+	//
+	// create hash over all the different input resources to identify if any those changed
+	// and a restart/recreate is required.
+	//
+	hashOfHashes, err := util.HashOfInputHashes(inputHashEnv)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if hashMap, changed := util.SetHash(instance.Status.Hash, common.InputHashName, hashOfHashes); changed {
+		// Hash changed and instance status should be updated (which will be done by main defer func),
+		// so update all the input hashes and return to reconcile again
+		instance.Status.Hash = hashMap
+		for k, s := range inputHashEnv {
+			var envVar corev1.EnvVar
+			s(&envVar)
+			instance.Status.Hash[k] = envVar.Value
+		}
+		Log.Info(fmt.Sprintf("Input hash changed %s", hashOfHashes), "instance", instance)
+		return ctrl.Result{}, nil
+	}
 
 	// Service to expose Memcached pods
 	commonsvc, err := commonservice.NewService(memcached.HeadlessService(instance), time.Duration(5)*time.Second, nil)
@@ -247,17 +325,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	return ctrl.Result{}, nil
 }
 
-// generateConfigMaps returns the config map resource for a galera instance
+// generateConfigMaps returns the config map resource for a memcached instance
 func (r *Reconciler) generateConfigMaps(
 	ctx context.Context,
 	h *helper.Helper,
 	instance *memcachedv1.Memcached,
 	envVars *map[string]env.Setter,
 ) error {
-	Log := r.GetLogger(ctx)
+	Log := h.GetLogger()
 
-	templateParameters := make(map[string]interface{})
 	customData := make(map[string]string)
+	var memcachedTLSConfig string
+	if instance.Spec.TLS.Enabled() {
+		memcachedTLSConfig = "-Z " +
+			"-o ssl_chain_cert=/etc/pki/tls/certs/memcached.crt " +
+			"-o ssl_key=/etc/pki/tls/private/memcached.key " +
+			"-o ssl_ca_cert=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+	} else {
+		memcachedTLSConfig = ""
+	}
+	templateParameters := map[string]interface{}{
+		"memcachedTLSConfig": memcachedTLSConfig,
+	}
 
 	cms := []util.Template{
 		// ConfigMap
@@ -283,6 +372,35 @@ func (r *Reconciler) generateConfigMaps(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.config = mgr.GetConfig()
+
+	// Various CR fields need to be indexed to filter watch events
+	// for the secret changes we want to be notified of
+	// index caBundleSecretName
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &memcachedv1.Memcached{}, caSecretNameField, func(rawObj client.Object) []string {
+		// Extract the secret name from the spec, if one is provided
+		cr := rawObj.(*memcachedv1.Memcached)
+		tls := &cr.Spec.TLS
+		if tls.Ca.CaBundleSecretName != "" {
+			return []string{tls.Ca.CaBundleSecretName}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// index secretName
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &memcachedv1.Memcached{}, serviceSecretNameField, func(rawObj client.Object) []string {
+		// Extract the secret name from the spec, if one is provided
+		cr := rawObj.(*memcachedv1.Memcached)
+		tls := &cr.Spec.TLS
+		if tls.Enabled() {
+			return []string{*tls.GenericService.SecretName}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&memcachedv1.Memcached{}).
 		Owns(&appsv1.StatefulSet{}).
@@ -290,7 +408,42 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Complete(r)
+}
+
+// findObjectsForSrc - returns a reconcile request if the object is referenced by a Memcached CR
+func (r *Reconciler) findObjectsForSrc(_ context.Context, src client.Object) []reconcile.Request {
+	requests := []reconcile.Request{}
+
+	for _, field := range allWatchFields {
+		crList := &memcachedv1.MemcachedList{}
+		listOps := &client.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(field, src.GetName()),
+			Namespace:     src.GetNamespace(),
+		}
+		err := r.List(context.TODO(), crList, listOps)
+		if err != nil {
+			return []reconcile.Request{}
+		}
+
+		for _, item := range crList.Items {
+			requests = append(requests,
+				reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      item.GetName(),
+						Namespace: item.GetNamespace(),
+					},
+				},
+			)
+		}
+	}
+
+	return requests
 }
 
 // GetServerLists returns list of memcached server without/with inet prefix

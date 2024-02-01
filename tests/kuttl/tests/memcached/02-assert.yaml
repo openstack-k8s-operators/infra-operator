@@ -1,0 +1,41 @@
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
+spec:
+  replicas: 1
+status:
+  readyCount: 1
+  conditions:
+    - message: Setup complete
+      reason: Ready
+      status: "True"
+      type: Ready
+    - message: Deployment completed
+      reason: Ready
+      status: "True"
+      type: DeploymentReady
+    - message: Exposing service completed
+      reason: Ready
+      status: "True"
+      type: ExposeServiceReady
+    - message: RoleBinding created
+      reason: Ready
+      status: "True"
+      type: RoleBindingReady
+    - message: Role created
+      reason: Ready
+      status: "True"
+      type: RoleReady
+    - message: ServiceAccount created
+      reason: Ready
+      status: "True"
+      type: ServiceAccountReady
+    - message: Service config create completed
+      reason: Ready
+      status: "True"
+      type: ServiceConfigReady
+    - message: Input data complete
+      reason: Ready
+      status: "True"
+      type: TLSInputReady

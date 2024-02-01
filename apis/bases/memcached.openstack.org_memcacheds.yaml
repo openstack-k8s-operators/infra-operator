@@ -53,6 +53,17 @@ spec:
                 description: Size of the memcached cluster
                 format: int32
                 type: integer
+              tls:
+                description: TLS settings for memcached service
+                properties:
+                  caBundleSecretName:
+                    description: CaBundleSecretName - holding the CA certs in a pre-created
+                      bundle file
+                    type: string
+                  secretName:
+                    description: SecretName - holding the cert, key for the service
+                    type: string
+                type: object
             required:
             - containerImage
             type: object
@@ -102,6 +113,11 @@ spec:
                   - type
                   type: object
                 type: array
+              hash:
+                additionalProperties:
+                  type: string
+                description: Map of hashes to track input changes
+                type: object
               readyCount:
                 description: ReadyCount of Memcached instances
                 format: int32

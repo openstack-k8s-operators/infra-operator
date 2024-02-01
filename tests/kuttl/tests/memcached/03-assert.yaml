@@ -1,0 +1,12 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      set -e
+      # ensure memcached endpoint is exposed over TLS
+      TLSDATA=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo | openssl s_client -connect memcached-0.memcached --port 11211 2>&1')
+      echo "$TLSDATA" | grep -w CONNECTED
+      # run a stat command to verify memcached is working over TLS
+      MEMCACHEDDATA=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo -e "stats\nquit" | openssl s_client -ign_eof -connect memcached-0.memcached --port 11211 2>/dev/null')
+      # the stats command should have returned END
+      echo "$MEMCACHEDDATA" | grep -w END
