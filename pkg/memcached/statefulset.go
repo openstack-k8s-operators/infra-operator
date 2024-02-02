@@ -34,7 +34,6 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 		InitialDelaySeconds: 5,
 	}
 
-	// TODO might want to disable probes in 'Debug' mode
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: MemcachedPort},
 	}

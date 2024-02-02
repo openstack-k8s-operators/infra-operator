@@ -45,7 +45,6 @@ func StatefulSet(r *redisv1beta1.Redis) *appsv1.StatefulSet {
 		InitialDelaySeconds: 5,
 	}
 
-	// TODO might want to disable probes in 'Debug' mode
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
 	}

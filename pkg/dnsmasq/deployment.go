@@ -35,8 +35,6 @@ import (
 const (
 	// ServiceCommand -
 	ServiceCommand = "dnsmasq"
-	// DebugCommand -
-	DebugCommand = "/bin/sleep infinity"
 )
 
 // Deployment func
@@ -66,57 +64,40 @@ func Deployment(
 	command := []string{"/bin/bash"}
 	args := []string{"-c"}
 	initArgs := []string{"-c"}
-	if instance.Spec.Debug.Service {
-		args = append(args, DebugCommand)
-		initArgs = append(initArgs, "/bin/true")
+	dnsmasqCmd := []string{ServiceCommand}
+	dnsmasqCmd = append(dnsmasqCmd, "--interface=*")
+	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
+	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
+	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
+	dnsmasqCmd = append(dnsmasqCmd, "--no-daemon")
+	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
+	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
+	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
+	dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSPort)))
+	// log to stdout
+	dnsmasqCmd = append(dnsmasqCmd, "--log-facility=-")
+	// dns
+	dnsmasqCmd = append(dnsmasqCmd, "--no-hosts")
+	dnsmasqCmd = append(dnsmasqCmd, "--domain-needed")
+	dnsmasqCmd = append(dnsmasqCmd, "--no-resolv")
+	dnsmasqCmd = append(dnsmasqCmd, "--bogus-priv")
+	dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
 
-		livenessProbe.Exec = &corev1.ExecAction{
-			Command: []string{
-				"/bin/true",
-			},
-		}
+	// append dnsmasqCmd for service container
+	args = append(args, strings.Join(dnsmasqCmd, " "))
 
-		readinessProbe.Exec = &corev1.ExecAction{
-			Command: []string{
-				"/bin/true",
-			},
-		}
-	} else {
-		dnsmasqCmd := []string{ServiceCommand}
-		dnsmasqCmd = append(dnsmasqCmd, "--interface=*")
-		dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
-		dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
-		dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
-		dnsmasqCmd = append(dnsmasqCmd, "--no-daemon")
-		dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
-		dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
-		dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
-		dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSPort)))
-		// log to stdout
-		dnsmasqCmd = append(dnsmasqCmd, "--log-facility=-")
-		// dns
-		dnsmasqCmd = append(dnsmasqCmd, "--no-hosts")
-		dnsmasqCmd = append(dnsmasqCmd, "--domain-needed")
-		dnsmasqCmd = append(dnsmasqCmd, "--no-resolv")
-		dnsmasqCmd = append(dnsmasqCmd, "--bogus-priv")
-		dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
+	// append --test for initcontainer check config syntax
+	dnsmasqCmd = append(dnsmasqCmd, "--test")
+	initArgs = append(initArgs, strings.Join(dnsmasqCmd, " "))
 
-		// append dnsmasqCmd for service container
-		args = append(args, strings.Join(dnsmasqCmd, " "))
-
-		// append --test for initcontainer check config syntax
-		dnsmasqCmd = append(dnsmasqCmd, "--test")
-		initArgs = append(initArgs, strings.Join(dnsmasqCmd, " "))
-
-		//
-		// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
-		//
-		livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-			Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
-		}
-		readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-			Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
-		}
+	//
+	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+	//
+	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
+	}
+	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
 	}
 
 	envVars := map[string]env.Setter{}
