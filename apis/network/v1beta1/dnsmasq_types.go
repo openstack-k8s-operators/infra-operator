@@ -56,11 +56,6 @@ type DNSMasqSpec struct {
 	Replicas *int32 `json:"replicas"`
 
 	// +kubebuilder:validation:Optional
-	// Debug - enable debug for different deploy stages. If an init container is used, it runs and the
-	// actual action pod gets started with sleep infinity
-	Debug DNSMasqDebug `json:"debug,omitempty"`
-
-	// +kubebuilder:validation:Optional
 	// Options allows to customize the dnsmasq instance
 	Options []DNSMasqOption `json:"options,omitempty"`
 
@@ -84,14 +79,6 @@ type DNSMasqSpec struct {
 type DNSMasqOverrideSpec struct {
 	// Override configuration for the Service created to serve traffic to the cluster.
 	Service *service.OverrideSpec `json:"service,omitempty"`
-}
-
-// DNSMasqDebug defines the observed state of DNSMasq
-type DNSMasqDebug struct {
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=false
-	// Service enable debug
-	Service bool `json:"service"`
 }
 
 // DNSMasqStatus defines the observed state of DNSMasq
