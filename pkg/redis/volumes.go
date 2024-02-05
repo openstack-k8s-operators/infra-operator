@@ -3,12 +3,40 @@ package redis
 import (
 	"fmt"
 
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	corev1 "k8s.io/api/core/v1"
 )
 
-func getVolumes(r *redisv1beta1.Redis) []corev1.Volume {
+const (
+	RedisCertPrefix = "redis"
+)
+
+func getVolumes(r *redisv1.Redis) []corev1.Volume {
 	scriptsPerms := int32(0755)
+	configDataFiles := []corev1.KeyToPath{
+		{
+			Key:  "sentinel.conf.in",
+			Path: "var/lib/redis/sentinel.conf.in",
+		},
+		{
+			Key:  "redis.conf.in",
+			Path: "var/lib/redis/redis.conf.in",
+		},
+	}
+	if r.Spec.TLS.Enabled() {
+		configDataFiles = append(configDataFiles, []corev1.KeyToPath{
+			{
+				Key:  "redis-tls.conf.in",
+				Path: "var/lib/redis/redis-tls.conf.in",
+			},
+			{
+				Key:  "sentinel-tls.conf.in",
+				Path: "var/lib/redis/sentinel-tls.conf.in",
+			},
+		}...)
+	}
+
 	vols := []corev1.Volume{
 		{
 			Name: "kolla-config",
@@ -55,16 +83,7 @@ func getVolumes(r *redisv1beta1.Redis) []corev1.Volume {
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: fmt.Sprintf("%s-config-data", r.Name),
 					},
-					Items: []corev1.KeyToPath{
-						{
-							Key:  "sentinel.conf.in",
-							Path: "var/lib/redis/sentinel.conf.in",
-						},
-						{
-							Key:  "redis.conf.in",
-							Path: "var/lib/redis/redis.conf.in",
-						},
-					},
+					Items: configDataFiles,
 				},
 			},
 		},
@@ -102,10 +121,45 @@ func getVolumes(r *redisv1beta1.Redis) []corev1.Volume {
 			},
 		},
 	}
+
+	if r.Spec.TLS.Enabled() {
+		svc := tls.Service{
+			SecretName: *r.Spec.TLS.GenericService.SecretName,
+			CertMount:  nil,
+			KeyMount:   nil,
+			CaMount:    nil,
+		}
+		serviceVolume := svc.CreateVolume(RedisCertPrefix)
+		vols = append(vols, serviceVolume)
+		if r.Spec.TLS.Ca.CaBundleSecretName != "" {
+			caVolume := r.Spec.TLS.Ca.CreateVolume()
+			vols = append(vols, caVolume)
+		}
+	}
+
 	return vols
 }
 
-func getRedisVolumeMounts() []corev1.VolumeMount {
+func getTLSVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
+	var vols []corev1.VolumeMount
+	if r.Spec.TLS.Enabled() {
+		svc := tls.Service{
+			SecretName: *r.Spec.TLS.GenericService.SecretName,
+			CertMount:  nil,
+			KeyMount:   nil,
+			CaMount:    nil,
+		}
+		serviceVolumeMounts := svc.CreateVolumeMounts(RedisCertPrefix)
+		vols = serviceVolumeMounts
+		if r.Spec.TLS.Ca.CaBundleSecretName != "" {
+			caVolumeMounts := r.Spec.TLS.Ca.CreateVolumeMounts(nil)
+			vols = append(vols, caVolumeMounts...)
+		}
+	}
+	return vols
+}
+
+func getRedisVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 	vm := []corev1.VolumeMount{{
 		MountPath: "/var/lib/config-data/default",
 		ReadOnly:  true,
@@ -122,10 +176,11 @@ func getRedisVolumeMounts() []corev1.VolumeMount {
 		ReadOnly:  true,
 		Name:      "kolla-config",
 	}}
+	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
 }
 
-func getSentinelVolumeMounts() []corev1.VolumeMount {
+func getSentinelVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 	vm := []corev1.VolumeMount{{
 		MountPath: "/var/lib/config-data/default",
 		ReadOnly:  true,
@@ -142,5 +197,6 @@ func getSentinelVolumeMounts() []corev1.VolumeMount {
 		ReadOnly:  true,
 		Name:      "kolla-config-sentinel",
 	}}
+	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
 }

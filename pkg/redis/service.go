@@ -1,7 +1,7 @@
 package redis
 
 import (
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	service "github.com/openstack-k8s-operators/lib-common/modules/common/service"
@@ -9,7 +9,7 @@ import (
 )
 
 // Service exposes redis pods for a redis CR
-func Service(instance *redisv1beta1.Redis) *corev1.Service {
+func Service(instance *redisv1.Redis) *corev1.Service {
 	labels := labels.GetLabels(instance, "redis", map[string]string{
 		common.AppSelector:   "redis",
 		common.OwnerSelector: instance.Name,
@@ -35,7 +35,7 @@ func Service(instance *redisv1beta1.Redis) *corev1.Service {
 }
 
 // HeadlessService - service to give redis pods connectivity via DNS
-func HeadlessService(instance *redisv1beta1.Redis) *corev1.Service {
+func HeadlessService(instance *redisv1.Redis) *corev1.Service {
 	labels := labels.GetLabels(instance, "redis", map[string]string{
 		common.AppSelector:   "redis",
 		common.OwnerSelector: instance.Name,

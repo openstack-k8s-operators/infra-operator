@@ -10,6 +10,16 @@ TIMEOUT=3
 POD_NAME=$HOSTNAME
 POD_FQDN=$HOSTNAME.$SVC_FQDN
 
+if test -d /var/lib/config-data/tls; then
+    REDIS_CLI_CMD="redis-cli --tls"
+    REDIS_CONFIG=/var/lib/redis/redis-tls.conf
+    SENTINEL_CONFIG=/var/lib/redis/sentinel-tls.conf
+else
+    REDIS_CLI_CMD=redis-cli
+    REDIS_CONFIG=/var/lib/redis/redis.conf
+    SENTINEL_CONFIG=/var/lib/redis/sentinel.conf
+fi
+
 function log() {
     echo "$(date +%F_%H_%M_%S) $*"
 }

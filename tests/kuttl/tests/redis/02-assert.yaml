@@ -46,6 +46,10 @@ status:
       reason: Ready
       status: "True"
       type: ServiceConfigReady
+    - message: Input data complete
+      reason: Ready
+      status: "True"
+      type: TLSInputReady
 ---
 apiVersion: apps/v1
 kind: StatefulSet

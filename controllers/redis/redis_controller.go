@@ -21,17 +21,23 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
-	redisv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -45,7 +51,6 @@ import (
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	commonstatefulset "github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
@@ -53,10 +58,24 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 	return log.FromContext(ctx).WithName("Controllers").WithName("Redis")
 }
 
+// fields to index to reconcile on CR change
+const (
+	serviceSecretNameField = ".spec.tls.genericService.SecretName"
+	caSecretNameField      = ".spec.tls.ca.caBundleSecretName"
+)
+
+var (
+	allWatchFields = []string{
+		serviceSecretNameField,
+		caSecretNameField,
+	}
+)
+
 // Reconciler reconciles a Redis object
 type Reconciler struct {
 	client.Client
 	Kclient kubernetes.Interface
+	config  *rest.Config
 	Scheme  *runtime.Scheme
 }
 
@@ -85,7 +104,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	Log := r.GetLogger(ctx)
 
 	// Fetch the Redis instance
-	instance := &redisv1beta1.Redis{}
+	instance := &redisv1.Redis{}
 	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
@@ -137,6 +156,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions = condition.Conditions{}
 		// initialize conditions used later as Status=Unknown
 		cl := condition.CreateList(
+			// TLS cert secrets
+			condition.UnknownCondition(condition.TLSInputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
 			// endpoint for adoption redirect
 			condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
 			// configmap generation
@@ -180,9 +201,37 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return rbacResult, nil
 	}
 
+	// Hash of all resources that may cause a service restart
+	inputHashEnv := make(map[string]env.Setter)
+
+	// Check and hash inputs
+	var certHash, caHash string
+	specTLS := &instance.Spec.TLS
+	if specTLS.Enabled() {
+		certHash, _, err = specTLS.GenericService.ValidateCertSecret(ctx, helper, instance.Namespace)
+		inputHashEnv["Cert"] = env.SetValue(certHash)
+	}
+	if err == nil && specTLS.Ca.CaBundleSecretName != "" {
+		caName := types.NamespacedName{
+			Name:      specTLS.Ca.CaBundleSecretName,
+			Namespace: instance.Namespace,
+		}
+		caHash, _, err = tls.ValidateCACertSecret(ctx, helper.GetClient(), caName)
+		inputHashEnv["CA"] = env.SetValue(caHash)
+	}
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.TLSInputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.TLSInputErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("error calculating input hash: %w", err)
+	}
+	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
+
 	// Redis config maps
-	configMapVars := make(map[string]env.Setter)
-	err = r.generateConfigMaps(ctx, helper, instance, &configMapVars)
+	err = r.generateConfigMaps(ctx, helper, instance, &inputHashEnv)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ServiceConfigReadyCondition,
@@ -194,20 +243,48 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
 
-	// the headless service provides DNS entries for pods
-	// the name of the resource must match the name of the app selector
-	pkghl := redis.HeadlessService(instance)
-	headless := &corev1.Service{ObjectMeta: pkghl.ObjectMeta}
-	_, err = controllerutil.CreateOrPatch(ctx, r.Client, headless, func() error {
-		headless.Spec = pkghl.Spec
-		err := controllerutil.SetOwnerReference(instance, headless, r.Client.Scheme())
-		if err != nil {
-			return err
-		}
-		return nil
-	})
+	//
+	// create hash over all the different input resources to identify if any those changed
+	// and a restart/recreate is required.
+	//
+	hashOfHashes, err := util.HashOfInputHashes(inputHashEnv)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if hashMap, changed := util.SetHash(instance.Status.Hash, common.InputHashName, hashOfHashes); changed {
+		// Hash changed and instance status should be updated (which will be done by main defer func),
+		// so update all the input hashes and return to reconcile again
+		instance.Status.Hash = hashMap
+		for k, s := range inputHashEnv {
+			var envVar corev1.EnvVar
+			s(&envVar)
+			instance.Status.Hash[k] = envVar.Value
+		}
+		util.LogForObject(helper, fmt.Sprintf("Input hash changed %s", hashOfHashes), instance)
+		return ctrl.Result{}, nil
+	}
+
+	// the headless service provides DNS entries for pods
+	// the name of the resource must match the name of the app selector
+	headless, err := commonservice.NewService(redis.HeadlessService(instance), time.Duration(5)*time.Second, nil)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ExposeServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ExposeServiceReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+	hlres, hlerr := headless.CreateOrPatch(ctx, helper)
+	if hlerr != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ExposeServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ExposeServiceReadyErrorMessage,
+			err.Error()))
+		return hlres, hlerr
 	}
 
 	// Service to expose Redis pods
@@ -252,11 +329,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	return ctrl.Result{}, nil
 }
 
-// generateConfigMaps returns the config map resource for a galera instance
+// generateConfigMaps returns the config map resource for a redis instance
 func (r *Reconciler) generateConfigMaps(
 	ctx context.Context,
 	h *helper.Helper,
-	instance *redisv1beta1.Redis,
+	instance *redisv1.Redis,
 	envVars *map[string]env.Setter,
 ) error {
 	templateParameters := make(map[string]interface{})
@@ -294,12 +371,71 @@ func (r *Reconciler) generateConfigMaps(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.config = mgr.GetConfig()
+
+	// Various CR fields need to be indexed to filter watch events
+	// for the secret changes we want to be notified of
+	// index caBundleSecretName
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &redisv1.Redis{}, caSecretNameField, func(rawObj client.Object) []string {
+		// Extract the secret name from the spec, if one is provided
+		cr := rawObj.(*redisv1.Redis)
+		tls := &cr.Spec.TLS
+		if tls.Ca.CaBundleSecretName != "" {
+			return []string{tls.Ca.CaBundleSecretName}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// index secretName
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &redisv1.Redis{}, serviceSecretNameField, func(rawObj client.Object) []string {
+		// Extract the secret name from the spec, if one is provided
+		cr := rawObj.(*redisv1.Redis)
+		tls := &cr.Spec.TLS
+		if tls.Enabled() {
+			return []string{*tls.GenericService.SecretName}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&redisv1beta1.Redis{}).
+		For(&redisv1.Redis{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Complete(r)
+}
+
+// findObjectsForSrc - returns a reconcile request if the object is referenced by a Redis CR
+func (r *Reconciler) findObjectsForSrc(src client.Object) []reconcile.Request {
+	requests := []reconcile.Request{}
+
+	for _, field := range allWatchFields {
+		crList := &redisv1.RedisList{}
+		listOps := &client.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(field, src.GetName()),
+			Namespace:     src.GetNamespace(),
+		}
+		err := r.List(context.TODO(), crList, listOps)
+		if err != nil {
+			return []reconcile.Request{}
+		}
+
+		for _, item := range crList.Items {
+			requests = append(requests,
+				reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      item.GetName(),
+						Namespace: item.GetNamespace(),
+					},
+				},
+			)
+		}
+	}
+
+	return requests
 }
