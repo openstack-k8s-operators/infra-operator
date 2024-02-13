@@ -217,7 +217,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ErrorReason,
 			condition.SeverityWarning,
 			condition.ExposeServiceReadyErrorMessage,
-			err.Error()))
+			serr.Error()))
 		return sres, serr
 	}
 
