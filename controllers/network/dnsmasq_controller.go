@@ -165,6 +165,11 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		instance.Status.Hash = map[string]string{}
 	}
 
+	// Handle service delete
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, helper)
+	}
+
 	// Service account, role, binding
 	rbacRules := []rbacv1.PolicyRule{
 		{
@@ -184,11 +189,6 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return rbacResult, err
 	} else if (rbacResult != ctrl.Result{}) {
 		return rbacResult, nil
-	}
-
-	// Handle service delete
-	if !instance.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, instance, helper)
 	}
 
 	// Handle non-deleted clusters
