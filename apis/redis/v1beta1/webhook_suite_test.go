@@ -31,22 +31,28 @@ import (
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	//+kubebuilder:scaffold:imports
 	"k8s.io/apimachinery/pkg/runtime"
+	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
-var cfg *rest.Config
-var k8sClient client.Client
-var testEnv *envtest.Environment
-var ctx context.Context
-var cancel context.CancelFunc
+var (
+	cfg       *rest.Config
+	k8sClient client.Client
+	testEnv   *envtest.Environment
+	ctx       context.Context
+	cancel    context.CancelFunc
+)
 
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -90,12 +96,20 @@ var _ = BeforeSuite(func() {
 	// start webhook server using Manager
 	webhookInstallOptions := &testEnv.WebhookInstallOptions
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:             scheme,
-		Host:               webhookInstallOptions.LocalServingHost,
-		Port:               webhookInstallOptions.LocalServingPort,
-		CertDir:            webhookInstallOptions.LocalServingCertDir,
-		LeaderElection:     false,
-		MetricsBindAddress: "0",
+		Scheme: kscheme.Scheme,
+		// NOTE(gibi): disable metrics reporting in test to allow
+		// parallel test execution. Otherwise each instance would like to
+		// bind to the same port
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+		WebhookServer: webhook.NewServer(
+			webhook.Options{
+				Host:    webhookInstallOptions.LocalServingHost,
+				Port:    webhookInstallOptions.LocalServingPort,
+				CertDir: webhookInstallOptions.LocalServingCertDir,
+			}),
+		LeaderElection: false,
 	})
 	Expect(err).NotTo(HaveOccurred())
 
@@ -121,7 +135,6 @@ var _ = BeforeSuite(func() {
 		conn.Close()
 		return nil
 	}).Should(Succeed())
-
 })
 
 var _ = AfterSuite(func() {

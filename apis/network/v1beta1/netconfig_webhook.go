@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // log is for logging in this package.
@@ -60,17 +61,17 @@ func (r *NetConfig) Default() {
 var _ webhook.Validator = &NetConfig{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *NetConfig) ValidateCreate() error {
+func (r *NetConfig) ValidateCreate() (admission.Warnings, error) {
 	netconfiglog.Info("validate create", "name", r.Name)
 
 	// check if there is already a NetConfig in the namespace.
 	netcfg, err := getNetConfig(webhookClient, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// stop if there is already a NetConfig in the namespace.
 	if netcfg != nil {
-		return fmt.Errorf(fmt.Sprintf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace()))
+		return nil, fmt.Errorf(fmt.Sprintf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace()))
 	}
 
 	allErrs := field.ErrorList{}
@@ -80,19 +81,19 @@ func (r *NetConfig) ValidateCreate() error {
 	allErrs = append(allErrs, valiateNetworks(r.Spec.Networks, basePath)...)
 
 	if len(allErrs) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), r.Name, allErrs)
+	return nil, apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), r.Name, allErrs)
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *NetConfig) ValidateUpdate(old runtime.Object) error {
+func (r *NetConfig) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 	netconfiglog.Info("validate update", "name", r.Name)
 
 	oldNetConfig, ok := old.(*NetConfig)
 	if !ok || oldNetConfig == nil {
-		return apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+		return nil, apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
 	}
 
 	allErrs := field.ErrorList{}
@@ -105,32 +106,32 @@ func (r *NetConfig) ValidateUpdate(old runtime.Object) error {
 	// If there are none, the NetConfig could be updated to the needs without checking old <-> new.
 	ipsets, err := getIPSets(webhookClient, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(ipsets.Items) > 0 {
 		allErrs = append(allErrs, valiateNetworksChanged(r.Spec.Networks, oldNetConfig.Spec.Networks, basePath)...)
 	}
 
 	if len(allErrs) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	return apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), r.Name, allErrs)
+	return nil, apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), r.Name, allErrs)
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *NetConfig) ValidateDelete() error {
+func (r *NetConfig) ValidateDelete() (admission.Warnings, error) {
 	netconfiglog.Info("validate delete", "name", r.Name)
 
 	ipsets, err := getIPSets(webhookClient, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(ipsets.Items) > 0 {
-		return apierrors.NewBadRequest(fmt.Sprintf("unable to delete NetConfig while there are still %d IPSets in the namespace", len(ipsets.Items)))
+		return nil, apierrors.NewBadRequest(fmt.Sprintf("unable to delete NetConfig while there are still %d IPSets in the namespace", len(ipsets.Items)))
 	}
 
-	return nil
+	return nil, nil
 }
 
 // valiateNetworks
