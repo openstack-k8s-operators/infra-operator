@@ -23,8 +23,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
+	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	"go.uber.org/zap/zapcore"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -48,8 +48,6 @@ import (
 
 	infra_test "github.com/openstack-k8s-operators/infra-operator/apis/test/helpers"
 	test "github.com/openstack-k8s-operators/lib-common/modules/test"
-
-	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -64,9 +62,8 @@ var (
 	ctx       context.Context
 	cancel    context.CancelFunc
 	logger    logr.Logger
-	th        *TestHelper
 	namespace string
-	infra     *infra_test.TestHelper
+	th        *infra_test.TestHelper
 )
 
 func TestAPIs(t *testing.T) {
@@ -124,10 +121,8 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
-	th = NewTestHelper(ctx, k8sClient, timeout, interval, logger)
+	th = infra_test.NewTestHelper(ctx, k8sClient, timeout, interval, logger)
 	Expect(th).NotTo(BeNil())
-	infra = infra_test.NewTestHelper(ctx, k8sClient, timeout, interval, logger)
-	Expect(infra).NotTo(BeNil())
 
 	// Start the controller-manager if goroutine
 	webhookInstallOptions := &testEnv.WebhookInstallOptions

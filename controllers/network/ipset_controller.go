@@ -148,7 +148,7 @@ func (r *IPSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *IPSetReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
+func (r *IPSetReconciler) SetupWithManager(_ context.Context, mgr ctrl.Manager) error {
 	ipsetFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 		Log := r.GetLogger(ctx)
 		result := []reconcile.Request{}
@@ -316,7 +316,6 @@ func (r *IPSetReconciler) getReservation(ctx context.Context, instance *networkv
 func (r *IPSetReconciler) patchReservation(
 	ctx context.Context,
 	helper *helper.Helper,
-	ipset *networkv1.IPSet,
 	name types.NamespacedName,
 	labels map[string]string,
 	spec networkv1.ReservationSpec,
@@ -381,7 +380,6 @@ func (r *IPSetReconciler) ensureReservation(
 		reservation, _err = r.patchReservation(
 			ctx,
 			helper,
-			ipset,
 			reservationName,
 			reservationLabels,
 			reservationSpec,

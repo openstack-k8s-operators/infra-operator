@@ -19,8 +19,8 @@ package functional_test
 import (
 	"fmt"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
+	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +28,7 @@ import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
+	//revive:disable-next-line:dot-imports
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 )
 
@@ -71,7 +72,7 @@ var _ = Describe("DNSMasq controller", func() {
 			cm.Labels = util.MergeStringMaps(cm.Labels, map[string]string{
 				"dnsmasqhosts": "dnsdata",
 			})
-			th.K8sClient.Update(ctx, cm)
+			Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
 
 			DeferCleanup(th.DeleteConfigMap, dnsDataCM)
 			DeferCleanup(th.DeleteInstance, instance)
@@ -211,7 +212,7 @@ var _ = Describe("DNSMasq controller", func() {
 
 				// Update the cm providing dnsdata
 				cm.Data[dnsDataCM.Name] = "172.20.0.80 keystone-internal.openstack.svc some-other-node"
-				th.K8sClient.Update(ctx, cm)
+				Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
 
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
