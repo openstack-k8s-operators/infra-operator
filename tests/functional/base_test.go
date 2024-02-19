@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/gomega" //revive:disable:dot-imports
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -397,11 +397,11 @@ func IPSetConditionGetter(name types.NamespacedName) condition.Conditions {
 }
 
 func TransportURLConditionGetter(name types.NamespacedName) condition.Conditions {
-	instance := infra.GetTransportURL(name)
+	instance := th.GetTransportURL(name)
 	return instance.Status.Conditions
 }
 
-func CreateLoadBalancerService(name types.NamespacedName, addDnsAnno bool) *corev1.Service {
+func CreateLoadBalancerService(name types.NamespacedName, addDNSAnno bool) *corev1.Service {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name.Name,
@@ -430,7 +430,7 @@ func CreateLoadBalancerService(name types.NamespacedName, addDnsAnno bool) *core
 		},
 	}
 
-	if addDnsAnno {
+	if addDNSAnno {
 		svc.Annotations[networkv1.AnnotationHostnameKey] = fmt.Sprintf("%s.%s.svc", name.Name, name.Namespace)
 	}
 
@@ -486,8 +486,8 @@ func GetDefaultNetConfigSpec() map[string]interface{} {
 }
 
 func GetSubnet1(name string) networkv1.Subnet {
-	var gw string = "172.17.0.1"
-	var vlan int = 20
+	var gw = "172.17.0.1"
+	var vlan = 20
 	return networkv1.Subnet{
 		Name:    networkv1.NetNameStr(name),
 		Cidr:    "172.17.0.0/24",
@@ -506,8 +506,8 @@ func GetSubnet1(name string) networkv1.Subnet {
 }
 
 func GetSubnet2(name string) networkv1.Subnet {
-	var gw string = "172.18.0.1"
-	var vlan int = 21
+	var gw = "172.18.0.1"
+	var vlan = 21
 	return networkv1.Subnet{
 		Name:    networkv1.NetNameStr(name),
 		Cidr:    "172.18.0.0/24",
@@ -523,7 +523,7 @@ func GetSubnet2(name string) networkv1.Subnet {
 }
 
 func GetSubnetWithWrongExcludeAddress() networkv1.Subnet {
-	var vlan int = 20
+	var vlan = 20
 	return networkv1.Subnet{
 		Name: subnet1,
 		Cidr: "172.17.0.0/24",

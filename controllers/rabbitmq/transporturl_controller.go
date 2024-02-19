@@ -362,7 +362,7 @@ func (r *TransportURLReconciler) findObjectsForSrc(ctx context.Context, src clie
 			FieldSelector: fields.OneTermEqualSelector(field, src.GetName()),
 			Namespace:     src.GetNamespace(),
 		}
-		err := r.List(context.TODO(), crList, listOps)
+		err := r.List(ctx, crList, listOps)
 		if err != nil {
 			return []reconcile.Request{}
 		}
