@@ -19,7 +19,7 @@ package v1beta1
 import (
 	"testing"
 
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/gomega" //revive:disable:dot-imports
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -448,7 +448,7 @@ func TestIPSetUpdateValidation(t *testing.T) {
 			g := NewWithT(t)
 			basePath := field.NewPath("spec")
 
-			new := &IPSet{
+			newCfg := &IPSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "foo",
 				},
@@ -459,12 +459,12 @@ func TestIPSetUpdateValidation(t *testing.T) {
 
 			allErrs := valiateIPSetNetwork(tt.newSpec.Networks, basePath, &tt.n)
 			if len(allErrs) > 0 {
-				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), new.Name, allErrs)
+				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), newCfg.Name, allErrs)
 			}
 
 			allErrs = valiateIPSetChanged(tt.newSpec.Networks, tt.oldSpec.Networks, basePath)
 			if len(allErrs) > 0 {
-				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), new.Name, allErrs)
+				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), newCfg.Name, allErrs)
 			}
 
 			if tt.expectErr {

@@ -265,6 +265,8 @@ func valiateUniqElement(
 }
 
 // CIDRs must be uniq, while its possible to have same CIDR on different VLANs, we exlude this config
+//
+//lint:ignore U1000 valiateUniqCIDR
 func valiateUniqCIDR(
 	netCIDRs map[int]map[string]field.Path,
 	vlan *int,

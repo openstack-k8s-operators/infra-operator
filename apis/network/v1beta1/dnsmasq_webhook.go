@@ -79,7 +79,7 @@ func (r *DNSMasq) ValidateCreate() (admission.Warnings, error) {
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *DNSMasq) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+func (r *DNSMasq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	dnsmasqlog.Info("validate update", "name", r.Name)
 
 	// TODO(user): fill in your validation logic upon object update.
