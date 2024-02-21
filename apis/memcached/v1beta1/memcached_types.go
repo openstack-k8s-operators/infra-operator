@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -39,10 +40,18 @@ type MemcachedSpec struct {
 	// +kubebuilder:default=1
 	// Size of the memcached cluster
 	Replicas *int32 `json:"replicas"`
+
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// TLS settings for memcached service
+	TLS tls.SimpleService `json:"tls,omitempty"`
 }
 
 // MemcachedStatus defines the observed state of Memcached
 type MemcachedStatus struct {
+	// Map of hashes to track input changes
+	Hash map[string]string `json:"hash,omitempty"`
+
 	// ReadyCount of Memcached instances
 	ReadyCount int32 `json:"readyCount,omitempty"`
 

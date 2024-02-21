@@ -39,7 +39,7 @@ var _ = Describe("NetConfig webhook", func() {
 		})
 
 		It("should have created a NetConfig", func() {
-			Eventually(func(g Gomega) {
+			Eventually(func(_ Gomega) {
 				GetNetConfig(netConfigName)
 			}, timeout, interval).Should(Succeed())
 		})
@@ -84,7 +84,7 @@ var _ = Describe("NetConfig webhook", func() {
 
 			It("should not be possible to delete the NetConfig", func() {
 				netcfg := &networkv1.NetConfig{}
-				Eventually(func(g Gomega) {
+				Eventually(func(_ Gomega) {
 					netcfg = GetNetConfig(netConfigName)
 				}, timeout, interval).Should(Succeed())
 

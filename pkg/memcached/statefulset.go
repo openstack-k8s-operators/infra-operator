@@ -1,8 +1,6 @@
 package memcached
 
 import (
-	"fmt"
-
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	appsv1 "k8s.io/api/apps/v1"
@@ -69,15 +67,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 							Name:  "KOLLA_CONFIG_STRATEGY",
 							Value: "COPY_ALWAYS",
 						}},
-						VolumeMounts: []corev1.VolumeMount{{
-							MountPath: "/var/lib/kolla/config_files/src",
-							ReadOnly:  true,
-							Name:      "config-data",
-						}, {
-							MountPath: "/var/lib/kolla/config_files",
-							ReadOnly:  true,
-							Name:      "kolla-config",
-						}},
+						VolumeMounts: getVolumeMounts(m),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: MemcachedPort,
 							Name:          "memcached",
@@ -85,40 +75,7 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 						ReadinessProbe: readinessProbe,
 						LivenessProbe:  livenessProbe,
 					}},
-					Volumes: []corev1.Volume{
-						{
-							Name: "kolla-config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: fmt.Sprintf("%s-config-data", m.Name),
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "config.json",
-											Path: "config.json",
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: "config-data",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: fmt.Sprintf("%s-config-data", m.Name),
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "memcached",
-											Path: "etc/sysconfig/memcached",
-										},
-									},
-								},
-							},
-						},
-					},
+					Volumes: getVolumes(m),
 				},
 			},
 		},

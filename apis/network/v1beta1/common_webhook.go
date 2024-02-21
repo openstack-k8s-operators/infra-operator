@@ -38,7 +38,7 @@ const (
 )
 
 func getNetConfig(
-	c client.Client,
+	_ client.Client,
 	obj metav1.Object,
 ) (*NetConfig, error) {
 	// check if NetConfig is available
@@ -62,7 +62,7 @@ func getNetConfig(
 }
 
 func getIPSets(
-	c client.Client,
+	_ client.Client,
 	obj metav1.Object,
 ) (*IPSetList, error) {
 	// check if IPSet is available

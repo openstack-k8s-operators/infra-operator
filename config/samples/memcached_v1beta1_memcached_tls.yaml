@@ -1,0 +1,9 @@
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
+spec:
+  replicas: 1
+  tls:
+    secretName: memcached-tls
+    caBundleSecretName: memcached-tls

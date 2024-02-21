@@ -19,7 +19,7 @@ package v1beta1
 import (
 	"testing"
 
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/gomega" //revive:disable:dot-imports
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -1554,10 +1554,9 @@ func TestNetConfigValidation(t *testing.T) {
 			basePath := field.NewPath("spec")
 
 			if tt.expectErr {
-				g.Expect(len(valiateNetworks(tt.c.Spec.Networks, basePath))).Should(BeNumerically(">", 0))
+				g.Expect(valiateNetworks(tt.c.Spec.Networks, basePath)).ShouldNot(BeEmpty())
 			} else {
-				g.Expect(len(valiateNetworks(tt.c.Spec.Networks, basePath))).Should(BeNumerically("==", 0))
-
+				g.Expect(valiateNetworks(tt.c.Spec.Networks, basePath)).Should(BeEmpty())
 			}
 		})
 	}
@@ -1781,7 +1780,7 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 			g := NewWithT(t)
 			basePath := field.NewPath("spec")
 
-			new := &NetConfig{
+			newCfg := &NetConfig{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "foo",
 				},
@@ -1792,12 +1791,12 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 
 			allErrs := valiateNetworks(tt.newSpec.Networks, basePath)
 			if len(allErrs) > 0 {
-				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), new.Name, allErrs)
+				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), newCfg.Name, allErrs)
 			}
 
 			allErrs = valiateNetworksChanged(tt.newSpec.Networks, tt.oldSpec.Networks, basePath)
 			if len(allErrs) > 0 {
-				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), new.Name, allErrs)
+				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), newCfg.Name, allErrs)
 			}
 
 			if tt.expectErr {

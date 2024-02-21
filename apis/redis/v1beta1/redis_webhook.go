@@ -85,7 +85,7 @@ func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *Redis) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+func (r *Redis) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	redislog.Info("validate update", "name", r.Name)
 
 	// TODO(user): fill in your validation logic upon object update.

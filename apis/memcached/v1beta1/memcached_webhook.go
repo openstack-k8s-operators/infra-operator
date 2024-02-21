@@ -85,7 +85,7 @@ func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *Memcached) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+func (r *Memcached) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	memcachedlog.Info("validate update", "name", r.Name)
 
 	// TODO(user): fill in your validation logic upon object update.
