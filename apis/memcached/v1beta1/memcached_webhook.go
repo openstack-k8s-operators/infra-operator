@@ -69,6 +69,12 @@ func (spec *MemcachedSpec) Default() {
 	if spec.ContainerImage == "" {
 		spec.ContainerImage = memcachedDefaults.ContainerImageURL
 	}
+	spec.MemcachedSpecCore.Default()
+}
+
+// Default - common validations go here (for the OpenStackControlplane which uses this one)
+func (spec *MemcachedSpecCore) Default() {
+	// nothing here
 }
 
 // TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.

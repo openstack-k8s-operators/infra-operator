@@ -46,9 +46,15 @@ type DNSMasqOption struct {
 
 // DNSMasqSpec defines the desired state of DNSMasq
 type DNSMasqSpec struct {
+	DNSMasqSpecCore `json:",inline"`
+
 	// +kubebuilder:validation:Optional
 	// DNSMasq Container Image URL
 	ContainerImage string `json:"containerImage"`
+}
+
+// DNSMasqSpecCore - this version is used by the OpenStackControlplane CR (no container images)
+type DNSMasqSpecCore struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
