@@ -32,9 +32,15 @@ const (
 
 // MemcachedSpec defines the desired state of Memcached
 type MemcachedSpec struct {
+	MemcachedSpecCore `json:",inline"`
+
 	// +kubebuilder:validation:Required
 	// Name of the memcached container image to run (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
+}
+
+// MemcachedSpecCore - this version is used by the OpenStackControlplane CR (no container images)
+type MemcachedSpecCore struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1

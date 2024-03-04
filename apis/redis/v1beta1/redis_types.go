@@ -32,9 +32,15 @@ const (
 
 // RedisSpec defines the desired state of Redis
 type RedisSpec struct {
+	RedisSpecCore `json:",inline"`
+
 	// +kubebuilder:validation:Required
 	// Name of the redis container image to run (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
+}
+
+// RedisSpecCore - this version is used by the OpenStackControlplane CR (no container images)
+type RedisSpecCore struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
 	// Size of the redis cluster

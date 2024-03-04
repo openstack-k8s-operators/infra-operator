@@ -63,6 +63,12 @@ func (spec *DNSMasqSpec) Default() {
 	if spec.ContainerImage == "" {
 		spec.ContainerImage = dnsMasqDefaults.ContainerImageURL
 	}
+	spec.DNSMasqSpecCore.Default()
+}
+
+// Default - common validations go here (for the OpenStackControlplane which uses this one)
+func (spec *DNSMasqSpecCore) Default() {
+	// nothing here
 }
 
 // TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.

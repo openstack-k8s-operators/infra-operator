@@ -69,6 +69,12 @@ func (spec *RedisSpec) Default() {
 	if spec.ContainerImage == "" {
 		spec.ContainerImage = redisDefaults.ContainerImageURL
 	}
+	spec.RedisSpecCore.Default()
+}
+
+// Default - common validations go here (for the OpenStackControlplane which uses this one)
+func (spec *RedisSpecCore) Default() {
+	//nothing to validate yet
 }
 
 // TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
