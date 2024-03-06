@@ -19,7 +19,6 @@ package v1beta1
 import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
-	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -69,6 +68,9 @@ type MemcachedStatus struct {
 
 	// ServerListWithInet - List of memcached endpoints with inet(6) prefix
 	ServerListWithInet []string `json:"serverListWithInet,omitempty" optional:"true"`
+
+	// Whether TLS is supported by the memcached instance
+	TLSSupport bool `json:"tlsSupport,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -96,34 +98,4 @@ type MemcachedList struct {
 
 func init() {
 	SchemeBuilder.Register(&Memcached{}, &MemcachedList{})
-}
-
-// IsReady - returns true if Memcached is reconciled successfully
-func (instance Memcached) IsReady() bool {
-	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
-}
-
-// RbacConditionsSet - set the conditions for the rbac object
-func (instance Memcached) RbacConditionsSet(c *condition.Condition) {
-	instance.Status.Conditions.Set(c)
-}
-
-// RbacNamespace - return the namespace
-func (instance Memcached) RbacNamespace() string {
-	return instance.Namespace
-}
-
-// RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
-func (instance Memcached) RbacResourceName() string {
-	return "memcached-" + instance.Name
-}
-
-// SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
-func SetupDefaults() {
-	// Acquire environmental defaults and initialize Memcached defaults with them
-	memcachedDefaults := MemcachedDefaults{
-		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INFRA_MEMCACHED_IMAGE_URL_DEFAULT", MemcachedContainerImage),
-	}
-
-	SetupMemcachedDefaults(memcachedDefaults)
 }
