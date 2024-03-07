@@ -441,15 +441,13 @@ func valiateAllocationRange(
 	startAddr := net.ParseIP(allocRange.Start)
 	if startAddr == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("start"), allocRange.Start, errNotIPAddr))
-		return allErrs
 	}
 	endAddr := net.ParseIP(allocRange.End)
 	if endAddr == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("end"), allocRange.End, errNotIPAddr))
-		return allErrs
 	}
 
-	if startAddr == nil || endAddr == nil {
+	if len(allErrs) != 0 {
 		return allErrs
 	}
 
