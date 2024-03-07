@@ -442,7 +442,7 @@ func (r *IPSetReconciler) ensureReservation(
 			Routes:    subnetDef.Routes,
 			DNSDomain: netDef.DNSDomain,
 		}
-		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute && subnetDef.Gateway != nil {
+		if ipsetNet.DefaultRoute && subnetDef.Gateway != nil {
 			ipsetRes.Gateway = subnetDef.Gateway
 			if ipsetRes.Routes == nil {
 				ipsetRes.Routes = []networkv1.Route{}

@@ -38,7 +38,7 @@ type IPSetNetwork struct {
 
 	// +kubebuilder:validation:Optional
 	// Use gateway from subnet as default route. There can only be one default route defined per IPSet.
-	DefaultRoute *bool `json:"defaultRoute,omitempty"`
+	DefaultRoute bool `json:"defaultRoute"`
 }
 
 // IPSetSpec defines the desired state of IPSet
