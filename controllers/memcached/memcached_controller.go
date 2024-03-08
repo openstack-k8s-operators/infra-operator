@@ -341,8 +341,10 @@ func (r *Reconciler) generateConfigMaps(
 			"-o ssl_chain_cert=/etc/pki/tls/certs/memcached.crt " +
 			"-o ssl_key=/etc/pki/tls/private/memcached.key " +
 			"-o ssl_ca_cert=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+		instance.Status.TLSSupport = true
 	} else {
 		memcachedTLSConfig = ""
+		instance.Status.TLSSupport = false
 	}
 	templateParameters := map[string]interface{}{
 		"memcachedTLSConfig": memcachedTLSConfig,
@@ -460,7 +462,7 @@ func (r *Reconciler) GetServerLists(
 	}
 
 	for i := int32(0); i < *(instance.Spec.Replicas); i++ {
-		server := fmt.Sprintf("%s-%d.%s", instance.Name, i, instance.Name)
+		server := fmt.Sprintf("%s-%d.%s.%s.svc", instance.Name, i, instance.Name, instance.Namespace)
 		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
 
 		// python-memcached requires inet(6) prefix according to the IP version
