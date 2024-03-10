@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	goClient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,11 +37,11 @@ const (
 )
 
 func getNetConfig(
-	_ client.Client,
+	_ goClient.Client,
 	obj metav1.Object,
 ) (*NetConfig, error) {
 	// check if NetConfig is available
-	opts := &client.ListOptions{
+	opts := &goClient.ListOptions{
 		Namespace: obj.GetNamespace(),
 	}
 
@@ -62,11 +61,11 @@ func getNetConfig(
 }
 
 func getIPSets(
-	_ client.Client,
+	_ goClient.Client,
 	obj metav1.Object,
 ) (*IPSetList, error) {
 	// check if IPSet is available
-	opts := &client.ListOptions{
+	opts := &goClient.ListOptions{
 		Namespace: obj.GetNamespace(),
 	}
 
