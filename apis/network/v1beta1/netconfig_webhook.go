@@ -406,20 +406,20 @@ func valiateAddress(
 
 	// Validate IP Family for IPv4
 	if k8snet.IsIPv4CIDR(ipPrefix) {
-		if addr != nil && !k8snet.IsIPv4(addr) {
+		if !k8snet.IsIPv4(addr) {
 			allErrs = append(allErrs, field.Invalid(path, addrStr, errMixedAddressFamily))
 		}
 	}
 
 	// Validate IP Family for IPv6
 	if k8snet.IsIPv6CIDR(ipPrefix) {
-		if addr != nil && !k8snet.IsIPv6(addr) {
+		if !k8snet.IsIPv6(addr) {
 			allErrs = append(allErrs, field.Invalid(path, addrStr, errMixedAddressFamily))
 		}
 	}
 
 	// Validate addr in cidr
-	if addr != nil && !ipPrefix.Contains(addr) {
+	if !ipPrefix.Contains(addr) {
 		allErrs = append(allErrs, field.Invalid(path, addrStr, fmt.Sprintf(errNotInCidr, ipPrefix.String())))
 	}
 
@@ -441,15 +441,13 @@ func valiateAllocationRange(
 	startAddr := net.ParseIP(allocRange.Start)
 	if startAddr == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("start"), allocRange.Start, errNotIPAddr))
-		return allErrs
 	}
 	endAddr := net.ParseIP(allocRange.End)
 	if endAddr == nil {
 		allErrs = append(allErrs, field.Invalid(path.Child("end"), allocRange.End, errNotIPAddr))
-		return allErrs
 	}
 
-	if startAddr == nil || endAddr == nil {
+	if len(allErrs) != 0 {
 		return allErrs
 	}
 
