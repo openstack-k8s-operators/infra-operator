@@ -71,7 +71,7 @@ func (instance *Memcached) GetMemcachedServerListQuotedString() string {
 // GetMemcachedServerListWithInetString - return the memcached servers as comma separated list
 // to be used in OpenStack config.
 func (instance *Memcached) GetMemcachedServerListWithInetString() string {
-	return strings.Join(instance.Status.ServerListWithInet, "','")
+	return strings.Join(instance.Status.ServerListWithInet, ",")
 }
 
 // GetMemcachedServerListWithInetQuotedString - return the memcached servers, each quoted, as comma separated list
