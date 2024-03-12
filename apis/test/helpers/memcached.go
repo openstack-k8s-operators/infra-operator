@@ -112,8 +112,8 @@ func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
 		serverList := []string{}
 		serverListWithInet := []string{}
 		for i := 0; i < int(*mc.Spec.Replicas); i++ {
-			serverList = append(serverList, fmt.Sprintf("%s-%d.%s:11211", mc.Name, i, mc.Name))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s]:11211", mc.Name, i, mc.Name))
+			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
 		}
 		mc.Status.ServerList = serverList
 		mc.Status.ServerListWithInet = serverListWithInet
