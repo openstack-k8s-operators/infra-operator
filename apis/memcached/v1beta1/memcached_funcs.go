@@ -62,10 +62,22 @@ func (instance *Memcached) GetMemcachedServerListString() string {
 	return strings.Join(instance.Status.ServerList, ",")
 }
 
+// GetMemcachedServerListQuotedString - return the memcached servers, each quoted, as comma separated list
+// to be used in OpenStack config.
+func (instance *Memcached) GetMemcachedServerListQuotedString() string {
+	return "'" + strings.Join(instance.Status.ServerList, "','") + "'"
+}
+
 // GetMemcachedServerListWithInetString - return the memcached servers as comma separated list
 // to be used in OpenStack config.
 func (instance *Memcached) GetMemcachedServerListWithInetString() string {
-	return strings.Join(instance.Status.ServerListWithInet, ",")
+	return strings.Join(instance.Status.ServerListWithInet, "','")
+}
+
+// GetMemcachedServerListWithInetQuotedString - return the memcached servers, each quoted, as comma separated list
+// to be used in OpenStack config.
+func (instance *Memcached) GetMemcachedServerListWithInetQuotedString() string {
+	return "'" + strings.Join(instance.Status.ServerListWithInet, "','") + "'"
 }
 
 // GetMemcachedTLSSupport - return the TLS support of the memcached instance
