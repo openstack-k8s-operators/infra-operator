@@ -194,9 +194,9 @@ func valiateIPSetNetwork(
 
 			if subNetIdx >= 0 {
 				// net and subnet are valid
-
+				subNetCfg := netCfgSpec.Networks[netIdx].Subnets[subNetIdx]
 				if _net.FixedIP != nil || _net.DefaultRoute != nil {
-					cidr := netCfgSpec.Networks[netIdx].Subnets[subNetIdx].Cidr
+					cidr := subNetCfg.Cidr
 					_, ipPrefix, ipPrefixErr := net.ParseCIDR(cidr)
 					if ipPrefixErr != nil {
 						// this should never happen as the subnet CIDR was already validated
@@ -222,6 +222,11 @@ func valiateIPSetNetwork(
 							if count > 1 {
 								allErrs = append(allErrs, field.Invalid(path.Child("defaultRoute"), _net.Name, fmt.Sprintf(errMultiDefaultRoute, string(fam))))
 							}
+						}
+
+						// validate that default GW is configured on subnet when requested
+						if subNetCfg.Gateway == nil || (subNetCfg.Gateway != nil && *subNetCfg.Gateway == "") {
+							allErrs = append(allErrs, field.Invalid(path.Child("defaultRoute"), _net.Name, fmt.Sprintf(errNoDefaultRoute, subNetCfg.Name)))
 						}
 					}
 				}

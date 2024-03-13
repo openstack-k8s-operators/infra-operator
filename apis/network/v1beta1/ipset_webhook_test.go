@@ -261,6 +261,26 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 			},
 			n: getDefaultIPv4IPv6NetConfigSpec(),
 		},
+		{
+			name:      "should fail when defaultRoute is requested but not configured on the subnet",
+			expectErr: true,
+			c: &IPSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "netcfg",
+					Namespace: "foo",
+				},
+				Spec: IPSetSpec{
+					Networks: []IPSetNetwork{
+						{
+							Name:         "net1",
+							SubnetName:   "subnet2",
+							DefaultRoute: ptr.To(true),
+						},
+					},
+				},
+			},
+			n: getDefaultIPv4IPv6NetConfigSpec(),
+		},
 	}
 
 	for _, tt := range tests {
