@@ -34,6 +34,7 @@ const (
 	errFixedIPChanged         = "fixedIP must not change"
 	errDefaultRouteChanged    = "defaultRoute must not change"
 	errMultiDefaultRoute      = "%s defaultRoute can only be requested on a singe network"
+	errNoDefaultRoute         = "defaultRoute requested, but not configured for subnet %s"
 )
 
 func getNetConfig(
