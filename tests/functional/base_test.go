@@ -586,6 +586,17 @@ func GetIPSetNet1WithFixedIP(ip string) networkv1.IPSetNetwork {
 	}
 }
 
+func GetIPSetNet1WithDefaultRoute() networkv1.IPSetNetwork {
+	ip := "172.17.0.220"
+	route := true
+	return networkv1.IPSetNetwork{
+		Name:         net1,
+		SubnetName:   subnet1,
+		FixedIP:      &ip,
+		DefaultRoute: &route,
+	}
+}
+
 func GetIPSetNet2() networkv1.IPSetNetwork {
 	return networkv1.IPSetNetwork{
 		Name:       net2,

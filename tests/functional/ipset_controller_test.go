@@ -138,6 +138,46 @@ var _ = Describe("IPSet controller", func() {
 		})
 	})
 
+	When("an IPSet with defaultRoute created", func() {
+		BeforeEach(func() {
+			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			ipset := CreateIPSet(namespace, GetIPSetSpec(false, GetIPSetNet1WithDefaultRoute()))
+			ipSetName = types.NamespacedName{
+				Name:      ipset.GetName(),
+				Namespace: namespace,
+			}
+
+			DeferCleanup(func(ctx SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
+		})
+
+		It("should have created an IPSet with default route on net-1", func() {
+			Eventually(func(g Gomega) {
+				res := GetReservationFromNet(ipSetName, "net-1")
+				g.Expect(res.Routes).Should(HaveLen(1))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("reports the overall state is ready", func() {
+			th.ExpectCondition(
+				ipSetName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
+
 	When("an IPSet with FixedIP outside AllocationRange gets created", func() {
 		BeforeEach(func() {
 			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())

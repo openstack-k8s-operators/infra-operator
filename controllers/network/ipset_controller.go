@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	k8snet "k8s.io/utils/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -435,10 +436,18 @@ func (r *IPSetReconciler) ensureReservation(
 			Routes:    subnetDef.Routes,
 			DNSDomain: netDef.DNSDomain,
 		}
-		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute {
+		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute && subnetDef.Gateway != nil {
 			ipsetRes.Gateway = subnetDef.Gateway
-			ipsetRes.Routes = append(ipsetRes.Routes,
-				networkv1.Route{Destination: "0.0.0.0/0", Nexthop: *subnetDef.Gateway})
+			if ipsetRes.Routes == nil {
+				ipsetRes.Routes = []networkv1.Route{}
+			}
+			if k8snet.IsIPv6(net.ParseIP(ip.Address)) {
+				ipsetRes.Routes = append(ipsetRes.Routes,
+					networkv1.Route{Destination: "::/0", Nexthop: *subnetDef.Gateway})
+			} else {
+				ipsetRes.Routes = append(ipsetRes.Routes,
+					networkv1.Route{Destination: "0.0.0.0/0", Nexthop: *subnetDef.Gateway})
+			}
 		}
 		if subnetDef.DNSDomain != nil {
 			ipsetRes.DNSDomain = *subnetDef.DNSDomain
