@@ -33,6 +33,10 @@ spec:
       displayName: Memcached
       kind: Memcached
       name: memcacheds.memcached.openstack.org
+      specDescriptors:
+      - description: TLS settings for memcached service
+        displayName: TLS
+        path: tls
       version: v1beta1
     - description: NetConfig is the Schema for the netconfigs API
       displayName: Net Config
