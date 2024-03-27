@@ -11,7 +11,7 @@ require (
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240214144842-5dcac51e5b36
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240214144842-5dcac51e5b36
 	github.com/rabbitmq/cluster-operator v1.14.0
-	go.uber.org/zap v1.26.0
+	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
 	k8s.io/api v0.28.7
 	k8s.io/apimachinery v0.28.7
