@@ -195,7 +195,7 @@ func valiateIPSetNetwork(
 			if subNetIdx >= 0 {
 				// net and subnet are valid
 				subNetCfg := netCfgSpec.Networks[netIdx].Subnets[subNetIdx]
-				if _net.FixedIP != nil || _net.DefaultRoute != nil {
+				if _net.FixedIP != nil || _net.DefaultRoute {
 					cidr := subNetCfg.Cidr
 					_, ipPrefix, ipPrefixErr := net.ParseCIDR(cidr)
 					if ipPrefixErr != nil {
@@ -215,7 +215,7 @@ func valiateIPSetNetwork(
 					}
 
 					// check that there are not multiple have the defaultRoute flag
-					if _net.DefaultRoute != nil && *_net.DefaultRoute {
+					if _net.DefaultRoute {
 						defaultRouteCount[ipFam]++
 
 						for fam, count := range defaultRouteCount {

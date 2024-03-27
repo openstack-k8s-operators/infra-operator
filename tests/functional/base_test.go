@@ -593,7 +593,7 @@ func GetIPSetNet1WithDefaultRoute() networkv1.IPSetNetwork {
 		Name:         net1,
 		SubnetName:   subnet1,
 		FixedIP:      &ip,
-		DefaultRoute: &route,
+		DefaultRoute: route,
 	}
 }
 
