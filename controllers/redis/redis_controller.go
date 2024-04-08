@@ -179,6 +179,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	)
 
 	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	//
 	// Create/Update all the resources associated to this Redis instance
@@ -332,7 +333,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	// We reached the end of the Reconcile, update the Ready condition based on
 	// the sub conditions
-	instance.Status.ObservedGeneration = instance.Generation
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)

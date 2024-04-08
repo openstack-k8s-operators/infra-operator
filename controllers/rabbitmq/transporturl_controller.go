@@ -147,6 +147,7 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	)
 
 	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	if isNewInstance {
 		// Register overall status immediately to have an early feedback e.g. in the cli
@@ -296,7 +297,6 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// We reached the end of the Reconcile, update the Ready condition based on
 	// the sub conditions
-	instance.Status.ObservedGeneration = instance.Generation
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)

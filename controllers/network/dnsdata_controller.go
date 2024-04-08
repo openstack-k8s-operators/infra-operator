@@ -127,6 +127,7 @@ func (r *DNSDataReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	)
 
 	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	// If we're not deleting this and the service object doesn't have our finalizer, add it.
 	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) || isNewInstance {
@@ -196,7 +197,6 @@ func (r *DNSDataReconciler) reconcileNormal(ctx context.Context, instance *netwo
 
 	// We reached the end of the Reconcile, update the Ready condition based on
 	// the sub conditions
-	instance.Status.ObservedGeneration = instance.Generation
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)
