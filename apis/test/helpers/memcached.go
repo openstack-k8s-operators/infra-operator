@@ -125,3 +125,28 @@ func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
 
 	tc.Logger.Info("Simulated memcached ready", "on", name)
 }
+
+// SimulateTLSMemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster which supports TLS.
+func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
+	t.Eventually(func(g t.Gomega) {
+		mc := tc.GetMemcached(name)
+		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+		mc.Status.ReadyCount = *mc.Spec.Replicas
+
+		serverList := []string{}
+		serverListWithInet := []string{}
+		for i := 0; i < int(*mc.Spec.Replicas); i++ {
+			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+		}
+		mc.Status.ServerList = serverList
+		mc.Status.ServerListWithInet = serverListWithInet
+		mc.Status.TLSSupport = true
+
+		// This can return conflict so we have the t.Eventually block to retry
+		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
+
+	}, tc.Timeout, tc.Interval).Should(t.Succeed())
+
+	tc.Logger.Info("Simulated memcached ready", "on", name)
+}
