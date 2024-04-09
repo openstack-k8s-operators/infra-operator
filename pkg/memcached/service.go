@@ -21,10 +21,9 @@ func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 		Selector: map[string]string{
 			"app": m.GetName(),
 		},
-		Port: service.GenericServicePort{
-			Name:     "memcached",
-			Port:     MemcachedPort,
-			Protocol: "TCP",
+		Ports: []corev1.ServicePort{
+			{Name: "memcached", Protocol: "TCP", Port: MemcachedPort},
+			{Name: "memcached-tls", Protocol: "TCP", Port: MemcachedTLSPort},
 		},
 		ClusterIP: "None",
 	}

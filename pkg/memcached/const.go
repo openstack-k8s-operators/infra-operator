@@ -18,4 +18,6 @@ package memcached
 const (
 	// MemcachedPort -
 	MemcachedPort int32 = 11211
+	// MemcachedTLSPort -
+	MemcachedTLSPort int32 = 11212
 )
