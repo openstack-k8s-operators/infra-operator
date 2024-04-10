@@ -25,7 +25,7 @@ func Service(instance *redisv1.Redis) *corev1.Service {
 		},
 		Port: service.GenericServicePort{
 			Name:     "redis",
-			Port:     6379,
+			Port:     RedisPort,
 			Protocol: "TCP",
 		},
 	}
@@ -49,8 +49,8 @@ func HeadlessService(instance *redisv1.Redis) *corev1.Service {
 			common.OwnerSelector: instance.Name,
 		},
 		Ports: []corev1.ServicePort{
-			{Name: "redis", Protocol: "TCP", Port: 6379},
-			{Name: "sentinel", Protocol: "TCP", Port: 26379},
+			{Name: "redis", Protocol: "TCP", Port: RedisPort},
+			{Name: "sentinel", Protocol: "TCP", Port: SentinelPort},
 		},
 		ClusterIP:                "None",
 		PublishNotReadyAddresses: true,

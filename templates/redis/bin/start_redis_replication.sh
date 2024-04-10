@@ -6,12 +6,12 @@ generate_configs
 sudo -E kolla_set_configs
 
 # 1. check if a redis cluster is already running by contacting sentinel
-output=$(timeout ${TIMEOUT} $REDIS_CLI_CMD -h ${SVC_FQDN} -p 26379 sentinel master redis)
+output=$(timeout ${TIMEOUT} $REDIS_CLI_CMD -h ${SVC_FQDN} -p {{ .sentinelPort }} sentinel master redis)
 if [ $? -eq 0 ]; then
     master=$(echo "$output" | awk '/^ip$/ {getline; print $0; exit}')
     # TODO skip if no master was found
     log "Connecting to the existing Redis cluster (master: ${master})"
-    exec redis-server $REDIS_CONFIG --protected-mode no --replicaof "$master" 6379
+    exec redis-server $REDIS_CONFIG --protected-mode no --replicaof "$master" {{ .redisPort }}
 fi
 
 # 2. else bootstrap a new cluster (assume we should be the first redis pod)

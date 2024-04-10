@@ -32,10 +32,10 @@ func Deployment(r *redisv1.Redis) *appsv1.Deployment {
 	}
 
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: RedisPort},
 	}
 	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: RedisPort},
 	}
 
 	deployment := &appsv1.Deployment{
@@ -58,7 +58,7 @@ func Deployment(r *redisv1.Redis) *appsv1.Deployment {
 						Image: r.Spec.ContainerImage,
 						Name:  "redis",
 						Ports: []corev1.ContainerPort{{
-							ContainerPort: 6379,
+							ContainerPort: RedisPort,
 							Name:          "redis",
 						}},
 						ReadinessProbe: readinessProbe,

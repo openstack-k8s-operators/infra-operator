@@ -215,6 +215,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if specTLS.Enabled() {
 		certHash, _, err = specTLS.GenericService.ValidateCertSecret(ctx, helper, instance.Namespace)
 		inputHashEnv["Cert"] = env.SetValue(certHash)
+		instance.Status.TLSSupport = true
 	}
 	if err == nil && specTLS.Ca.CaBundleSecretName != "" {
 		caName := types.NamespacedName{
@@ -311,8 +312,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.SeverityWarning,
 			condition.ExposeServiceReadyErrorMessage,
 			err.Error()))
+
 		return sres, serr
 	}
+	instance.Status.ServerList = []string{commonsvc.GetServiceHostname()}
+	instance.Status.RedisPort = redis.RedisPort
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
 	//
@@ -347,17 +351,21 @@ func (r *Reconciler) generateConfigMaps(
 	instance *redisv1.Redis,
 	envVars *map[string]env.Setter,
 ) error {
-	templateParameters := make(map[string]interface{})
+	templateParameters := map[string]interface{}{
+		"redisPort":    redis.RedisPort,
+		"sentinelPort": redis.SentinelPort,
+	}
 	customData := make(map[string]string)
 
 	cms := []util.Template{
 		// ScriptsConfigMap
 		{
-			Name:         fmt.Sprintf("%s-scripts", instance.Name),
-			Namespace:    instance.Namespace,
-			Type:         util.TemplateTypeScripts,
-			InstanceType: instance.Kind,
-			Labels:       map[string]string{},
+			Name:          fmt.Sprintf("%s-scripts", instance.Name),
+			Namespace:     instance.Namespace,
+			Type:          util.TemplateTypeScripts,
+			InstanceType:  instance.Kind,
+			ConfigOptions: templateParameters,
+			Labels:        map[string]string{},
 		},
 		// ConfigMap
 		{

@@ -46,16 +46,16 @@ func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 	}
 
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: RedisPort},
 	}
 	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: RedisPort},
 	}
 	sentinelLivenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: SentinelPort},
 	}
 	sentinelReadinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: SentinelPort},
 	}
 	name := r.Name + "-" + "redis"
 
@@ -67,7 +67,7 @@ func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 		// https://github.com/kubernetes/dns/blob/master/docs/specification.md
 		// Headless services only publish dns entries that include cluster domain.
 		// For the time being, assume this is .cluster.local
-		Value: name + "." + r.GetNamespace() + ".svc.cluster.local",
+		Value: name + "." + r.GetNamespace() + ".svc." + ClusterInternalDomain,
 	}}
 
 	sts := &appsv1.StatefulSet{
@@ -94,7 +94,7 @@ func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 						Env:          commonEnvVars,
 						VolumeMounts: getRedisVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
-							ContainerPort: 6379,
+							ContainerPort: RedisPort,
 							Name:          "redis",
 						}},
 						LivenessProbe: &corev1.Probe{
@@ -122,7 +122,7 @@ func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 						}),
 						VolumeMounts: getSentinelVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
-							ContainerPort: 26379,
+							ContainerPort: SentinelPort,
 							Name:          "sentinel",
 						}},
 						ReadinessProbe: sentinelReadinessProbe,

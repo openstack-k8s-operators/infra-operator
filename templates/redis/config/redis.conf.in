@@ -1,7 +1,7 @@
 dir /var/lib/redis
 bind { POD_FQDN } localhost
 replica-announce-ip { POD_FQDN }
-port 6379
+port {{ .redisPort }}
 tcp-backlog 511
 timeout 0
 tcp-keepalive 300
