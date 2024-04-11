@@ -39,11 +39,6 @@ spec:
       kind: NetConfig
       name: netconfigs.network.openstack.org
       version: v1beta1
-    - description: Redis is the Schema for the redises API
-      displayName: Redis
-      kind: Redis
-      name: redises.redis.openstack.org
-      version: v1beta1
     - description: Reservation is the Schema for the reservations API
       displayName: Reservation
       kind: Reservation

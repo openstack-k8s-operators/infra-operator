@@ -105,26 +105,6 @@ webhooks:
     resources:
     - reservations
   sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /mutate-redis-openstack-org-v1beta1-redis
-  failurePolicy: Fail
-  name: mredis.kb.io
-  rules:
-  - apiGroups:
-    - redis.openstack.org
-    apiVersions:
-    - v1beta1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - redises
-  sideEffects: None
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -232,24 +212,4 @@ webhooks:
     - UPDATE
     resources:
     - reservations
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: webhook-service
-      namespace: system
-      path: /validate-redis-openstack-org-v1beta1-redis
-  failurePolicy: Fail
-  name: vredis.kb.io
-  rules:
-  - apiGroups:
-    - redis.openstack.org
-    apiVersions:
-    - v1beta1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - redises
   sideEffects: None

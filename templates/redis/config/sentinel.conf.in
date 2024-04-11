@@ -1,8 +1,0 @@
-dir /var/lib/redis
-bind { POD_FQDN } localhost
-sentinel resolve-hostnames yes
-sentinel announce-hostnames yes
-sentinel announce-ip { POD_FQDN }
-sentinel down-after-milliseconds redis 10000
-sentinel failover-timeout redis 20000
-sentinel client-reconfig-script redis /var/lib/operator-scripts/check_redis_endpoints.sh
