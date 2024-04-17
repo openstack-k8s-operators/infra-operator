@@ -1,9 +1,0 @@
-include /var/lib/redis/redis.conf
-
-port 0
-tls-port 6379
-tls-cert-file /etc/pki/tls/certs/redis.crt
-tls-key-file /etc/pki/tls/private/redis.key
-tls-ca-cert-file /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-tls-replication yes
-tls-auth-clients optional

@@ -44,11 +44,9 @@ import (
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
-	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	memcachedcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
 	networkcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
-	rediscontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/redis"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -63,7 +61,6 @@ func init() {
 	utilruntime.Must(rabbitmqv1beta1.AddToScheme(scheme))
 	utilruntime.Must(rabbitmqclusterv1.AddToScheme(scheme))
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
-	utilruntime.Must(redisv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
@@ -151,14 +148,6 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Memcached")
 		os.Exit(1)
 	}
-	if err = (&rediscontrollers.Reconciler{
-		Client:  mgr.GetClient(),
-		Kclient: kclient,
-		Scheme:  mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Redis")
-		os.Exit(1)
-	}
 
 	if err = (&networkcontrollers.DNSMasqReconciler{
 		Client:  mgr.GetClient(),
@@ -197,7 +186,6 @@ func main() {
 
 	// Acquire environmental defaults and initialize operator defaults with them
 	memcachedv1.SetupDefaults()
-	redisv1.SetupDefaults()
 	networkv1.SetupDefaults()
 
 	// Setup webhooks if requested
@@ -206,10 +194,6 @@ func main() {
 
 		if err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
-			os.Exit(1)
-		}
-		if err = (&redisv1.Redis{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "Redis")
 			os.Exit(1)
 		}
 		if err = (&networkv1.DNSMasq{}).SetupWebhookWithManager(mgr); err != nil {

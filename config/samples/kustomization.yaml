@@ -2,7 +2,6 @@
 resources:
 - rabbitmq_v1beta1_transporturl.yaml
 - memcached_v1beta1_memcached.yaml
-- redis_v1beta1_redis.yaml
 - network_v1beta1_dnsmasq.yaml
 - network_v1beta1_dnsdata.yaml
 - network_v1beta1_netconfig.yaml
