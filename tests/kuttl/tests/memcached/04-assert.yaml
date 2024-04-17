@@ -1,0 +1,45 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      set -e
+      # ensure memcached endpoint is exposed over TLS
+      TLSDATA=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo | openssl s_client -connect memcached-0.memcached --port 11212 2>&1')
+      echo "$TLSDATA" | grep -w CONNECTED
+      # run a stat command to verify memcached is working over TLS
+      MEMCACHEDDATATLS=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo -e "stats\nquit" | openssl s_client -ign_eof -connect memcached-0.memcached --port 11212 2>/dev/null')
+      # the stats command should have returned END
+      echo "$MEMCACHEDDATATLS" | grep -w END
+  - script: |
+      set -e
+      # run a stat command from the non-TLS port to verify that memcached exposes both types of endpoints
+      # note: the memcached container image doesn't have socat or nc to connect to memcached, so
+      # use awk instead as it resolves names just fine and does two way communication.
+      MEMCACHEDDATA=$(oc rsh -n ${NAMESPACE} memcached-0 awk 'BEGIN {memcached="/inet/tcp/0/memcached-0.memcached/11211"; print "stats" |& memcached; memcached |& getline; print $0}' 2>/dev/null)
+      # the stats command should have returned `STAT pid ...`
+      echo "$MEMCACHEDDATA" | grep -w STAT
+  - script: |
+      # When TLS is configured, the serverList should expose to the TLS port
+      template='{{ (index .status.serverList 0) }}'
+      regex="memcached-0.memcached.$NAMESPACE.svc:11212"
+      memcached=$(oc get -n $NAMESPACE memcached memcached -o go-template="$template")
+      matches=$(echo "$memcached" | sed -e "s?$regex??")
+      if [ -z "$matches" ]; then
+        exit 0
+      else
+        echo "Memcached Server: $memcached do not match regex"
+        exit 1
+      fi
+  - script: |
+      # Whether or not TLS is configured, the serverListWithInit always exposes port 11211
+      # get the first memcached from serverListWithInet and validate
+      template='{{ (index .status.serverListWithInet 0) }}'
+      regex="inet:\[memcached-0.memcached.$NAMESPACE.svc\]:11211"
+      memcached=$(oc get -n $NAMESPACE memcached memcached -o go-template="$template")
+      matches=$(echo "$memcached" | sed -e "s?$regex??")
+      if [ -z "$matches" ]; then
+        exit 0
+      else
+        echo "Memcached ServerListWithInet: $memcached do not match regex"
+        exit 1
+      fi

@@ -66,11 +66,22 @@ func StatefulSet(m *memcachedv1.Memcached) *appsv1.StatefulSet {
 						Env: []corev1.EnvVar{{
 							Name:  "KOLLA_CONFIG_STRATEGY",
 							Value: "COPY_ALWAYS",
-						}},
+						}, {
+							Name: "POD_IPS",
+							ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{
+									FieldPath: "status.podIPs",
+								},
+							},
+						},
+						},
 						VolumeMounts: getVolumeMounts(m),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: MemcachedPort,
 							Name:          "memcached",
+						}, {
+							ContainerPort: MemcachedTLSPort,
+							Name:          "memcached-tls",
 						}},
 						ReadinessProbe: readinessProbe,
 						LivenessProbe:  livenessProbe,

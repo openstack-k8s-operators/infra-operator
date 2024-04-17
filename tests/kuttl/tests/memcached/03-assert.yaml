@@ -1,12 +1,41 @@
-apiVersion: kuttl.dev/v1beta1
-kind: TestAssert
-commands:
-  - script: |
-      set -e
-      # ensure memcached endpoint is exposed over TLS
-      TLSDATA=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo | openssl s_client -connect memcached-0.memcached --port 11211 2>&1')
-      echo "$TLSDATA" | grep -w CONNECTED
-      # run a stat command to verify memcached is working over TLS
-      MEMCACHEDDATA=$(oc rsh -n ${NAMESPACE} memcached-0 /bin/sh -c 'echo -e "stats\nquit" | openssl s_client -ign_eof -connect memcached-0.memcached --port 11211 2>/dev/null')
-      # the stats command should have returned END
-      echo "$MEMCACHEDDATA" | grep -w END
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
+spec:
+  replicas: 1
+status:
+  readyCount: 1
+  conditions:
+    - message: Setup complete
+      reason: Ready
+      status: "True"
+      type: Ready
+    - message: Deployment completed
+      reason: Ready
+      status: "True"
+      type: DeploymentReady
+    - message: Exposing service completed
+      reason: Ready
+      status: "True"
+      type: ExposeServiceReady
+    - message: RoleBinding created
+      reason: Ready
+      status: "True"
+      type: RoleBindingReady
+    - message: Role created
+      reason: Ready
+      status: "True"
+      type: RoleReady
+    - message: ServiceAccount created
+      reason: Ready
+      status: "True"
+      type: ServiceAccountReady
+    - message: Service config create completed
+      reason: Ready
+      status: "True"
+      type: ServiceConfigReady
+    - message: Input data complete
+      reason: Ready
+      status: "True"
+      type: TLSInputReady

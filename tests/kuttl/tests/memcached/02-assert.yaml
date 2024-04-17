@@ -1,41 +1,35 @@
-apiVersion: memcached.openstack.org/v1beta1
-kind: Memcached
-metadata:
-  name: memcached
-spec:
-  replicas: 1
-status:
-  readyCount: 1
-  conditions:
-    - message: Setup complete
-      reason: Ready
-      status: "True"
-      type: Ready
-    - message: Deployment completed
-      reason: Ready
-      status: "True"
-      type: DeploymentReady
-    - message: Exposing service completed
-      reason: Ready
-      status: "True"
-      type: ExposeServiceReady
-    - message: RoleBinding created
-      reason: Ready
-      status: "True"
-      type: RoleBindingReady
-    - message: Role created
-      reason: Ready
-      status: "True"
-      type: RoleReady
-    - message: ServiceAccount created
-      reason: Ready
-      status: "True"
-      type: ServiceAccountReady
-    - message: Service config create completed
-      reason: Ready
-      status: "True"
-      type: ServiceConfigReady
-    - message: Input data complete
-      reason: Ready
-      status: "True"
-      type: TLSInputReady
+#
+# Check for:
+#
+# - correct serverList URIs
+#
+# the namespace of the fqdn of the serverListWithInet is namespace
+# dependent, so we can't rely on kuttl asserts to check them. This short script
+# gathers the first entry and checks that it matches the regex
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      # get the first memcached from serverListWithInet and validate
+      template='{{ (index .status.serverListWithInet 0) }}'
+      regex="inet:\[memcached-0.memcached.$NAMESPACE.svc\]:11211"
+      memcached=$(oc get -n $NAMESPACE memcached memcached -o go-template="$template")
+      matches=$(echo "$memcached" | sed -e "s?$regex??")
+      if [ -z "$matches" ]; then
+        exit 0
+      else
+        echo "Memcached ServerListWithInet: $memcached do not match regex"
+        exit 1
+      fi
+  - script: |
+      # get the first memcached from serverList and validate
+      template='{{ (index .status.serverList 0) }}'
+      regex="memcached-0.memcached.$NAMESPACE.svc:11211"
+      memcached=$(oc get -n $NAMESPACE memcached memcached -o go-template="$template")
+      matches=$(echo "$memcached" | sed -e "s?$regex??")
+      if [ -z "$matches" ]; then
+        exit 0
+      else
+        echo "Memcached Server: $memcached do not match regex"
+        exit 1
+      fi

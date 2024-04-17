@@ -344,19 +344,25 @@ func (r *Reconciler) generateConfigMaps(
 	Log := h.GetLogger()
 
 	customData := make(map[string]string)
-	var memcachedTLSConfig string
+	var memcachedTLSListen, memcachedTLSOptions, memcachedPort string
 	if instance.Spec.TLS.Enabled() {
-		memcachedTLSConfig = "-Z " +
+		memcachedTLSListen = "| sed 's/\\(.*\\)/\\1\\nnotls:\\1:11211/'"
+		memcachedTLSOptions = "-Z " +
 			"-o ssl_chain_cert=/etc/pki/tls/certs/memcached.crt " +
 			"-o ssl_key=/etc/pki/tls/private/memcached.key " +
 			"-o ssl_ca_cert=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+		memcachedPort = fmt.Sprint(memcached.MemcachedTLSPort)
 		instance.Status.TLSSupport = true
 	} else {
-		memcachedTLSConfig = ""
+		memcachedTLSListen = ""
+		memcachedTLSOptions = ""
+		memcachedPort = fmt.Sprint(memcached.MemcachedPort)
 		instance.Status.TLSSupport = false
 	}
 	templateParameters := map[string]interface{}{
-		"memcachedTLSConfig": memcachedTLSConfig,
+		"memcachedTLSListen":  memcachedTLSListen,
+		"memcachedTLSOptions": memcachedTLSOptions,
+		"memcachedPort":       memcachedPort,
 	}
 
 	cms := []util.Template{
@@ -469,10 +475,15 @@ func (r *Reconciler) GetServerLists(
 	if ipFamily == corev1.IPv6Protocol {
 		prefix = "inet6"
 	}
-
+	var port int32
+	if instance.Spec.TLS.Enabled() {
+		port = memcached.MemcachedTLSPort
+	} else {
+		port = memcached.MemcachedPort
+	}
 	for i := int32(0); i < *(instance.Spec.Replicas); i++ {
 		server := fmt.Sprintf("%s-%d.%s.%s.svc", instance.Name, i, instance.Name, instance.Namespace)
-		serverList = append(serverList, fmt.Sprintf("%s:%d", server, memcached.MemcachedPort))
+		serverList = append(serverList, fmt.Sprintf("%s:%d", server, port))
 
 		// python-memcached requires inet(6) prefix according to the IP version
 		// used by the memcached server.
