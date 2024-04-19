@@ -10,7 +10,7 @@ require (
 	github.com/openstack-k8s-operators/infra-operator/apis v0.3.0
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240412091425-bb628ded5eb8
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240412091425-bb628ded5eb8
-	github.com/rabbitmq/cluster-operator v1.14.0
+	github.com/rabbitmq/cluster-operator/v2 v2.6.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
 	k8s.io/api v0.28.9
@@ -28,9 +28,9 @@ require (
 	github.com/evanphx/json-patch/v5 v5.6.0 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/go-logr/zapr v1.2.4 // indirect
-	github.com/go-openapi/jsonpointer v0.19.6 // indirect
+	github.com/go-openapi/jsonpointer v0.20.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
-	github.com/go-openapi/swag v0.22.3 // indirect
+	github.com/go-openapi/swag v0.22.4 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
@@ -38,8 +38,8 @@ require (
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
-	github.com/google/pprof v0.0.0-20210720184732-4bb14d4b1be1 // indirect
-	github.com/imdario/mergo v0.3.12 // indirect
+	github.com/google/pprof v0.0.0-20230926050212-f7f687d19a98 // indirect
+	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.4.0 // indirect
@@ -73,7 +73,7 @@ require (
 	k8s.io/apiextensions-apiserver v0.28.9 // indirect
 	k8s.io/component-base v0.28.9 // indirect
 	k8s.io/klog/v2 v2.110.1 // indirect
-	k8s.io/kube-openapi v0.0.0-20230717233707-2695361300d9 // indirect
+	k8s.io/kube-openapi v0.0.0-20230816210353-14e408962443 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
@@ -87,3 +87,6 @@ replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
 // mschuppert: map to latest commit from release-4.13 tag
 // must consistent within modules and service operators
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 //allow-merging
+
+// custom RabbitmqClusterSpecCore for OpenStackControlplane (v2.6.0_patches_tag)
+replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240313124519-961a0ee8bf7f //allow-merging

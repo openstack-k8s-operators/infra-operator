@@ -38,7 +38,7 @@ import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
-	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -360,7 +360,7 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&rabbitmqv1.TransportURL{}).
 		Owns(&corev1.Secret{}).
 		Watches(
-			&rabbitmqclusterv1.RabbitmqCluster{},
+			&rabbitmqclusterv2.RabbitmqCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
@@ -401,8 +401,8 @@ func getRabbitmqCluster(
 	ctx context.Context,
 	h *helper.Helper,
 	instance *rabbitmqv1.TransportURL,
-) (*rabbitmqclusterv1.RabbitmqCluster, error) {
-	rabbitMqCluster := &rabbitmqclusterv1.RabbitmqCluster{}
+) (*rabbitmqclusterv2.RabbitmqCluster, error) {
+	rabbitMqCluster := &rabbitmqclusterv2.RabbitmqCluster{}
 
 	err := h.GetClient().Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitMqCluster)
 

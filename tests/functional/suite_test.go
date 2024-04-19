@@ -41,7 +41,7 @@ import (
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
-	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmq_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
@@ -80,7 +80,7 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	rabbitmqv2CRDs, err := test.GetCRDDirFromModule(
-		"github.com/rabbitmq/cluster-operator", "../../go.mod", "config/crd/bases")
+		"github.com/rabbitmq/cluster-operator/v2", "../../go.mod", "config/crd/bases")
 	Expect(err).ShouldNot(HaveOccurred())
 
 	By("bootstrapping test environment")
@@ -112,7 +112,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = rabbitmqv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
-	err = rabbitmqclusterv1.AddToScheme(scheme.Scheme)
+	err = rabbitmqclusterv2.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	//+kubebuilder:scaffold:scheme
 

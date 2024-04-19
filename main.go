@@ -37,7 +37,7 @@ import (
 
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
@@ -59,7 +59,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(rabbitmqv1beta1.AddToScheme(scheme))
-	utilruntime.Must(rabbitmqclusterv1.AddToScheme(scheme))
+	utilruntime.Must(rabbitmqclusterv2.AddToScheme(scheme))
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
