@@ -37,7 +37,7 @@ import (
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
-	rabbitmqclusterv1 "github.com/rabbitmq/cluster-operator/api/v1beta1"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 )
 
 const (
@@ -179,7 +179,7 @@ func UpdateRabbitMQClusterToTLS(name types.NamespacedName) {
 
 		_, err := controllerutil.CreateOrPatch(
 			th.Ctx, th.K8sClient, mq, func() error {
-				mq.Spec.TLS = rabbitmqclusterv1.TLSSpec{
+				mq.Spec.TLS = rabbitmqclusterv2.TLSSpec{
 					CaSecretName:           "rootca-internal",
 					DisableNonTLSListeners: true,
 					SecretName:             "cert-rabbitmq-svc",
@@ -192,7 +192,7 @@ func UpdateRabbitMQClusterToTLS(name types.NamespacedName) {
 
 func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]interface{} {
 	spec := make(map[string]interface{})
-	spec["delayStartSeconds"] = "30"
+	spec["delayStartSeconds"] = 30
 	spec["image"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
 	if tlsEnabled {
 		spec["tls"] = map[string]interface{}{
@@ -208,7 +208,7 @@ func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]interface{} {
 // DeleteRabbitMQCluster deletes a RabbitMQCluster instance from the Kubernetes cluster.
 func DeleteRabbitMQCluster(name types.NamespacedName) {
 	Eventually(func(g Gomega) {
-		mq := &rabbitmqclusterv1.RabbitmqCluster{}
+		mq := &rabbitmqclusterv2.RabbitmqCluster{}
 		err := th.K8sClient.Get(th.Ctx, name, mq)
 		// if it is already gone that is OK
 		if k8s_errors.IsNotFound(err) {
@@ -223,7 +223,7 @@ func DeleteRabbitMQCluster(name types.NamespacedName) {
 	}, th.Timeout, th.Interval).Should(Succeed())
 }
 
-func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmqclusterv1.RabbitmqCluster) {
+func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmqclusterv2.RabbitmqCluster) {
 	Eventually(func(g Gomega) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -373,8 +373,8 @@ func GetReservation(name types.NamespacedName) *networkv1.Reservation {
 	return instance
 }
 
-func GetRabbitMQCluster(name types.NamespacedName) *rabbitmqclusterv1.RabbitmqCluster {
-	mq := &rabbitmqclusterv1.RabbitmqCluster{}
+func GetRabbitMQCluster(name types.NamespacedName) *rabbitmqclusterv2.RabbitmqCluster {
+	mq := &rabbitmqclusterv2.RabbitmqCluster{}
 	Eventually(func(g Gomega) {
 		g.Expect(k8sClient.Get(ctx, name, mq)).Should(Succeed())
 	}, timeout, interval).Should(Succeed())
