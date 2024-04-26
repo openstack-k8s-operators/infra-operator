@@ -150,10 +150,8 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	instance.Status.ObservedGeneration = instance.Generation
 
 	if isNewInstance {
-		// Register overall status immediately to have an early feedback e.g. in the cli
-		if err := r.Status().Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
+		// Return to register overall status immediately to have an early feedback e.g. in the cli
+		return ctrl.Result{}, nil
 	}
 
 	return r.reconcileNormal(ctx, instance, helper)
