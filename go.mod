@@ -8,8 +8,8 @@ require (
 	github.com/onsi/ginkgo/v2 v2.17.2
 	github.com/onsi/gomega v1.33.0
 	github.com/openstack-k8s-operators/infra-operator/apis v0.3.0
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240425065931-fcb08823a660
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240425065931-fcb08823a660
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240429052447-09a614506ca6
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240429052447-09a614506ca6
 	github.com/rabbitmq/cluster-operator/v2 v2.6.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
