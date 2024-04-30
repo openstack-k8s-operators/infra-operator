@@ -17,6 +17,8 @@ limitations under the License.
 package functional_test
 
 import (
+	"math/rand"
+
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 
@@ -309,6 +311,72 @@ var _ = Describe("IPSet controller", func() {
 				condition.ReadyCondition,
 				corev1.ConditionTrue,
 			)
+		})
+	})
+
+	When("an IPSet with multiple networks gets created", func() {
+		var netSpecs []networkv1.Network
+		var ipSetNetworks []networkv1.IPSetNetwork
+		BeforeEach(func() {
+			netSpecs = []networkv1.Network{}
+			netSpecs = append(netSpecs, GetNetSpec(net1, GetSubnet1(subnet1)))
+			netSpecs = append(netSpecs, GetNetSpec(net2, GetSubnet2(subnet1)))
+			netSpecs = append(netSpecs, GetNetSpec(net3, GetSubnet3(subnet1)))
+
+			ipSetNetworks = []networkv1.IPSetNetwork{}
+			ipSetNetworks = append(ipSetNetworks, GetIPSetNet1Lower())
+			ipSetNetworks = append(ipSetNetworks, GetIPSetNet2())
+			ipSetNetworks = append(ipSetNetworks, GetIPSetNet3())
+
+			// we want to ensure order is preserved so we will randomize the order of the networks
+			// and then create the IPSet
+			rand.Shuffle(len(ipSetNetworks), func(i, j int) {
+				ipSetNetworks[i], ipSetNetworks[j] = ipSetNetworks[j], ipSetNetworks[i]
+			})
+
+			netCfg := CreateNetConfig(namespace, GetNetConfigSpec(netSpecs...))
+			ipset := CreateIPSet(namespace, GetIPSetSpec(false, ipSetNetworks...))
+
+			DeferCleanup(func(_ SpecContext) {
+				th.DeleteInstance(ipset)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
+
+			ipSetName = types.NamespacedName{
+				Name:      ipset.GetName(),
+				Namespace: namespace,
+			}
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			th.ExpectCondition(
+				ipSetName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+
+		It("it should have created an IPSet with multiple networks", func() {
+			// test bug OSPRH-6672
+
+			instance := &networkv1.IPSet{}
+
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
+				for i := 0; i < len(ipSetNetworks); i++ {
+					// first assert that the instance networks are in the same order as we specified
+					g.Expect(instance.Spec.Networks[i].Name).To(Equal(ipSetNetworks[i].Name))
+					// then assert that the reservation networks are in the same order
+					g.Expect(instance.Spec.Networks[i].Name).To(Equal(instance.Status.Reservation[i].Network))
+				}
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 
