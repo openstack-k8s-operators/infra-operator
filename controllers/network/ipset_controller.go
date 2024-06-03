@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -274,11 +273,6 @@ func (r *IPSetReconciler) reconcileNormal(ctx context.Context, instance *network
 
 			return ctrl.Result{}, err
 		}
-
-		// sort instance.Status.Reservations by Network
-		sort.Slice(instance.Status.Reservation, func(i, j int) bool {
-			return instance.Status.Reservation[i].Network < instance.Status.Reservation[j].Network
-		})
 
 		instance.Status.Conditions.MarkTrue(networkv1.ReservationReadyCondition, networkv1.ReservationReadyMessage)
 

@@ -48,6 +48,7 @@ const (
 	net1     = "net-1"
 	uNet1    = "Net-1"
 	net2     = "net-2"
+	net3     = "net-3"
 	subnet1  = "subnet1"
 	uSubnet1 = "Subnet1"
 	host1    = "host1"
@@ -522,6 +523,23 @@ func GetSubnet2(name string) networkv1.Subnet {
 	}
 }
 
+func GetSubnet3(name string) networkv1.Subnet {
+	var gw = "172.19.0.1"
+	var vlan = 21
+	return networkv1.Subnet{
+		Name:    networkv1.NetNameStr(name),
+		Cidr:    "172.19.0.0/24",
+		Vlan:    &vlan,
+		Gateway: &gw,
+		AllocationRanges: []networkv1.AllocationRange{
+			{
+				Start: "172.19.0.100",
+				End:   "172.19.0.200",
+			},
+		},
+	}
+}
+
 func GetSubnetWithWrongExcludeAddress() networkv1.Subnet {
 	var vlan = 20
 	return networkv1.Subnet{
@@ -577,6 +595,12 @@ func GetIPSetNet1() networkv1.IPSetNetwork {
 		SubnetName: uSubnet1,
 	}
 }
+func GetIPSetNet1Lower() networkv1.IPSetNetwork {
+	return networkv1.IPSetNetwork{
+		Name:       net1,
+		SubnetName: uSubnet1,
+	}
+}
 
 func GetIPSetNet1WithFixedIP(ip string) networkv1.IPSetNetwork {
 	return networkv1.IPSetNetwork{
@@ -600,6 +624,13 @@ func GetIPSetNet1WithDefaultRoute() networkv1.IPSetNetwork {
 func GetIPSetNet2() networkv1.IPSetNetwork {
 	return networkv1.IPSetNetwork{
 		Name:       net2,
+		SubnetName: subnet1,
+	}
+}
+
+func GetIPSetNet3() networkv1.IPSetNetwork {
+	return networkv1.IPSetNetwork{
+		Name:       net3,
 		SubnetName: subnet1,
 	}
 }
