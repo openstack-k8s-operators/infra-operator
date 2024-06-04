@@ -106,6 +106,7 @@ func (tc *TestHelper) GetMemcached(name types.NamespacedName) *memcachedv1.Memca
 func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
 	t.Eventually(func(g t.Gomega) {
 		mc := tc.GetMemcached(name)
+		mc.Status.ObservedGeneration = mc.Generation
 		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 		mc.Status.ReadyCount = *mc.Spec.Replicas
 
@@ -130,6 +131,7 @@ func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
 func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
 	t.Eventually(func(g t.Gomega) {
 		mc := tc.GetMemcached(name)
+		mc.Status.ObservedGeneration = mc.Generation
 		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 		mc.Status.ReadyCount = *mc.Spec.Replicas
 

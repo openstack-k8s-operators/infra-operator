@@ -42,6 +42,7 @@ func (tc *TestHelper) GetTransportURL(name types.NamespacedName) *rabbitmqv1.Tra
 func (tc *TestHelper) SimulateTransportURLReady(name types.NamespacedName) {
 	gomega.Eventually(func(g gomega.Gomega) {
 		transport := tc.GetTransportURL(name)
+		transport.Status.ObservedGeneration = transport.Generation
 		transport.Status.SecretName = transport.Spec.RabbitmqClusterName + "-secret"
 		transport.Status.Conditions.MarkTrue("TransportURLReady", "Ready")
 		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, transport)).To(gomega.Succeed())
