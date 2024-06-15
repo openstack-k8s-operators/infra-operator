@@ -8,14 +8,14 @@ require (
 	github.com/onsi/ginkgo/v2 v2.19.0
 	github.com/onsi/gomega v1.33.1
 	github.com/openstack-k8s-operators/infra-operator/apis v0.3.0
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240531085522-94fdcd5ff4fd
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240531085522-94fdcd5ff4fd
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20240615134235-24529fcff658
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20240615134235-24529fcff658
 	github.com/rabbitmq/cluster-operator/v2 v2.9.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
-	k8s.io/api v0.28.10
-	k8s.io/apimachinery v0.28.10
-	k8s.io/client-go v0.28.10
+	k8s.io/api v0.28.11
+	k8s.io/apimachinery v0.28.11
+	k8s.io/client-go v0.28.11
 	k8s.io/utils v0.0.0-20240502163921-fe8a2dddb1d0
 	sigs.k8s.io/controller-runtime v0.16.6
 )
@@ -70,8 +70,8 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.28.10 // indirect
-	k8s.io/component-base v0.28.10 // indirect
+	k8s.io/apiextensions-apiserver v0.28.11 // indirect
+	k8s.io/component-base v0.28.11 // indirect
 	k8s.io/klog/v2 v2.110.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20230816210353-14e408962443 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
@@ -86,4 +86,4 @@ replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 //allow-merging
 
 // custom RabbitmqClusterSpecCore for OpenStackControlplane (v2.6.0_patches_tag)
-replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240313124519-961a0ee8bf7f //allow-merging
+replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240612145157-629e537392b3 //allow-merging
