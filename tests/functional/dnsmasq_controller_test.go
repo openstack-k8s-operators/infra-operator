@@ -59,6 +59,10 @@ var _ = Describe("DNSMasq controller", func() {
 				Namespace: namespace,
 				Name:      dnsMasqServiceAccountName.Name + "-rolebinding",
 			}
+			deploymentName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
 
 			dnsDataCM = types.NamespacedName{
 				Namespace: namespace,
@@ -142,6 +146,7 @@ var _ = Describe("DNSMasq controller", func() {
 		})
 
 		It("exposes the service", func() {
+			th.SimulateLoadBalancerServiceIP(deploymentName)
 			th.ExpectCondition(
 				dnsMasqName,
 				ConditionGetterFunc(DNSMasqConditionGetter),
@@ -156,7 +161,7 @@ var _ = Describe("DNSMasq controller", func() {
 		})
 
 		It("creates a Deployment for the service", func() {
-
+			th.SimulateLoadBalancerServiceIP(deploymentName)
 			th.ExpectConditionWithDetails(
 				dnsMasqName,
 				ConditionGetterFunc(DNSMasqConditionGetter),
@@ -165,11 +170,6 @@ var _ = Describe("DNSMasq controller", func() {
 				condition.RequestedReason,
 				condition.DeploymentReadyRunningMessage,
 			)
-
-			deploymentName = types.NamespacedName{
-				Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name),
-				Namespace: namespace,
-			}
 
 			Eventually(func(g Gomega) {
 				depl := th.GetDeployment(deploymentName)
@@ -191,12 +191,9 @@ var _ = Describe("DNSMasq controller", func() {
 
 		When("the DNSData CM gets updated", func() {
 			It("the CONFIG_HASH on the deployment changes", func() {
+				th.SimulateLoadBalancerServiceIP(deploymentName)
 				cm := th.GetConfigMap(dnsDataCM)
 				configHash := ""
-				deploymentName = types.NamespacedName{
-					Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name),
-					Namespace: namespace,
-				}
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
 					g.Expect(depl.Spec.Template.Spec.Volumes).To(
@@ -226,11 +223,8 @@ var _ = Describe("DNSMasq controller", func() {
 
 		When("the DNSData CM gets deleted", func() {
 			It("the ConfigMap gets removed from the deployment", func() {
+				th.SimulateLoadBalancerServiceIP(deploymentName)
 				th.GetConfigMap(dnsDataCM)
-				deploymentName = types.NamespacedName{
-					Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name),
-					Namespace: namespace,
-				}
 				Eventually(func(g Gomega) {
 					depl := th.GetDeployment(deploymentName)
 					g.Expect(depl.Spec.Template.Spec.Volumes).To(
