@@ -57,7 +57,7 @@ func (r *DNSDataReconciler) GetLogger(ctx context.Context) logr.Logger {
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata/finalizers,verbs=update
+// +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdata/finalizers,verbs=update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete;
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to

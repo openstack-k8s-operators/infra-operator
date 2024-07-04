@@ -25,6 +25,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -111,6 +112,7 @@ rules:
   resources:
   - memcacheds/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - memcached.openstack.org
@@ -137,6 +139,7 @@ rules:
   resources:
   - dnsdata/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - network.openstack.org
@@ -175,6 +178,7 @@ rules:
   resources:
   - dnsmasqs/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - network.openstack.org
@@ -201,6 +205,7 @@ rules:
   resources:
   - ipsets/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - network.openstack.org
@@ -235,6 +240,7 @@ rules:
   resources:
   - reservations/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - network.openstack.org
@@ -253,6 +259,7 @@ rules:
   resources:
   - services/finalizers
   verbs:
+  - patch
   - update
 - apiGroups:
   - network.openstack.org
@@ -304,6 +311,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -314,6 +322,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
