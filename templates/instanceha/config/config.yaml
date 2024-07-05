@@ -1,0 +1,12 @@
+config:
+  EVACUABLE_TAG: "evacuable"
+  SMART_EVACUATION: "false"
+  DELTA: "30"
+  POLL: "30"
+  THRESHOLD: "50"
+  WORKERS: "4"
+  RESERVED_HOSTS: "false"
+  LEAVE_DISABLED: "false"
+  CHECK_KDUMP: "false"
+  LOGLEVEL: "info"
+  DISABLED: "false"
