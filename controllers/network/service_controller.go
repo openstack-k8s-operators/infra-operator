@@ -49,7 +49,7 @@ func (r *ServiceReconciler) GetLogger(ctx context.Context) logr.Logger {
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=network.openstack.org,resources=services/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=network.openstack.org,resources=services/finalizers,verbs=update
+// +kubebuilder:rbac:groups=network.openstack.org,resources=services/finalizers,verbs=update;patch
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsmasqs,verbs=get;list;watch;
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsdatas,verbs=get;list;watch;create;update;patch;delete
 

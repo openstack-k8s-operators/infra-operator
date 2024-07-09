@@ -57,10 +57,10 @@ func (r *IPSetReconciler) GetLogger(ctx context.Context) logr.Logger {
 
 //+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets/finalizers,verbs=update;patch
 //+kubebuilder:rbac:groups=network.openstack.org,resources=netconfigs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=network.openstack.org,resources=reservations,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=network.openstack.org,resources=reservations/finalizers,verbs=update
+//+kubebuilder:rbac:groups=network.openstack.org,resources=reservations/finalizers,verbs=update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
