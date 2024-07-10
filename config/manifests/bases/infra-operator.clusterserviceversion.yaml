@@ -59,9 +59,6 @@ spec:
       version: v1beta1
   description: OpenStack Infrastructure
   displayName: OpenStack Infra
-  icon:
-  - base64data: ""
-    mediatype: ""
   install:
     spec:
       deployments: null
