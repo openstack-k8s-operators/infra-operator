@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
@@ -651,4 +652,34 @@ func GetReservationFromNet(ipsetName types.NamespacedName, netName string) netwo
 	}
 
 	return res
+}
+
+func CreateMemcachedConfig(namespace string, spec map[string]interface{}) client.Object {
+	name := uuid.New().String()
+
+	raw := map[string]interface{}{
+		"apiVersion": "memcached.openstack.org/v1beta1",
+		"kind":       "Memcached",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetDefaultMemcachedSpec() map[string]interface{} {
+	return map[string]interface{}{
+		"replicas": 1,
+	}
+}
+
+func GetMemcached(name types.NamespacedName) *memcachedv1.Memcached {
+	instance := &memcachedv1.Memcached{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
 }

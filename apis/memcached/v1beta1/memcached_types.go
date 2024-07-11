@@ -27,6 +27,11 @@ const (
 
 	// MemcachedContainerImage is the fall-back container image for Memcached
 	MemcachedContainerImage = "quay.io/podified-antelope-centos9/openstack-memcached:current-podified"
+
+	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
+	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+	// Int32 is a 10 character + hyphen = 11
+	CrMaxLengthCorrection = 11
 )
 
 // MemcachedSpec defines the desired state of Memcached
