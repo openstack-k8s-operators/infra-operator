@@ -23,11 +23,16 @@ limitations under the License.
 package v1beta1
 
 import (
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
 )
 
 // MemcachedDefaults -
@@ -86,8 +91,21 @@ var _ webhook.Validator = &Memcached{}
 func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
 	memcachedlog.Info("validate create", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object creation.
-	return nil, nil
+	var allErrs field.ErrorList
+	var allWarn []string
+
+	allErrs = common_webhook.ValidateDNS1123Label(
+		field.NewPath("metadata").Child("name"),
+		[]string{r.Name},
+		CrMaxLengthCorrection) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+
+	if len(allErrs) != 0 {
+		return allWarn, apierrors.NewInvalid(
+			schema.GroupKind{Group: "memcached.openstack.org", Kind: "Memcached"},
+			r.Name, allErrs)
+	}
+
+	return allWarn, nil
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
