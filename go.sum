@@ -87,10 +87,10 @@ github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 h1:rncLxJBpFGqBztyxC
 github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7/go.mod h1:ctXNyWanKEjGj8sss1KjjHQ3ENKFm33FFnS5BKaIPh4=
 github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20240715111029-358ba8041494 h1:JZnRj8RIIsFpsJ5oonvqUEAKNDEkD9C3aeclu1V8JrA=
 github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20240715111029-358ba8041494/go.mod h1:s6ANiH9MoDBntRxnBzMP5fWBq2+NxFSl9CoXilGbLFY=
-github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240709153313-544a55696489 h1:3yhphtEQ55lNxiIrZze+Fgy6g/s68sUB5MZMnJyH5zU=
-github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240709153313-544a55696489/go.mod h1:0h76CxD9g0z2Hk7fGFOZcjnzT1tQQ/yRNv3OXng+S/A=
-github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240711055119-1e6b9b8d9bd0 h1:xtcdlh6o8xhzrv3BvEK79Y8b/CJhBZvp6Fqt8TBV6RA=
-github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240711055119-1e6b9b8d9bd0/go.mod h1:Zryxg5YgbPUFcLSCcKpf10il8kIRAK5HloNo6khhdis=
+github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240715111029-358ba8041494 h1:fyj7sKXBYkX1DMMNa6Wp3LWklOG0N+9XL8J3xblt5UE=
+github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240715111029-358ba8041494/go.mod h1:0h76CxD9g0z2Hk7fGFOZcjnzT1tQQ/yRNv3OXng+S/A=
+github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240719064129-c0201810c8f5 h1:xlj///B7XOfz5RoJvvUnY/MA+mNWhDph9xwSY3bERx8=
+github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240719064129-c0201810c8f5/go.mod h1:Axs7PDfgI3M/gtHSqr/rXqZLKOqwHkRAHEDFi5El5u4=
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
