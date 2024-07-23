@@ -9,7 +9,7 @@ require (
 	github.com/onsi/gomega v1.33.1
 	github.com/openstack-k8s-operators/infra-operator/apis v0.3.0
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20240715111029-358ba8041494
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240709153313-544a55696489
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20240715111029-358ba8041494
 	github.com/rabbitmq/cluster-operator/v2 v2.9.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240213143201-ec583247a57a
@@ -86,4 +86,4 @@ replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 //allow-merging
 
 // custom RabbitmqClusterSpecCore for OpenStackControlplane (v2.6.0_patches_tag)
-replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240711055119-1e6b9b8d9bd0 //allow-merging
+replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20240719064129-c0201810c8f5 //allow-merging
