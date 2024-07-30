@@ -96,6 +96,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - memcached.com
+  resources:
+  - memcachedclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - memcached.openstack.org
   resources:
   - memcacheds
@@ -118,6 +126,32 @@ rules:
   - memcached.openstack.org
   resources:
   - memcacheds/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - transporturls
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - transporturls/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - memcached.openstack.org
+  resources:
+  - transporturls/status
   verbs:
   - get
   - patch
