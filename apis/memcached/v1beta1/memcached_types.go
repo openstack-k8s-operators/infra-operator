@@ -46,8 +46,9 @@ type MemcachedSpec struct {
 // MemcachedSpecCore - this version is used by the OpenStackControlplane CR (no container images)
 type MemcachedSpecCore struct {
 
-	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32
 	// Size of the memcached cluster
 	Replicas *int32 `json:"replicas"`
 
