@@ -124,6 +124,13 @@ func (in *MemcachedSpecCore) DeepCopyInto(out *MemcachedSpecCore) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.NodeSelector != nil {
+		in, out := &in.NodeSelector, &out.NodeSelector
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	in.TLS.DeepCopyInto(&out.TLS)
 }
 

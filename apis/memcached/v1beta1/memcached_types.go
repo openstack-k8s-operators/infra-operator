@@ -53,6 +53,10 @@ type MemcachedSpecCore struct {
 	Replicas *int32 `json:"replicas"`
 
 	// +kubebuilder:validation:Optional
+	// NodeSelector to target subset of worker nodes running this service
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for memcached service
 	TLS tls.SimpleService `json:"tls,omitempty"`
