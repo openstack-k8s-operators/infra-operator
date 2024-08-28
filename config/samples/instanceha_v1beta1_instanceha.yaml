@@ -1,0 +1,14 @@
+apiVersion: instanceha.openstack.org/v1beta1
+kind: InstanceHA
+metadata:
+  name: instanceha
+spec:
+  caBundleSecretName: combined-ca-bundle
+  #containerImage: "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
+  #networkAttachments: ['internalapi']
+  #openStackCloud: "default"
+  #openStackConfigMap:
+  #openStackConfigSecret:
+  #fencingSecret:
+  #instanceHAConfigMap:
+  #instanceHAKdumpPort:

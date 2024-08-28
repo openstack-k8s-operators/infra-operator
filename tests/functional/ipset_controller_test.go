@@ -157,7 +157,7 @@ var _ = Describe("IPSet controller", func() {
 				Namespace: namespace,
 			}
 
-			DeferCleanup(func(ctx SpecContext) {
+			DeferCleanup(func(_ SpecContext) {
 				th.DeleteInstance(ipset)
 				th.DeleteInstance(netCfg)
 			}, NodeTimeout(timeout))

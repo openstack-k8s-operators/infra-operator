@@ -96,6 +96,41 @@ rules:
   - update
   - watch
 - apiGroups:
+  - instanceha.openstack.org
+  resources:
+  - instancehas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - instanceha.openstack.org
+  resources:
+  - instancehas/finalizers
+  verbs:
+  - patch
+  - update
+- apiGroups:
+  - instanceha.openstack.org
+  resources:
+  - instancehas/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - keystone.openstack.org
+  resources:
+  - keystoneapis
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - memcached.openstack.org
   resources:
   - memcacheds
