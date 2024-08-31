@@ -4,8 +4,8 @@ go 1.20
 
 require (
 	github.com/go-logr/logr v1.4.2
-	github.com/onsi/ginkgo/v2 v2.20.0
-	github.com/onsi/gomega v1.34.1
+	github.com/onsi/ginkgo/v2 v2.20.1
+	github.com/onsi/gomega v1.34.2
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20240808095747-579da98fa7a6
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	k8s.io/api v0.28.12
@@ -33,7 +33,7 @@ require (
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
-	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
+	github.com/google/pprof v0.0.0-20240827171923-fa2c70bbbfe5 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
@@ -55,7 +55,7 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/net v0.28.0 // indirect
 	golang.org/x/oauth2 v0.8.0 // indirect
-	golang.org/x/sys v0.23.0 // indirect
+	golang.org/x/sys v0.24.0 // indirect
 	golang.org/x/term v0.23.0 // indirect
 	golang.org/x/text v0.17.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
