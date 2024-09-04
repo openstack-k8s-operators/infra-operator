@@ -1,0 +1,17 @@
+# delete the previous 2-node redis if it exists
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+delete:
+  - apiVersion: redis.openstack.org/v1beta1
+    kind: Redis
+    name: redis
+---
+apiVersion: redis.openstack.org/v1beta1
+kind: Redis
+metadata:
+  name: redis
+spec:
+  replicas: 3
+  tls:
+    secretName: kuttl-redis-tls
+    caBundleSecretName: kuttl-redis-tls

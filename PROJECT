@@ -48,6 +48,20 @@ resources:
     namespaced: true
   controller: true
   domain: openstack.org
+  group: redis
+  kind: Redis
+  path: github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1
+  plural: redises
+  version: v1beta1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
   group: network
   kind: DNSMasq
   path: github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1

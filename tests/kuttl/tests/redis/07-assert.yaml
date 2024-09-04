@@ -1,0 +1,16 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+commands:
+  - script: |
+      set -e
+      # ensure redis endpoint is exposed over TLS
+      TLSDATA=$(oc rsh -n ${NAMESPACE} -c redis redis-redis-0 /bin/sh -c 'echo | openssl s_client -connect redis.'${NAMESPACE}'.svc.cluster.local --port 6379 2>&1')
+      echo "$TLSDATA" | grep -w CONNECTED
+      # ensure redis is properly clustered
+      SENTINELDATA=$(oc rsh -n ${NAMESPACE} -c sentinel redis-redis-0 redis-cli --tls -p 26379 info | grep master | tr ',' '\n')
+      # there should be 1 master
+      echo "$SENTINELDATA" | grep -w sentinel_masters:1
+      # there should be 2 slaves
+      echo "$SENTINELDATA" | grep -w slaves=2
+      # there should be 3 connected sentinels for quorum
+      echo "$SENTINELDATA" | grep -w sentinels=3
