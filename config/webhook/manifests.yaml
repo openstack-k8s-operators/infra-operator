@@ -11,6 +11,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-client-openstack-org-v1beta1-instanceha
+  failurePolicy: Fail
+  name: minstanceha.kb.io
+  rules:
+  - apiGroups:
+    - client.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - instancehas
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-memcached-openstack-org-v1beta1-memcached
   failurePolicy: Fail
   name: mmemcached.kb.io
@@ -112,6 +132,26 @@ metadata:
   creationTimestamp: null
   name: validating-webhook-configuration
 webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-client-openstack-org-v1beta1-instanceha
+  failurePolicy: Fail
+  name: vinstanceha.kb.io
+  rules:
+  - apiGroups:
+    - client.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - instancehas
+  sideEffects: None
 - admissionReviewVersions:
   - v1
   clientConfig:

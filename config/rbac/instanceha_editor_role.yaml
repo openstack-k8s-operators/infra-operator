@@ -1,0 +1,24 @@
+# permissions for end users to edit instancehas.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: instanceha-editor-role
+rules:
+- apiGroups:
+  - instanceha.openstack.org
+  resources:
+  - instancehas
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - instanceha.openstack.org
+  resources:
+  - instancehas/status
+  verbs:
+  - get
