@@ -1,0 +1,71 @@
+apiVersion: redis.openstack.org/v1beta1
+kind: Redis
+metadata:
+  name: redis
+spec:
+  replicas: 3
+status:
+  conditions:
+    - message: Setup complete
+      reason: Ready
+      status: "True"
+      type: Ready
+    - message: Deployment completed
+      reason: Ready
+      status: "True"
+      type: DeploymentReady
+    - message: Exposing service completed
+      reason: Ready
+      status: "True"
+      type: ExposeServiceReady
+    - message: RoleBinding created
+      reason: Ready
+      status: "True"
+      type: RoleBindingReady
+    - message: Role created
+      reason: Ready
+      status: "True"
+      type: RoleReady
+    - message: ServiceAccount created
+      reason: Ready
+      status: "True"
+      type: ServiceAccountReady
+    - message: Service config create completed
+      reason: Ready
+      status: "True"
+      type: ServiceConfigReady
+    - message: Input data complete
+      reason: Ready
+      status: "True"
+      type: TLSInputReady
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-redis
+spec:
+  replicas: 3
+status:
+  availableReplicas: 3
+  readyReplicas: 3
+  replicas: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  ports:
+  - name: redis
+    port: 6379
+    protocol: TCP
+    targetPort: 6379
+  selector:
+    service: redis
+    owner: redis
+    redis/master: "true"
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis

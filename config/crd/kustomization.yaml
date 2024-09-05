@@ -5,6 +5,7 @@ resources:
 - bases/rabbitmq.openstack.org_transporturls.yaml
 - bases/memcached.openstack.org_memcacheds.yaml
 - bases/instanceha.openstack.org_instancehas.yaml
+- bases/redis.openstack.org_redises.yaml
 - bases/network.openstack.org_dnsmasqs.yaml
 - bases/network.openstack.org_dnsdata.yaml
 - bases/network.openstack.org_netconfigs.yaml
@@ -17,6 +18,7 @@ patchesStrategicMerge:
 # patches here are for enabling the conversion webhook for each CRD
 #- patches/webhook_in_transporturls.yaml
 #- patches/webhook_in_memcacheds.yaml
+#- patches/webhook_in_redises.yaml
 #- patches/webhook_in_dnsmasqs.yaml
 #- patches/webhook_in_dnsdata.yaml
 #- patches/webhook_in_netconfigs.yaml
@@ -28,6 +30,7 @@ patchesStrategicMerge:
 # patches here are for enabling the CA injection for each CRD
 #- patches/cainjection_in_transporturls.yaml
 #- patches/cainjection_in_memcacheds.yaml
+#- patches/cainjection_in_redises.yaml
 #- patches/cainjection_in_dnsmasqs.yaml
 #- patches/cainjection_in_dnsdata.yaml
 #- patches/cainjection_in_netconfigs.yaml

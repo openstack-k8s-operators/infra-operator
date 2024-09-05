@@ -366,6 +366,8 @@ operator-lint: gowork ## Runs operator-lint
 # $oc delete mutatingwebhookconfiguration/mmemcached.kb.io
 # $oc delete validatingwebhookconfiguration/vdnsmasq.kb.io
 # $oc delete mutatingwebhookconfiguration/mdnsmasq.kb.io
+# $oc delete validatingwebhookconfiguration/vredis.kb.io
+# $oc delete mutatingwebhookconfiguration/mredis.kb.io
 SKIP_CERT ?=false
 .PHONY: run-with-webhook
 run-with-webhook: export METRICS_PORT?=8080
