@@ -334,7 +334,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	configVars[instance.Spec.InstanceHAConfigMap] = env.SetValue(configMapHash)
 
 	if instance.Spec.CaBundleSecretName != "" {
-		secretHash, ctrlResult, err := tls.ValidateCACertSecret(
+		secretHash, err := tls.ValidateCACertSecret(
 			ctx,
 			helper.GetClient(),
 			types.NamespacedName{
@@ -345,30 +345,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				instance.Status.Conditions.Set(condition.FalseCondition(
-					instancehav1.InstanceHAReadyCondition,
+					condition.TLSInputReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
-					instancehav1.InstanceHASecretWaitingMessage))
-				return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, instance.Spec.CaBundleSecretName)))
+				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
+				condition.TLSInputReadyCondition,
 				condition.ErrorReason,
 				condition.SeverityWarning,
-				instancehav1.InstanceHAReadyErrorMessage,
+				condition.TLSInputErrorMessage,
 				err.Error()))
 			return ctrl.Result{}, err
-		} else if (ctrlResult != ctrl.Result{}) {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
-				instancehav1.InstanceHASecretWaitingMessage))
-			return ctrlResult, nil
 		}
 
 		configVars[instance.Spec.CaBundleSecretName] = env.SetValue(secretHash)
 	}
+
+	// all cert input checks out so report InputReady
+	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
 
 	configVarsHash, err := util.HashOfInputHashes(configVars)
 	if err != nil {
