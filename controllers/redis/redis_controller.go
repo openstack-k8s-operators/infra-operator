@@ -209,30 +209,65 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Hash of all resources that may cause a service restart
 	inputHashEnv := make(map[string]env.Setter)
 
-	// Check and hash inputs
-	var certHash, caHash string
-	specTLS := &instance.Spec.TLS
-	if specTLS.Enabled() {
-		certHash, _, err = specTLS.GenericService.ValidateCertSecret(ctx, helper, instance.Namespace)
-		inputHashEnv["Cert"] = env.SetValue(certHash)
-	}
-	if err == nil && specTLS.Ca.CaBundleSecretName != "" {
-		caName := types.NamespacedName{
-			Name:      specTLS.Ca.CaBundleSecretName,
-			Namespace: instance.Namespace,
+	//
+	// TLS input validation
+	//
+	// Validate the CA cert secret if provided
+	if instance.Spec.TLS.CaBundleSecretName != "" {
+		hash, err := tls.ValidateCACertSecret(
+			ctx,
+			helper.GetClient(),
+			types.NamespacedName{
+				Name:      instance.Spec.TLS.CaBundleSecretName,
+				Namespace: instance.Namespace,
+			},
+		)
+		if err != nil {
+			if k8s_errors.IsNotFound(err) {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.TLSInputReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, instance.Spec.TLS.CaBundleSecretName)))
+				return ctrl.Result{}, nil
+			}
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.TLSInputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.TLSInputErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
 		}
-		caHash, _, err = tls.ValidateCACertSecret(ctx, helper.GetClient(), caName)
-		inputHashEnv["CA"] = env.SetValue(caHash)
+
+		if hash != "" {
+			inputHashEnv["CA"] = env.SetValue(hash)
+		}
 	}
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.TLSInputReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.TLSInputErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, fmt.Errorf("error calculating input hash: %w", err)
+
+	// Validate service cert secret
+	if instance.Spec.TLS.Enabled() {
+		hash, err := instance.Spec.TLS.ValidateCertSecret(ctx, helper, instance.Namespace)
+		if err != nil {
+			if k8s_errors.IsNotFound(err) {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.TLSInputReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, err.Error())))
+				return ctrl.Result{}, nil
+			}
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.TLSInputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.TLSInputErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		inputHashEnv["Cert"] = env.SetValue(hash)
 	}
+	// all cert input checks out so report InputReady
 	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
 
 	// Redis config maps
