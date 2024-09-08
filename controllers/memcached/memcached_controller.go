@@ -342,7 +342,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
 
 	// Statefulset for stable names
-	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance), time.Duration(5)*time.Second)
+	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance, hashOfHashes), time.Duration(5)*time.Second)
 	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
