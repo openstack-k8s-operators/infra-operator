@@ -355,7 +355,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	//
 
 	// Statefulset
-	commonstatefulset := commonstatefulset.NewStatefulSet(redis.StatefulSet(instance), 5)
+	commonstatefulset := commonstatefulset.NewStatefulSet(redis.StatefulSet(instance, hashOfHashes), 5)
 	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr

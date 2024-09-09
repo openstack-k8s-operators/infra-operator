@@ -13,7 +13,10 @@ import (
 )
 
 // Deployment returns a Deployment resource for the Redis CR
-func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
+func StatefulSet(
+	r *redisv1.Redis,
+	configHash string,
+) *appsv1.StatefulSet {
 	matchls := map[string]string{
 		common.AppSelector:   "redis",
 		common.OwnerSelector: r.Name,
@@ -68,6 +71,9 @@ func StatefulSet(r *redisv1.Redis) *appsv1.StatefulSet {
 		// Headless services only publish dns entries that include cluster domain.
 		// For the time being, assume this is .cluster.local
 		Value: name + "." + r.GetNamespace() + ".svc.cluster.local",
+	}, {
+		Name:  "CONFIG_HASH",
+		Value: configHash,
 	}}
 
 	sts := &appsv1.StatefulSet{
