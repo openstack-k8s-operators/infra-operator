@@ -496,11 +496,11 @@ def _host_fence(host, action):
         logging.error('No fencing data found for %s' % host)
         return False
 
-    elif 'noop' in fencing_data["agent"]:
+    if 'noop' in fencing_data["agent"]:
         logging.warning('Using noop fencing agent. VMs may get corrupted.')
         return True
 
-    if 'ipmi' in fencing_data["agent"]:
+    elif 'ipmi' in fencing_data["agent"]:
 
         # Extracting the necessary parameters from the fencing data
         ip = str(fencing_data["ipaddr"])
