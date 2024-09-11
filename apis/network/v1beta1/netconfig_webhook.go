@@ -51,9 +51,12 @@ var _ webhook.Defaulter = &NetConfig{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
 func (r *NetConfig) Default() {
-	netconfiglog.Info("default", "name", r.Name)
+	for _, net := range r.Spec.Networks {
+		if net.ServiceNetwork == "" {
+			net.ServiceNetwork = ToDefaultServiceNetwork(net.Name)
+		}
+	}
 
-	// TODO(user): fill in your defaulting logic.
 }
 
 //+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-netconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update;delete,versions=v1beta1,name=vnetconfig.kb.io,admissionReviewVersions=v1
@@ -146,7 +149,6 @@ func valiateNetworks(
 	allErrs := field.ErrorList{}
 	netNames := map[string]field.Path{}
 	netCIDR := map[string]field.Path{}
-
 	for netIdx, _net := range networks {
 		path := path.Child("networks").Index(netIdx)
 
@@ -172,7 +174,6 @@ func valiateNetworks(
 			}
 		}
 	}
-
 	return allErrs
 }
 

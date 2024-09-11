@@ -82,6 +82,9 @@ type IPSetReservation struct {
 
 	// DNSDomain of the subnet
 	DNSDomain string `json:"dnsDomain"`
+
+	// ServiceNetwork mapping
+	ServiceNetwork ServiceNetNameStr `json:"serviceNetwork"`
 }
 
 // IPSetStatus defines the observed state of IPSet

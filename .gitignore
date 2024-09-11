@@ -13,6 +13,7 @@ Dockerfile.cross
 
 bundle
 bundle.Dockerfile
+config/manager/kustomization.yaml
 
 # Test binary, build with `go test -c`
 *.test
