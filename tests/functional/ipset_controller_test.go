@@ -84,9 +84,9 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Address).To(Equal("172.17.0.100"))
-				g.Expect(res.DNSDomain).To(Equal("net-1.example.com"))
+				g.Expect(res.DNSDomain).To(Equal("ctlplane.example.com"))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -125,7 +125,7 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with IP 172.17.0.150 on net-1", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Address).To(Equal("172.17.0.150"))
 			}, timeout, interval).Should(Succeed())
 		})
@@ -165,7 +165,7 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with default route on net-1", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Routes).Should(HaveLen(1))
 			}, timeout, interval).Should(Succeed())
 		})
@@ -205,7 +205,7 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with IP 172.17.0.220 on net-1", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Address).To(Equal("172.17.0.220"))
 			}, timeout, interval).Should(Succeed())
 		})
@@ -245,7 +245,7 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with IP 172.17.0.201 on net-1", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res).To(Equal(networkv1.IPSetReservation{}))
 			}, timeout, interval).Should(Succeed())
 		})
@@ -281,7 +281,7 @@ var _ = Describe("IPSet controller", func() {
 	When("a GetDefaultIPSetSpec IPSet gets created using a custom NetConfig", func() {
 		BeforeEach(func() {
 			netSpec := GetNetSpec(net1, GetSubnet1(subnet1))
-			netSpec.Subnets[0].DNSDomain = ptr.To("subnet1.net-1.example.com")
+			netSpec.Subnets[0].DNSDomain = ptr.To("subnet1.ctlplane.example.com")
 			netCfg := CreateNetConfig(namespace, GetNetConfigSpec(netSpec))
 			ipset := CreateIPSet(namespace, GetDefaultIPSetSpec())
 
@@ -298,9 +298,9 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with DNSDomain from subnet", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Address).To(Equal("172.17.0.100"))
-				g.Expect(res.DNSDomain).To(Equal("subnet1.net-1.example.com"))
+				g.Expect(res.DNSDomain).To(Equal("subnet1.ctlplane.example.com"))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -407,7 +407,7 @@ var _ = Describe("IPSet controller", func() {
 
 		It("should have created an IPSet with IP 172.17.0.220 on net-1", func() {
 			Eventually(func(g Gomega) {
-				res := GetReservationFromNet(ipSetName, "net-1")
+				res := GetReservationFromNet(ipSetName, net1)
 				g.Expect(res.Address).To(Equal("172.17.0.220"))
 			}, timeout, interval).Should(Succeed())
 		})

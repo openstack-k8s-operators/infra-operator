@@ -51,8 +51,15 @@ spec:
                       description: MTU of the network
                       type: integer
                     name:
-                      description: Name of the network, e.g. External, InternalApi,
-                        ...
+                      description: Name of the network, could be one of ctlplane,
+                        internalapi, external, storage, storagemgmt or tenant
+                      enum:
+                      - ctlplane
+                      - internalapi
+                      - external
+                      - storage
+                      - storagemgmt
+                      - tenant
                       pattern: ^[a-zA-Z0-9][a-zA-Z0-9\-_]*[a-zA-Z0-9]$
                       type: string
                     subnets:

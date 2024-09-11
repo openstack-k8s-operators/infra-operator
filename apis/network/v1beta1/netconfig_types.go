@@ -31,7 +31,8 @@ type NetNameStr string
 // Network definition
 type Network struct {
 	// +kubebuilder:validation:Required
-	// Name of the network, e.g. External, InternalApi, ...
+	// +kubebuilder:validation:Enum=ctlplane;internalapi;external;storage;storagemgmt;tenant
+	// Name of the network, could be one of ctlplane, internalapi, external, storage, storagemgmt or tenant
 	Name NetNameStr `json:"name"`
 
 	// +kubebuilder:validation:Required

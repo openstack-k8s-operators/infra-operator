@@ -46,10 +46,10 @@ const (
 	interval       = timeout / 100
 	containerImage = "test-dnsmasq-container-image"
 
-	net1     = "net-1"
-	uNet1    = "Net-1"
-	net2     = "net-2"
-	net3     = "net-3"
+	net1     = "ctlplane"
+	uNet1    = "CtlPlane"
+	net2     = "tenant"
+	net3     = "storage"
 	subnet1  = "subnet1"
 	uSubnet1 = "Subnet1"
 	host1    = "host1"
