@@ -744,7 +744,7 @@ def main():
                             logging.warning('Some services failed to evacuate. Retrying in 30 seconds.')
 
                     else:
-                        logging.info('InstanceHA DISABLE is true, not evacuating')
+                        logging.info('InstanceHa DISABLE is true, not evacuating')
 
         # We need to wait until a compute is back and for the migrations to move from 'done' to 'completed' before we can force_down=false
 

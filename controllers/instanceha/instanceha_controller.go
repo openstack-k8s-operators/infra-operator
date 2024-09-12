@@ -61,7 +61,7 @@ import (
 	instanceha "github.com/openstack-k8s-operators/infra-operator/pkg/instanceha"
 )
 
-// InstanceHAReconciler reconciles a InstanceHA object
+// InstanceHaReconciler reconciles a InstanceHa object
 type Reconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
@@ -70,15 +70,15 @@ type Reconciler struct {
 
 // GetLog returns a logger object with a prefix of "conroller.name" and aditional controller context fields
 func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("InstanceHA")
+	return log.FromContext(ctx).WithName("Controllers").WithName("InstanceHa")
 }
 
-//+kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/finalizers,verbs=update;patch
-//+kubebuilder:rbac:groups=keystone.openstack.org,resources=keystoneapis,verbs=get;list;watch
-//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
-//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;
+// +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/finalizers,verbs=update;patch
+// +kubebuilder:rbac:groups=keystone.openstack.org,resources=keystoneapis,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;
 // service account, role, rolebinding
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;update;patch
@@ -92,11 +92,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	Log := r.GetLogger(ctx)
 
-	instance := &instancehav1.InstanceHA{}
+	instance := &instancehav1.InstanceHa{}
 	err := r.Client.Get(context.TODO(), req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
-			Log.Info("InstanceHA CR not found")
+			Log.Info("InstanceHa CR not found")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -148,7 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}()
 
 	cl := condition.CreateList(
-		condition.UnknownCondition(instancehav1.InstanceHAReadyCondition, condition.InitReason, instancehav1.InstanceHAReadyInitMessage),
+		condition.UnknownCondition(instancehav1.InstanceHaReadyCondition, condition.InitReason, instancehav1.InstanceHaReadyInitMessage),
 		// service account, role, rolebinding conditions
 		condition.UnknownCondition(condition.ServiceAccountReadyCondition, condition.InitReason, condition.ServiceAccountReadyInitMessage),
 		condition.UnknownCondition(condition.RoleReadyCondition, condition.InitReason, condition.RoleReadyInitMessage),
@@ -191,27 +191,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
+				instancehav1.InstanceHaReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
-				instancehav1.InstanceHAKeystoneWaitingMessage))
+				instancehav1.InstanceHaKeystoneWaitingMessage))
 			Log.Info("KeystoneAPI not found!")
 			return ctrl.Result{RequeueAfter: time.Duration(5) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHAReadyCondition,
+			instancehav1.InstanceHaReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHAReadyErrorMessage,
+			instancehav1.InstanceHaReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
 	if !keystoneAPI.IsReady() {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHAReadyCondition,
+			instancehav1.InstanceHaReadyCondition,
 			condition.RequestedReason,
 			condition.SeverityInfo,
-			instancehav1.InstanceHAKeystoneWaitingMessage))
+			instancehav1.InstanceHaKeystoneWaitingMessage))
 		Log.Info("KeystoneAPI not yet ready")
 		return ctrl.Result{RequeueAfter: time.Duration(5) * time.Second}, nil
 	}
@@ -226,17 +226,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
+				instancehav1.InstanceHaReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
-				instancehav1.InstanceHAConfigMapWaitingMessage))
+				instancehav1.InstanceHaConfigMapWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHAReadyCondition,
+			instancehav1.InstanceHaReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHAReadyErrorMessage,
+			instancehav1.InstanceHaReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
@@ -246,17 +246,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
+				instancehav1.InstanceHaReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
-				instancehav1.InstanceHASecretWaitingMessage))
+				instancehav1.InstanceHaSecretWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHAReadyCondition,
+			instancehav1.InstanceHaReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHAReadyErrorMessage,
+			instancehav1.InstanceHaReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
@@ -266,32 +266,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHAReadyCondition,
+				instancehav1.InstanceHaReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
-				instancehav1.InstanceHASecretWaitingMessage))
+				instancehav1.InstanceHaSecretWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHAReadyCondition,
+			instancehav1.InstanceHaReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHAReadyErrorMessage,
+			instancehav1.InstanceHaReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
 	configVars[instance.Spec.FencingSecret] = env.SetValue(secretHash)
 
-	// Check if instance.Spec.InstanceHAConfigMap is present, if not create it.
+	// Check if instance.Spec.InstanceHaConfigMap is present, if not create it.
 	// The first time this will produce an error b/c GetConfigMapAndHashWithName doesn't support retries.
-	_, configMapHash, err = configmap.GetConfigMapAndHashWithName(ctx, helper, instance.Spec.InstanceHAConfigMap, instance.Namespace)
+	_, configMapHash, err = configmap.GetConfigMapAndHashWithName(ctx, helper, instance.Spec.InstanceHaConfigMap, instance.Namespace)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			cmLabels := labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{})
 			envVars := make(map[string]env.Setter)
 			cms := []util.Template{
 				{
-					Name:               instance.Spec.InstanceHAConfigMap,
+					Name:               instance.Spec.InstanceHaConfigMap,
 					Namespace:          instance.Namespace,
 					Type:               util.TemplateTypeConfig,
 					InstanceType:       instance.Kind,
@@ -305,33 +305,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				return ctrl.Result{}, err
 			}
 
-			_, configMapHash, err = configmap.GetConfigMapAndHashWithName(ctx, helper, instance.Spec.InstanceHAConfigMap, instance.Namespace)
+			_, configMapHash, err = configmap.GetConfigMapAndHashWithName(ctx, helper, instance.Spec.InstanceHaConfigMap, instance.Namespace)
 			if err != nil {
 				if k8s_errors.IsNotFound(err) {
 					instance.Status.Conditions.Set(condition.FalseCondition(
-						instancehav1.InstanceHAReadyCondition,
+						instancehav1.InstanceHaReadyCondition,
 						condition.RequestedReason,
 						condition.SeverityInfo,
-						instancehav1.InstanceHAConfigMapWaitingMessage))
+						instancehav1.InstanceHaConfigMapWaitingMessage))
 					return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 				}
 				instance.Status.Conditions.Set(condition.FalseCondition(
-					instancehav1.InstanceHAReadyCondition,
+					instancehav1.InstanceHaReadyCondition,
 					condition.ErrorReason,
 					condition.SeverityWarning,
-					instancehav1.InstanceHAReadyErrorMessage,
+					instancehav1.InstanceHaReadyErrorMessage,
 					err.Error()))
 				return ctrl.Result{}, err
 			}
 
-			configVars[instance.Spec.InstanceHAConfigMap] = env.SetValue(configMapHash)
+			configVars[instance.Spec.InstanceHaConfigMap] = env.SetValue(configMapHash)
 		} else {
 			// Catch and log generic error fetching the configmap
-			Log.Error(err, fmt.Sprintf("could not fetch configmap %s", instance.Spec.InstanceHAConfigMap))
+			Log.Error(err, fmt.Sprintf("could not fetch configmap %s", instance.Spec.InstanceHaConfigMap))
 			return ctrl.Result{}, err
 		}
 	}
-	configVars[instance.Spec.InstanceHAConfigMap] = env.SetValue(configMapHash)
+	configVars[instance.Spec.InstanceHaConfigMap] = env.SetValue(configMapHash)
 
 	if instance.Spec.CaBundleSecretName != "" {
 		secretHash, err := tls.ValidateCACertSecret(
@@ -396,14 +396,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Create netattachment
 	serviceAnnotations, err := nad.CreateNetworksAnnotation(instance.Namespace, instance.Spec.NetworkAttachments)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
+		return ctrl.Result{}, fmt.Errorf("failed to create network annotation from %s: %w",
 			instance.Spec.NetworkAttachments, err)
 	}
 
 	// TODO add check to make sure there is only a single copy of instanceha using the same OpenStackCloud
 	cloud := instance.Spec.OpenStackCloud
 
-	commondeployment := commondeployment.NewDeployment(instanceha.Deployment(instance, Labels, serviceAnnotations, cloud, configVarsHash), time.Duration(5)*time.Second)
+	containerImage, err := r.GetContainerImage(ctx, instance.Spec.ContainerImage, instance)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to fetch containerImage from ConfigMap: %w", err)
+	}
+
+	commondeployment := commondeployment.NewDeployment(instanceha.Deployment(instance, Labels, serviceAnnotations, cloud, configVarsHash, containerImage), time.Duration(5)*time.Second)
 	sfres, sferr := commondeployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
@@ -434,7 +439,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	if deployment.Status.ReadyReplicas > 0 {
-		instance.Status.Conditions.MarkTrue(instancehav1.InstanceHAReadyCondition, instancehav1.InstanceHAReadyMessage)
+		instance.Status.Conditions.MarkTrue(instancehav1.InstanceHaReadyCondition, instancehav1.InstanceHaReadyMessage)
 	}
 
 	return ctrl.Result{}, nil
@@ -447,7 +452,7 @@ const (
 	openStackConfigMapField    = ".spec.openStackConfigMap"
 	openStackConfigSecretField = ".spec.openStackConfigSecret"
 	fencingSecretField         = ".spec.fencingSecret"
-	instanceHAConfigMapField   = ".spec.instanceHAConfigMap"
+	instanceHaConfigMapField   = ".spec.instanceHaConfigMap"
 )
 
 var (
@@ -456,7 +461,7 @@ var (
 		openStackConfigMapField,
 		openStackConfigSecretField,
 		fencingSecretField,
-		instanceHAConfigMapField,
+		instanceHaConfigMapField,
 	}
 )
 
@@ -464,9 +469,9 @@ var (
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	// index caBundleSecretNameField
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHA{}, caBundleSecretNameField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, caBundleSecretNameField, func(rawObj client.Object) []string {
 		// Extract the secret name from the spec, if one is provided
-		cr := rawObj.(*instancehav1.InstanceHA)
+		cr := rawObj.(*instancehav1.InstanceHa)
 		if cr.Spec.CaBundleSecretName == "" {
 			return nil
 		}
@@ -475,9 +480,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	// index openStackConfigMap
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHA{}, openStackConfigMapField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, openStackConfigMapField, func(rawObj client.Object) []string {
 		// Extract the configmap name from the spec, if one is provided
-		cr := rawObj.(*instancehav1.InstanceHA)
+		cr := rawObj.(*instancehav1.InstanceHa)
 		if cr.Spec.OpenStackConfigMap == "" {
 			return nil
 		}
@@ -486,9 +491,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	// index openStackConfigSecret
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHA{}, openStackConfigSecretField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, openStackConfigSecretField, func(rawObj client.Object) []string {
 		// Extract the configmap name from the spec, if one is provided
-		cr := rawObj.(*instancehav1.InstanceHA)
+		cr := rawObj.(*instancehav1.InstanceHa)
 		if cr.Spec.OpenStackConfigSecret == "" {
 			return nil
 		}
@@ -497,9 +502,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	// index fencingSecret
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHA{}, fencingSecretField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, fencingSecretField, func(rawObj client.Object) []string {
 		// Extract the secret name from the spec, if one is provided
-		cr := rawObj.(*instancehav1.InstanceHA)
+		cr := rawObj.(*instancehav1.InstanceHa)
 		if cr.Spec.FencingSecret == "" {
 			return nil
 		}
@@ -507,20 +512,20 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}); err != nil {
 		return err
 	}
-	// index instanceHAConfigMap
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHA{}, instanceHAConfigMapField, func(rawObj client.Object) []string {
+	// index instanceHaConfigMap
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, instanceHaConfigMapField, func(rawObj client.Object) []string {
 		// Extract the configmap name from the spec, if one is provided
-		cr := rawObj.(*instancehav1.InstanceHA)
-		if cr.Spec.InstanceHAConfigMap == "" {
+		cr := rawObj.(*instancehav1.InstanceHa)
+		if cr.Spec.InstanceHaConfigMap == "" {
 			return nil
 		}
-		return []string{cr.Spec.InstanceHAConfigMap}
+		return []string{cr.Spec.InstanceHaConfigMap}
 	}); err != nil {
 		return err
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&instancehav1.InstanceHA{}).
+		For(&instancehav1.InstanceHa{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
@@ -557,7 +562,7 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	requests := []reconcile.Request{}
 
 	for _, field := range allWatchFields {
-		crList := &instancehav1.InstanceHAList{}
+		crList := &instancehav1.InstanceHaList{}
 		listOps := &client.ListOptions{
 			FieldSelector: fields.OneTermEqualSelector(field, src.GetName()),
 			Namespace:     src.GetNamespace(),
@@ -580,4 +585,33 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	}
 
 	return requests
+}
+
+func (r *Reconciler) GetContainerImage(
+	ctx context.Context,
+	containerImage string,
+	src client.Object,
+) (string, error) {
+	cm := &corev1.ConfigMap{}
+	instanceHaConfigMapName := "infra-instanceha-config"
+
+	if len(containerImage) > 0 {
+		return containerImage, nil
+	}
+
+	objectKey := client.ObjectKey{Namespace: src.GetNamespace(), Name: instanceHaConfigMapName}
+	err := r.Client.Get(ctx, objectKey, cm)
+	if err != nil {
+		return "", err
+	}
+
+	if cm.Data == nil {
+		return util.GetEnvVar("RELATED_IMAGE_INFRA_INSTANCE_HA_IMAGE_URL_DEFAULT", ""), nil
+	}
+
+	if cmImage, exists := cm.Data["instanceha-image"]; exists {
+		return cmImage, nil
+	}
+
+	return "", nil
 }

@@ -19,35 +19,35 @@ import (
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 )
 
-// InstanceHA Condition Types used by API objects.
+// InstanceHa Condition Types used by API objects.
 const (
-	// InstanceHAReadyCondition Status=True condition which indicates if InstanceHA is configured and operational
-	InstanceHAReadyCondition condition.Type = "InstanceHAReady"
+	// InstanceHaReadyCondition Status=True condition which indicates if InstanceHa is configured and operational
+	InstanceHaReadyCondition condition.Type = "InstanceHaReady"
 )
 
-// InstanceHA Reasons used by API objects.
+// InstanceHa Reasons used by API objects.
 const ()
 
 // Common Messages used by API objects.
 const (
-	// InstanceHAReadyInitMessage
-	InstanceHAReadyInitMessage = "Instance HA not started, waiting on keystone API"
+	// InstanceHaReadyInitMessage
+	InstanceHaReadyInitMessage = "Instance HA not started, waiting on keystone API"
 
-	// InstanceHAKeystoneWaitingMessage
-	InstanceHAKeystoneWaitingMessage = "Instance HA keystone API not yet ready"
+	// InstanceHaKeystoneWaitingMessage
+	InstanceHaKeystoneWaitingMessage = "Instance HA keystone API not yet ready"
 
-	// InstanceHAConfigMapWaitingMessage
-	InstanceHAConfigMapWaitingMessage = "Instance HA waiting for configmap"
+	// InstanceHaConfigMapWaitingMessage
+	InstanceHaConfigMapWaitingMessage = "Instance HA waiting for configmap"
 
-	// InstanceHASecretWaitingMessage
-	InstanceHASecretWaitingMessage = "Instance HA waiting for secret"
+	// InstanceHaSecretWaitingMessage
+	InstanceHaSecretWaitingMessage = "Instance HA waiting for secret"
 
-	// InstanceHAInputReady
-	InstanceHAInputReady = "Instance HA input ready"
+	// InstanceHaInputReady
+	InstanceHaInputReady = "Instance HA input ready"
 
-	// InstanceHAReadyMessage
-	InstanceHAReadyMessage = "Instance HA created"
+	// InstanceHaReadyMessage
+	InstanceHaReadyMessage = "Instance HA created"
 
-	// InstanceHAReadyErrorMessage
-	InstanceHAReadyErrorMessage = "Instance HA error occured %s"
+	// InstanceHaReadyErrorMessage
+	InstanceHaReadyErrorMessage = "Instance HA error occured %s"
 )

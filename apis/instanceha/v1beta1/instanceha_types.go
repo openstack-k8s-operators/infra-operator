@@ -26,16 +26,16 @@ import (
 const (
 	// Container image fall-back defaults
 
-	// InstanceHAContainerImage is the fall-back container image for InstanceHA
-	InstanceHAContainerImage = "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
+	// InstanceHaContainerImage is the fall-back container image for InstanceHa
+	InstanceHaContainerImage = "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
 	OpenStackCloud          = "default"
 )
 
-// InstanceHASpec defines the desired state of InstanceHA
-type InstanceHASpec struct {
+// InstanceHaSpec defines the desired state of InstanceHa
+type InstanceHaSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default="quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
-	// ContainerImage for the the InstanceHA container (will be set to environmental default if empty)
+	// ContainerImage for the the InstanceHa container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
         // +kubebuilder:validation:Required
@@ -60,12 +60,12 @@ type InstanceHASpec struct {
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=instanceha-config
-	// InstanceHAConfigMap is the name of the ConfigMap containing the InstanceHA config file
-	InstanceHAConfigMap string `json:"instanceHAConfigMap"`
+	// InstanceHaConfigMap is the name of the ConfigMap containing the InstanceHa config file
+	InstanceHaConfigMap string `json:"instanceHaConfigMap"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=7410
-	InstanceHAKdumpPort int32 `json:"instanceHAKdumpPort"`
+	InstanceHaKdumpPort int32 `json:"instanceHaKdumpPort"`
 
 	// +kubebuilder:validation:Optional
 	// NodeSelector to target subset of worker nodes running control plane services (currently only applies to KeystoneAPI and PlacementAPI)
@@ -82,8 +82,8 @@ type InstanceHASpec struct {
 	tls.Ca `json:",inline"`
 }
 
-// InstanceHAStatus defines the observed state of InstanceHA
-type InstanceHAStatus struct {
+// InstanceHaStatus defines the observed state of InstanceHa
+type InstanceHaStatus struct {
 	// PodName
 	PodName string `json:"podName,omitempty"`
 
@@ -102,49 +102,49 @@ type InstanceHAStatus struct {
 //+kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[0].status",description="Status"
 //+kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.conditions[0].message",description="Message"
 
-// InstanceHA is the Schema for the instancehas API
-type InstanceHA struct {
+// InstanceHa is the Schema for the instancehas API
+type InstanceHa struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   InstanceHASpec   `json:"spec,omitempty"`
-	Status InstanceHAStatus `json:"status,omitempty"`
+	Spec   InstanceHaSpec   `json:"spec,omitempty"`
+	Status InstanceHaStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// InstanceHAList contains a list of InstanceHA
-type InstanceHAList struct {
+// InstanceHaList contains a list of InstanceHa
+type InstanceHaList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []InstanceHA `json:"items"`
+	Items           []InstanceHa `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&InstanceHA{}, &InstanceHAList{})
+	SchemeBuilder.Register(&InstanceHa{}, &InstanceHaList{})
 }
 
 // RbacConditionsSet - set the conditions for the rbac object
-func (instance InstanceHA) RbacConditionsSet(c *condition.Condition) {
+func (instance InstanceHa) RbacConditionsSet(c *condition.Condition) {
 	instance.Status.Conditions.Set(c)
 }
 
 // RbacNamespace - return the namespace
-func (instance InstanceHA) RbacNamespace() string {
+func (instance InstanceHa) RbacNamespace() string {
 	return instance.Namespace
 }
 
 // RbacResourceName - return the name to be used for rbac objects (serviceaccount, role, rolebinding)
-func (instance InstanceHA) RbacResourceName() string {
+func (instance InstanceHa) RbacResourceName() string {
 	return "instanceha-" + instance.Name
 }
 
 // SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)
 func SetupDefaults() {
-	// Acquire environmental defaults and initialize InstanceHA defaults with them
-	instanceHADefaults := InstanceHADefaults{
-		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INSTANCE_HA_IMAGE_URL_DEFAULT", InstanceHAContainerImage),
+	// Acquire environmental defaults and initialize InstanceHa defaults with them
+	instanceHaDefaults := InstanceHaDefaults{
+		ContainerImageURL: util.GetEnvVar("RELATED_IMAGE_INSTANCE_HA_IMAGE_URL_DEFAULT", InstanceHaContainerImage),
 	}
 
-	SetupInstanceHADefaults(instanceHADefaults)
+	SetupInstanceHaDefaults(instanceHaDefaults)
 }

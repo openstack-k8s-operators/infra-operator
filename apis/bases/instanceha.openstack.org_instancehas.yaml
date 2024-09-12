@@ -9,8 +9,8 @@ metadata:
 spec:
   group: instanceha.openstack.org
   names:
-    kind: InstanceHA
-    listKind: InstanceHAList
+    kind: InstanceHa
+    listKind: InstanceHaList
     plural: instancehas
     singular: instanceha
   scope: Namespaced
@@ -27,7 +27,7 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: InstanceHA is the Schema for the instancehas API
+        description: InstanceHa is the Schema for the instancehas API
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -42,7 +42,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: InstanceHASpec defines the desired state of InstanceHA
+            description: InstanceHaSpec defines the desired state of InstanceHa
             properties:
               caBundleSecretName:
                 description: CaBundleSecretName - holding the CA certs in a pre-created
@@ -50,7 +50,7 @@ spec:
                 type: string
               containerImage:
                 default: quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified
-                description: ContainerImage for the the InstanceHA container (will
+                description: ContainerImage for the the InstanceHa container (will
                   be set to environmental default if empty)
                 type: string
               fencingSecret:
@@ -58,12 +58,12 @@ spec:
                 description: FencingSecret is the name of the Secret containing the
                   fencing details
                 type: string
-              instanceHAConfigMap:
+              instanceHaConfigMap:
                 default: instanceha-config
-                description: InstanceHAConfigMap is the name of the ConfigMap containing
-                  the InstanceHA config file
+                description: InstanceHaConfigMap is the name of the ConfigMap containing
+                  the InstanceHa config file
                 type: string
-              instanceHAKdumpPort:
+              instanceHaKdumpPort:
                 default: 7410
                 format: int32
                 type: integer
@@ -98,14 +98,14 @@ spec:
             required:
             - containerImage
             - fencingSecret
-            - instanceHAConfigMap
-            - instanceHAKdumpPort
+            - instanceHaConfigMap
+            - instanceHaKdumpPort
             - openStackCloud
             - openStackConfigMap
             - openStackConfigSecret
             type: object
           status:
-            description: InstanceHAStatus defines the observed state of InstanceHA
+            description: InstanceHaStatus defines the observed state of InstanceHa
             properties:
               conditions:
                 description: Conditions
