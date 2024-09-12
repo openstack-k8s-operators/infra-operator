@@ -36,7 +36,7 @@ resources:
   controller: true
   domain: openstack.org
   group: instanceha
-  kind: InstanceHA
+  kind: InstanceHa
   path: github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1
   version: v1beta1
   webhooks:

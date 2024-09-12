@@ -161,7 +161,7 @@ func main() {
 		Kclient: kclient,
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "InstanceHA")
+		setupLog.Error(err, "unable to create controller", "controller", "InstanceHa")
 		os.Exit(1)
 	}
 	if err = (&rediscontrollers.Reconciler{
@@ -220,8 +220,8 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Memcached")
 			os.Exit(1)
 		}
-		if err = (&instancehav1.InstanceHA{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "InstanceHA")
+		if err = (&instancehav1.InstanceHa{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "InstanceHa")
 			os.Exit(1)
 		}
 		if err = (&redisv1.Redis{}).SetupWebhookWithManager(mgr); err != nil {

@@ -23,11 +23,12 @@ import (
 )
 
 func Deployment(
-	instance *instancehav1.InstanceHA,
+	instance *instancehav1.InstanceHa,
 	labels map[string]string,
 	annotations map[string]string,
 	openstackcloud string,
 	configHash string,
+	containerImage string,
 ) *appsv1.Deployment {
 
 	replicas := int32(1)
@@ -71,7 +72,7 @@ func Deployment(
 					NodeSelector:                  instance.Spec.NodeSelector,
 					Containers: []corev1.Container{{
 						Name:    "instanceha",
-						Image:   instance.Spec.ContainerImage,
+						Image:   containerImage,
 						Command: []string{"/usr/bin/python3", "-u", "/var/lib/instanceha/instanceha.py"},
 						SecurityContext: &corev1.SecurityContext{
 							RunAsUser:                ptr.To[int64](42401),
@@ -86,7 +87,7 @@ func Deployment(
 						},
 						Env: env.MergeEnvs([]corev1.EnvVar{}, envVars),
 						Ports: []corev1.ContainerPort{{
-							ContainerPort: instance.Spec.InstanceHAKdumpPort,
+							ContainerPort: instance.Spec.InstanceHaKdumpPort,
 							Protocol:      "UDP",
 							Name:          "instanceha",
 						}},
@@ -133,7 +134,7 @@ func instancehaPodVolumeMounts() []corev1.VolumeMount {
 }
 
 func instancehaPodVolumes(
-	instance *instancehav1.InstanceHA,
+	instance *instancehav1.InstanceHa,
 ) []corev1.Volume {
 
 	var config0644AccessMode int32 = 0644
@@ -180,7 +181,7 @@ func instancehaPodVolumes(
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: instance.Spec.InstanceHAConfigMap,
+						Name: instance.Spec.InstanceHaConfigMap,
 					},
 				},
 			},
