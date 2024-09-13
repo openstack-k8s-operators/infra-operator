@@ -39,10 +39,12 @@ import (
 
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 
+	memcached_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/memcached"
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmq_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
 
@@ -114,6 +116,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = rabbitmqclusterv2.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
+	err = memcachedv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
 	//+kubebuilder:scaffold:scheme
 
 	logger = ctrl.Log.WithName("---Test---")
@@ -159,6 +163,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = (&networkv1.DNSMasq{}).SetupWebhookWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
+	err = (&memcachedv1.Memcached{}).SetupWebhookWithManager(k8sManager)
+	Expect(err).NotTo(HaveOccurred())
 
 	err = (&network_ctrl.DNSMasqReconciler{
 		Client:  k8sManager.GetClient(),
@@ -189,6 +195,13 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&rabbitmq_ctrl.TransportURLReconciler{
+		Client:  k8sManager.GetClient(),
+		Scheme:  k8sManager.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&memcached_ctrl.Reconciler{
 		Client:  k8sManager.GetClient(),
 		Scheme:  k8sManager.GetScheme(),
 		Kclient: kclient,
