@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -42,6 +44,8 @@ import (
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 )
+
+const CtlPlaneNetwork = "ctlplane"
 
 // IPSetReconciler reconciles a IPSet object
 type IPSetReconciler struct {
@@ -274,6 +278,13 @@ func (r *IPSetReconciler) reconcileNormal(ctx context.Context, instance *network
 			return ctrl.Result{}, err
 		}
 
+		// sort instance.Status.Reservations
+		sort.Slice(instance.Status.Reservation, func(i, j int) bool {
+			return (strings.EqualFold(string(instance.Status.Reservation[i].ServiceNetwork),
+				CtlPlaneNetwork) && !strings.EqualFold(string(instance.Status.Reservation[j].ServiceNetwork),
+				CtlPlaneNetwork))
+		})
+
 		instance.Status.Conditions.MarkTrue(networkv1.ReservationReadyCondition, networkv1.ReservationReadyMessage)
 
 		Log.Info("IPSet is ready:", "instance", instance.Name, "ipSetRes", ipSetRes.Spec.Reservation)
@@ -398,6 +409,10 @@ func (r *IPSetReconciler) ensureReservation(
 			return nil, err
 		}
 
+		if netDef.ServiceNetwork == "" {
+			netDef.ServiceNetwork = networkv1.ToDefaultServiceNetwork(netDef.Name)
+		}
+
 		// set net: subnet label
 		reservationLabels = util.MergeStringMaps(reservationLabels,
 			map[string]string{
@@ -426,15 +441,16 @@ func (r *IPSetReconciler) ensureReservation(
 		// add IP to the reservation and IPSet status reservations
 		reservationSpec.Reservation[string(netDef.Name)] = *ip
 		ipsetRes := networkv1.IPSetReservation{
-			Network:   netDef.Name,
-			Subnet:    subnetDef.Name,
-			Address:   ip.Address,
-			MTU:       netDef.MTU,
-			Cidr:      subnetDef.Cidr,
-			Vlan:      subnetDef.Vlan,
-			Gateway:   subnetDef.Gateway,
-			Routes:    subnetDef.Routes,
-			DNSDomain: netDef.DNSDomain,
+			Network:        netDef.Name,
+			Subnet:         subnetDef.Name,
+			Address:        ip.Address,
+			MTU:            netDef.MTU,
+			Cidr:           subnetDef.Cidr,
+			Vlan:           subnetDef.Vlan,
+			Gateway:        subnetDef.Gateway,
+			Routes:         subnetDef.Routes,
+			DNSDomain:      netDef.DNSDomain,
+			ServiceNetwork: netDef.ServiceNetwork,
 		}
 		if ipsetNet.DefaultRoute != nil && *ipsetNet.DefaultRoute && subnetDef.Gateway != nil {
 			ipsetRes.Gateway = subnetDef.Gateway

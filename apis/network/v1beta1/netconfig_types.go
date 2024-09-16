@@ -28,6 +28,13 @@ import (
 // NetNameStr is used for validation of a net name.
 type NetNameStr string
 
+// +kubebuilder:validation:Pattern="^[a-z0-9][a-z0-9\\-_]*[a-z0-9]$"
+type ServiceNetNameStr string
+
+func ToDefaultServiceNetwork(n NetNameStr) ServiceNetNameStr {
+	return ServiceNetNameStr(strings.ToLower(string(n)))
+}
+
 // Network definition
 type Network struct {
 	// +kubebuilder:validation:Required
@@ -46,6 +53,10 @@ type Network struct {
 	// +kubebuilder:validation:Required
 	// Subnets of the network
 	Subnets []Subnet `json:"subnets"`
+
+	// +kubebuilder:validation:optional
+	// Service network mapping
+	ServiceNetwork ServiceNetNameStr `json:"serviceNetwork,omitempty"`
 }
 
 // Subnet definition

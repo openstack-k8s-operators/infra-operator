@@ -28,6 +28,11 @@ spec:
       kind: DNSMasq
       name: dnsmasqs.network.openstack.org
       version: v1beta1
+    - description: InstanceHA is the Schema for the instancehas API
+      displayName: Instance HA
+      kind: InstanceHA
+      name: instancehas.instanceha.openstack.org
+      version: v1beta1
     - description: IPSet is the Schema for the ipsets API
       displayName: IPSet
       kind: IPSet
@@ -51,6 +56,10 @@ spec:
       displayName: Redis
       kind: Redis
       name: redises.redis.openstack.org
+      specDescriptors:
+      - description: TLS settings for Redis service and internal Redis replication
+        displayName: TLS
+        path: tls
       version: v1beta1
     - description: Reservation is the Schema for the reservations API
       displayName: Reservation

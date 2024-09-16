@@ -320,7 +320,7 @@ var _ = Describe("IPSet controller", func() {
 		BeforeEach(func() {
 			netSpecs = []networkv1.Network{}
 			netSpecs = append(netSpecs, GetNetSpec(net1, GetSubnet1(subnet1)))
-			netSpecs = append(netSpecs, GetNetSpec(net2, GetSubnet2(subnet1)))
+			netSpecs = append(netSpecs, GetNetCtlplaneSpec(net2, GetSubnet2(subnet1)))
 			netSpecs = append(netSpecs, GetNetSpec(net3, GetSubnet3(subnet1)))
 
 			ipSetNetworks = []networkv1.IPSetNetwork{}
@@ -369,11 +369,23 @@ var _ = Describe("IPSet controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, ipSetName, instance)).Should(Succeed())
+				ctlplaneNetwork := instance.Status.Reservation[0].Network
+				g.Expect(instance.Status.Reservation[0].ServiceNetwork).To(Equal(networkv1.ServiceNetNameStr("ctlplane")))
+				ctlplaneFound := false
 				for i := 0; i < len(ipSetNetworks); i++ {
 					// first assert that the instance networks are in the same order as we specified
 					g.Expect(instance.Spec.Networks[i].Name).To(Equal(ipSetNetworks[i].Name))
 					// then assert that the reservation networks are in the same order
-					g.Expect(instance.Spec.Networks[i].Name).To(Equal(instance.Status.Reservation[i].Network))
+					// other than ctlplane network being the first one.
+					if ipSetNetworks[i].Name == ctlplaneNetwork {
+						ctlplaneFound = true
+						continue
+					}
+					if ctlplaneFound {
+						g.Expect(instance.Spec.Networks[i].Name).To(Equal(instance.Status.Reservation[i].Network))
+					} else {
+						g.Expect(instance.Spec.Networks[i].Name).To(Equal(instance.Status.Reservation[i+1].Network))
+					}
 				}
 				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())

@@ -482,6 +482,20 @@ func GetNetSpec(name string, subnets ...networkv1.Subnet) networkv1.Network {
 	return net
 }
 
+func GetNetCtlplaneSpec(name string, subnets ...networkv1.Subnet) networkv1.Network {
+	net := networkv1.Network{
+		Name:           networkv1.NetNameStr(name),
+		DNSDomain:      fmt.Sprintf("%s.example.com", strings.ToLower(name)),
+		MTU:            1400,
+		Subnets:        []networkv1.Subnet{},
+		ServiceNetwork: "ctlplane",
+	}
+
+	net.Subnets = append(net.Subnets, subnets...)
+
+	return net
+}
+
 func GetDefaultNetConfigSpec() map[string]interface{} {
 	net := GetNetSpec(net1, GetSubnet1(subnet1))
 	return GetNetConfigSpec(net)
