@@ -51,12 +51,11 @@ var _ webhook.Defaulter = &NetConfig{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
 func (r *NetConfig) Default() {
-	for _, net := range r.Spec.Networks {
+	for idx, net := range r.Spec.Networks {
 		if net.ServiceNetwork == "" {
-			net.ServiceNetwork = ToDefaultServiceNetwork(net.Name)
+			r.Spec.Networks[idx].ServiceNetwork = ToDefaultServiceNetwork(net.Name)
 		}
 	}
-
 }
 
 //+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-netconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update;delete,versions=v1beta1,name=vnetconfig.kb.io,admissionReviewVersions=v1
