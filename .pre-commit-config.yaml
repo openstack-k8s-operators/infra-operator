@@ -49,7 +49,7 @@ repos:
       exclude: ^vendor
 
 - repo: https://github.com/golangci/golangci-lint
-  rev: v1.55.2
+  rev: v1.59.1
   hooks:
     - id: golangci-lint-full
       args: ["-v"]
