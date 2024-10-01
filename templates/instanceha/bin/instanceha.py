@@ -419,7 +419,11 @@ def _check_kdump(stale_services):
         #logging.debug("address is %s" % address[0])
 
         # short hostname
-        name = socket.gethostbyaddr(address[0])[0].split('.', 1)[0]
+        try:
+            name = socket.gethostbyaddr(address[0])[0].split('.', 1)[0]
+        except Exception as msg:
+            logging.error('Failed reverse dns lookup for: %s - %s' % (address[0], msg))
+            continue
 
         # fence_kdump checks if the magic number matches, so let's do it here too
         if hex(struct.unpack('ii',data)[0]).upper() != FENCE_KDUMP_MAGIC.upper() :
