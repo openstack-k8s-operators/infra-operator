@@ -1,5 +1,7 @@
 config:
   EVACUABLE_TAG: "evacuable"
+  TAGGED_IMAGES: "true"
+  TAGGED_FLAVORS: "true"
   SMART_EVACUATION: "false"
   DELTA: "30"
   POLL: "30"
