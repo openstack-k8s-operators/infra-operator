@@ -38,6 +38,8 @@ with open("/var/lib/instanceha/config.yaml", 'r') as stream:
         logging.debug(exc)
 
 EVACUABLE_TAG = config["EVACUABLE_TAG"] if 'EVACUABLE_TAG' in config else "evacuable"
+TAGGED_IMAGES = config["TAGGED_IMAGES"] if 'TAGGED_IMAGES' in config else "true"
+TAGGED_FLAVORS = config["TAGGED_FLAVORS"] if 'TAGGED_FLAVORS' in config else "true"
 DELTA = int(config["DELTA"]) if 'DELTA' in config else 30
 POLL = int(config["POLL"]) if 'POLL' in config else 30
 THRESHOLD = int(config["THRESHOLD"]) if 'THRESHOLD' in config else 50
@@ -126,8 +128,14 @@ def _custom_check():
 
 def _host_evacuate(connection, host):
     result = True
-    images = _get_evacuable_images(connection)
-    flavors = _get_evacuable_flavors(connection)
+    if 'true' in TAGGED_IMAGES:
+        images = _get_evacuable_images(connection)
+    else:
+        images = []
+    if 'true' in TAGGED_FLAVORS:
+        flavors = _get_evacuable_flavors(connection)
+    else:
+        flavors = []
     servers = connection.servers.list(search_opts={'host': host, 'all_tenants': 1 })
     servers = [server for server in servers if server.status in {'ACTIVE', 'ERROR', 'STOPPED'}]
 
@@ -419,7 +427,11 @@ def _check_kdump(stale_services):
         #logging.debug("address is %s" % address[0])
 
         # short hostname
-        name = socket.gethostbyaddr(address[0])[0].split('.', 1)[0]
+        try:
+            name = socket.gethostbyaddr(address[0])[0].split('.', 1)[0]
+        except Exception as msg:
+            logging.error('Failed reverse dns lookup for: %s - %s' % (address[0], msg))
+            continue
 
         # fence_kdump checks if the magic number matches, so let's do it here too
         if hex(struct.unpack('ii',data)[0]).upper() != FENCE_KDUMP_MAGIC.upper() :
@@ -443,6 +455,8 @@ def _check_kdump(stale_services):
 
     if broken_computes:
         stale_services = [service for service in stale_services if service.host in broken_computes]
+    else:
+        stale_services = []
 
     return stale_services
 
