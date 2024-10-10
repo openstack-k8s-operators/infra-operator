@@ -368,6 +368,8 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *TransportURLReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 
+	l := log.FromContext(context.Background()).WithName("Controllers").WithName("TransportURL")
+
 	for _, field := range allWatchFields {
 		crList := &rabbitmqv1.TransportURLList{}
 		listOps := &client.ListOptions{
@@ -376,10 +378,13 @@ func (r *TransportURLReconciler) findObjectsForSrc(ctx context.Context, src clie
 		}
 		err := r.List(ctx, crList, listOps)
 		if err != nil {
-			return []reconcile.Request{}
+			l.Error(err, fmt.Sprintf("listing %s for field: %s - %s", crList.GroupVersionKind().Kind, field, src.GetNamespace()))
+			return requests
 		}
 
 		for _, item := range crList.Items {
+			l.Info(fmt.Sprintf("input source %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
+
 			requests = append(requests,
 				reconcile.Request{
 					NamespacedName: types.NamespacedName{
