@@ -11,7 +11,7 @@ require (
 	github.com/openstack-k8s-operators/keystone-operator/api v0.4.1-0.20240926170109-c06637e4b12b
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.4.1-0.20241007071524-66e6544525a3
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.4.1-0.20241007071524-66e6544525a3
-	github.com/rabbitmq/cluster-operator/v2 v2.9.0
+	github.com/rabbitmq/cluster-operator/v2 v2.10.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	k8s.io/api v0.29.9
