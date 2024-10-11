@@ -51,7 +51,6 @@ import (
 	networkcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
 	rediscontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/redis"
-	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -67,7 +66,6 @@ func init() {
 	utilruntime.Must(rabbitmqclusterv2.AddToScheme(scheme))
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	utilruntime.Must(instancehav1.AddToScheme(scheme))
-	utilruntime.Must(keystonev1.AddToScheme(scheme))
 	utilruntime.Must(redisv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme

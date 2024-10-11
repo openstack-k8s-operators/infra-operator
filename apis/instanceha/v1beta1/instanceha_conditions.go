@@ -31,16 +31,19 @@ const ()
 // Common Messages used by API objects.
 const (
 	// InstanceHaReadyInitMessage
-	InstanceHaReadyInitMessage = "Instance HA not started, waiting on keystone API"
+	InstanceHaReadyInitMessage = "Instance HA not started"
 
-	// InstanceHaKeystoneWaitingMessage
-	InstanceHaKeystoneWaitingMessage = "Instance HA keystone API not yet ready"
+	// InstanceHaOpenStackConfigMapWaitingMessage
+	InstanceHaOpenStackConfigMapWaitingMessage = "Instance HA waiting for OpenStack ConfigMap"
 
-	// InstanceHaConfigMapWaitingMessage
-	InstanceHaConfigMapWaitingMessage = "Instance HA waiting for configmap"
+	// InstanceHaOpenStackConfigSecretWaitingMessage
+	InstanceHaOpenStackConfigSecretWaitingMessage = "Instance HA waiting for OpenStack Config Secret"
 
-	// InstanceHaSecretWaitingMessage
-	InstanceHaSecretWaitingMessage = "Instance HA waiting for secret"
+	// InstanceHaConfigMapWaitingMessage)
+	InstanceHaConfigMapWaitingMessage = "Instance HA waiting for InstanceHA ConfigMap"
+
+	// InstanceHaFencingSecretWaitingMessage
+	InstanceHaFencingSecretWaitingMessage = "Instance HA waiting for Fencing secret"
 
 	// InstanceHaInputReady
 	InstanceHaInputReady = "Instance HA input ready"
