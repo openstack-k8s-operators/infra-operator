@@ -498,6 +498,33 @@ def _redfish_reset(url, user, passwd, timeout, action):
     r = requests.post(url, data=json.dumps(payload), headers=headers, auth=(user, passwd), verify=False, timeout=timeout)
     return r
 
+def _bmh_fence(token, namespace, host, action):
+
+    url = "https://kubernetes.default.svc/apis/metal3.io/v1alpha1/namespaces/%s/baremetalhosts/%s?fieldManager=kubectl-patch" % (namespace, host)
+    headers={'Authorization': 'Bearer '+token, 'Content-Type': 'application/merge-patch+json'}
+    cacert = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+
+    if action == 'off':
+        ann={"metadata":{"annotations":{"reboot.metal3.io/iha":"{\"mode\": \"hard\"}"}}}
+        r = requests.patch(url, headers=headers, verify=cacert, data=json.dumps(ann))
+        if r.status_code == 200:
+
+            #check if server is off - wait up to 30s - TODO this may need tuning
+            headers={'Authorization': 'Bearer '+token}
+            url = "https://kubernetes.default.svc/apis/metal3.io/v1alpha1/namespaces/%s/baremetalhosts/%s" % (namespace, host)
+
+            timeout_at = time.time() + 30
+            while time.time() < timeout_at:
+              time.sleep(3)
+              s = requests.get(url, headers=headers, verify=cacert)
+              poweredon = json.loads(s.text)['status']['poweredOn']
+              if not poweredon:
+                break
+            return not poweredon
+    else:
+        ann={"metadata":{"annotations":{"reboot.metal3.io/iha":None}}}
+        r = requests.patch(url, headers=headers, verify=cacert, data=json.dumps(ann))
+        return r
 
 def _host_fence(host, action):
     logging.info('Fencing host %s %s' % (host, action))
@@ -588,6 +615,27 @@ def _host_fence(host, action):
             else:
                 logging.warning('Could not power on %s' % host)
                 #return True
+
+    elif 'bmh' in fencing_data["agent"]:
+
+        token = str(fencing_data["token"])
+        host = str(fencing_data["host"])
+        namespace = str(fencing_data["namespace"])
+
+        if action == 'off':
+            r = _bmh_fence(token, namespace, host, "off")
+            if r:
+                logging.info('Power off of %s ok' % host)
+                return True
+            else:
+                logging.error('Could not power off %s' % host)
+                return False
+        else:
+            r = _bmh_fence(token, namespace, host, "on")
+            if r.status_code == 200:
+                logging.info('Power on of %s ok' % host)
+            else:
+                logging.warning('Could not power on %s' % host)
 
     else:
         logging.error('No valid fencing method detected for %s' % host)
