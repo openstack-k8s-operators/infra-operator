@@ -41,7 +41,7 @@ EVACUABLE_TAG = config["EVACUABLE_TAG"] if 'EVACUABLE_TAG' in config else "evacu
 TAGGED_IMAGES = config["TAGGED_IMAGES"] if 'TAGGED_IMAGES' in config else "true"
 TAGGED_FLAVORS = config["TAGGED_FLAVORS"] if 'TAGGED_FLAVORS' in config else "true"
 DELTA = int(config["DELTA"]) if 'DELTA' in config else 30
-POLL = int(config["POLL"]) if 'POLL' in config else 30
+POLL = int(config["POLL"]) if 'POLL' in config else 45
 THRESHOLD = int(config["THRESHOLD"]) if 'THRESHOLD' in config else 50
 WORKERS = int(config["WORKERS"]) if 'WORKERS' in config else 4
 SMART_EVACUATION = config["SMART_EVACUATION"] if 'SMART_EVACUATION' in config else "false"
@@ -53,6 +53,8 @@ DISABLED = config["DISABLED"] if 'DISABLED' in config else "false"
 
 logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=LOGLEVEL)
 
+if POLL == 30 and 'true' in CHECK_KDUMP.lower():
+    logging.warning('CHECK_KDUMP Enabled and POLL set to 30 seconds. This may result in unexpected failures. Please increase POLL to 45 or greater.')
 
 with open("/secrets/fencing.yaml", 'r') as stream:
     try:
@@ -524,7 +526,7 @@ def _bmh_fence(token, namespace, host, action):
     else:
         ann={"metadata":{"annotations":{"reboot.metal3.io/iha":None}}}
         r = requests.patch(url, headers=headers, verify=cacert, data=json.dumps(ann))
-        return r
+        return True if r.status_code == 200 else False
 
 def _host_fence(host, action):
     logging.info('Fencing host %s %s' % (host, action))
@@ -632,7 +634,7 @@ def _host_fence(host, action):
                 return False
         else:
             r = _bmh_fence(token, namespace, host, "on")
-            if r.status_code == 200:
+            if r:
                 logging.info('Power on of %s ok' % host)
             else:
                 logging.warning('Could not power on %s' % host)
