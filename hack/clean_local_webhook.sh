@@ -13,3 +13,5 @@ oc delete validatingwebhookconfiguration/vreservation.kb.io --ignore-not-found
 oc delete mutatingwebhookconfiguration/mreservation.kb.io --ignore-not-found
 oc delete validatingwebhookconfiguration/vipset.kb.io --ignore-not-found
 oc delete mutatingwebhookconfiguration/mipset.kb.io --ignore-not-found
+oc delete validatingwebhookconfiguration/vinstanceha.kb.io --ignore-not-found
+oc delete mutatingwebhookconfiguration/minstanceha.kb.io --ignore-not-found

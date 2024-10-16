@@ -364,6 +364,70 @@ webhooks:
     scope: '*'
   sideEffects: None
   timeoutSeconds: 10
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: vinstanceha.kb.io
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    caBundle: ${CA_BUNDLE}
+    url: https://${CRC_IP}:9443/validate-instanceha-openstack-org-v1beta1-instanceha
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: vinstanceha.kb.io
+  objectSelector: {}
+  rules:
+  - apiGroups:
+    - instanceha.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - instancehas
+    scope: '*'
+  sideEffects: None
+  timeoutSeconds: 10
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: minstanceha.kb.io
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    caBundle: ${CA_BUNDLE}
+    url: https://${CRC_IP}:9443/mutate-instanceha-openstack-org-v1beta1-instanceha
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  name: minstanceha.kb.io
+  objectSelector: {}
+  rules:
+  - apiGroups:
+    - instanceha.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - instancehas
+    scope: '*'
+  sideEffects: None
+  timeoutSeconds: 10
 EOF_CAT
 
 oc apply -n openstack -f ${TMPDIR}/patch_webhook_configurations.yaml
+
+# Scale-down operator deployment replicas to zero and remove OLM webhooks
+CSV_NAME="$(oc get csv -n openstack-operators -l operators.coreos.com/infra-operator.openstack-operators -o name)"
+
+if [ -n "${CSV_NAME}" ]; then
+    oc patch "${CSV_NAME}" -n openstack-operators --type=json -p="[{'op': 'replace', 'path': '/spec/install/spec/deployments/0/spec/replicas', 'value': 0}]"
+    oc patch "${CSV_NAME}" -n openstack-operators --type=json -p="[{'op': 'replace', 'path': '/spec/webhookdefinitions', 'value': []}]"
+fi
