@@ -21,4 +21,6 @@ const (
 
 	// DNSPort -
 	DNSPort int32 = 53
+	// DNSTargetPort - port used the service is listening on in the pod
+	DNSTargetPort int32 = 5353
 )
