@@ -28,9 +28,9 @@ spec:
       kind: DNSMasq
       name: dnsmasqs.network.openstack.org
       version: v1beta1
-    - description: InstanceHA is the Schema for the instancehas API
-      displayName: Instance HA
-      kind: InstanceHA
+    - description: InstanceHa is the Schema for the instancehas API
+      displayName: Instance Ha
+      kind: InstanceHa
       name: instancehas.instanceha.openstack.org
       version: v1beta1
     - description: IPSet is the Schema for the ipsets API
