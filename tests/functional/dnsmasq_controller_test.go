@@ -184,8 +184,8 @@ var _ = Describe("DNSMasq controller", func() {
 				g.Expect(container.VolumeMounts).To(HaveLen(3))
 				g.Expect(container.Image).To(Equal(containerImage))
 
-				g.Expect(container.LivenessProbe.TCPSocket.Port.IntVal).To(Equal(int32(53)))
-				g.Expect(container.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(53)))
+				g.Expect(container.LivenessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
+				g.Expect(container.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
 			}, timeout, interval).Should(Succeed())
 		})
 

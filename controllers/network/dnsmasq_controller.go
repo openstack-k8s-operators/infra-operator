@@ -25,6 +25,7 @@ import (
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -375,10 +376,13 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			Namespace: instance.Namespace,
 			Labels:    serviceLabels,
 			Selector:  serviceLabels,
-			Port: service.GenericServicePort{
-				Name:     dnsmasq.ServiceName,
-				Port:     dnsmasq.DNSPort,
-				Protocol: corev1.ProtocolUDP,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       dnsmasq.ServiceName,
+					Protocol:   corev1.ProtocolUDP,
+					Port:       dnsmasq.DNSPort,
+					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: dnsmasq.DNSTargetPort},
+				},
 			},
 		}),
 		5,

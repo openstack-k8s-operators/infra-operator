@@ -24,14 +24,14 @@ func getVolumes(
 	name string,
 	cms *corev1.ConfigMapList,
 ) []corev1.Volume {
-	var config0640AccessMode int32 = 0640
+	var config0644AccessMode int32 = 0644
 
 	volumes := []corev1.Volume{
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					DefaultMode: &config0640AccessMode,
+					DefaultMode: &config0644AccessMode,
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: name,
 					},
@@ -45,7 +45,7 @@ func getVolumes(
 			Name: cm.Name,
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					DefaultMode: &config0640AccessMode,
+					DefaultMode: &config0644AccessMode,
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: cm.Name,
 					},

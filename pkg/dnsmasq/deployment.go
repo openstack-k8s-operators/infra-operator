@@ -30,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -45,7 +46,6 @@ func Deployment(
 	annotations map[string]string,
 	cms *corev1.ConfigMapList,
 ) *appsv1.Deployment {
-	runAsUser := int64(0)
 	terminationGracePeriodSeconds := int64(10)
 
 	livenessProbe := &corev1.Probe{
@@ -73,7 +73,7 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
 	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
 	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
-	dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSPort)))
+	dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSTargetPort)))
 	// log to stdout
 	dnsmasqCmd = append(dnsmasqCmd, "--log-facility=-")
 	// dns
@@ -94,10 +94,10 @@ func Deployment(
 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 	//
 	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: DNSTargetPort},
 	}
 	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(DNSPort)},
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: DNSTargetPort},
 	}
 
 	envVars := map[string]env.Setter{}
@@ -129,7 +129,11 @@ func Deployment(
 							Args:    initArgs,
 							Image:   instance.Spec.ContainerImage,
 							SecurityContext: &corev1.SecurityContext{
-								RunAsUser: &runAsUser,
+								RunAsNonRoot:             ptr.To(true),
+								AllowPrivilegeEscalation: ptr.To(false),
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeRuntimeDefault,
+								},
 							},
 							Env:          env.MergeEnvs([]corev1.EnvVar{}, envVars),
 							VolumeMounts: getVolumeMounts(instance.Name, cms),
@@ -142,7 +146,11 @@ func Deployment(
 							Args:    args,
 							Image:   instance.Spec.ContainerImage,
 							SecurityContext: &corev1.SecurityContext{
-								RunAsUser: &runAsUser,
+								RunAsNonRoot:             ptr.To(true),
+								AllowPrivilegeEscalation: ptr.To(false),
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeRuntimeDefault,
+								},
 							},
 							Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
 							VolumeMounts:   getVolumeMounts(instance.Name, cms),
