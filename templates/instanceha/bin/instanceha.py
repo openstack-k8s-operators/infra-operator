@@ -68,6 +68,7 @@ EVACUABLE_TAG = config["EVACUABLE_TAG"] if 'EVACUABLE_TAG' in config else "evacu
 TAGGED_IMAGES = config["TAGGED_IMAGES"] if 'TAGGED_IMAGES' in config else "true"
 TAGGED_FLAVORS = config["TAGGED_FLAVORS"] if 'TAGGED_FLAVORS' in config else "true"
 DELTA = int(config["DELTA"]) if 'DELTA' in config else 30
+DELAY = int(config["DELAY"]) if 'DELAY' in config else 0
 POLL = int(config["POLL"]) if 'POLL' in config else 45
 THRESHOLD = int(config["THRESHOLD"]) if 'THRESHOLD' in config else 50
 WORKERS = int(config["WORKERS"]) if 'WORKERS' in config else 4
@@ -181,6 +182,9 @@ def _host_evacuate(connection, host):
     if evacuables == []:
         logging.info("Nothing to evacuate")
         return True
+
+    # sleep for DELAY, this could be useful if nfs is in use and locks need to be released
+    time.sleep(DELAY)
 
     # if SMART_EVACUATION is 'True' (string) use a ThreadPoolExecutor to poll the evacuation status
     # otherwise use the old "fire and forget" approach
@@ -865,7 +869,7 @@ def main():
                         with concurrent.futures.ThreadPoolExecutor() as executor:
                             results = list(executor.map(lambda service: process_service(service, reserved_hosts, True), to_resume))
                         if not all(results):
-                            logging.warning('Some services failed to evacuate. Retrying in 30 seconds.')
+                            logging.warning('Some services failed to evacuate. Retrying in %s seconds.' % POLL)
 
                     else:
                         logging.info('InstanceHa DISABLE is true, not evacuating')

@@ -4,6 +4,7 @@ config:
   TAGGED_FLAVORS: "true"
   SMART_EVACUATION: "false"
   DELTA: "30"
+  DELAY: "0"
   POLL: "45"
   THRESHOLD: "50"
   WORKERS: "4"
