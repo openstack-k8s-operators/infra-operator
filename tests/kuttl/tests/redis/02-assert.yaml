@@ -22,14 +22,14 @@ status:
       reason: Ready
       status: "True"
       type: Ready
+    - message: Create service completed
+      reason: Ready
+      status: "True"
+      type: CreateServiceReady
     - message: Deployment completed
       reason: Ready
       status: "True"
       type: DeploymentReady
-    - message: Exposing service completed
-      reason: Ready
-      status: "True"
-      type: ExposeServiceReady
     - message: RoleBinding created
       reason: Ready
       status: "True"

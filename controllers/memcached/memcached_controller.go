@@ -167,7 +167,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// TLS cert secrets
 		condition.UnknownCondition(condition.TLSInputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
 		// endpoint for adoption redirect
-		condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
+		condition.UnknownCondition(condition.CreateServiceReadyCondition, condition.InitReason, condition.CreateServiceReadyInitMessage),
 		// configmap generation
 		condition.UnknownCondition(condition.ServiceConfigReadyCondition, condition.InitReason, condition.ServiceConfigReadyInitMessage),
 		// memcache pods ready
@@ -315,20 +315,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	commonsvc, err := commonservice.NewService(memcached.HeadlessService(instance), time.Duration(5)*time.Second, nil)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ExposeServiceReadyCondition,
+			condition.CreateServiceReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			condition.ExposeServiceReadyErrorMessage,
+			condition.CreateServiceReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
 	sres, serr := commonsvc.CreateOrPatch(ctx, helper)
 	if serr != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ExposeServiceReadyCondition,
+			condition.CreateServiceReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			condition.ExposeServiceReadyErrorMessage,
+			condition.CreateServiceReadyErrorMessage,
 			serr.Error()))
 		return sres, serr
 	}
@@ -339,7 +339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.ServerList = serverList
 	instance.Status.ServerListWithInet = serverListWithInet
 
-	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
+	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
 	// Statefulset for stable names
 	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance, hashOfHashes), time.Duration(5)*time.Second)

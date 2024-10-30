@@ -390,10 +390,10 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ExposeServiceReadyCondition,
+			condition.CreateServiceReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			condition.ExposeServiceReadyErrorMessage,
+			condition.CreateServiceReadyErrorMessage,
 			err.Error()))
 
 		return ctrl.Result{}, err
@@ -406,19 +406,19 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	ctrlResult, err := svc.CreateOrPatch(ctx, helper)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ExposeServiceReadyCondition,
+			condition.CreateServiceReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			condition.ExposeServiceReadyErrorMessage,
+			condition.CreateServiceReadyErrorMessage,
 			err.Error()))
 
 		return ctrlResult, err
 	} else if (ctrlResult != ctrl.Result{}) {
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ExposeServiceReadyCondition,
+			condition.CreateServiceReadyCondition,
 			condition.RequestedReason,
 			condition.SeverityInfo,
-			condition.ExposeServiceReadyRunningMessage))
+			condition.CreateServiceReadyRunningMessage))
 		return ctrlResult, nil
 	}
 
@@ -430,7 +430,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 
 	// create service - end
 
-	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
+	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
 	// Define a new Deployment object
 	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps)

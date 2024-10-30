@@ -150,7 +150,7 @@ var _ = Describe("DNSMasq controller", func() {
 			th.ExpectCondition(
 				dnsMasqName,
 				ConditionGetterFunc(DNSMasqConditionGetter),
-				condition.ExposeServiceReadyCondition,
+				condition.CreateServiceReadyCondition,
 				corev1.ConditionTrue,
 			)
 
