@@ -29,10 +29,10 @@ const (
 	// RedisContainerImage is the fall-back container image for Redis
 	RedisContainerImage = "quay.io/podified-antelope-centos9/openstack-redis:current-podified"
 
-        // CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
-        // omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
-        // Int32 is a 10 character + hyphen = 11
-        CrMaxLengthCorrection = 11
+	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
+	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+	// Int32 is a 10 character + hyphen = 11
+	CrMaxLengthCorrection = 11
 )
 
 // RedisSpec defines the desired state of Redis
@@ -73,6 +73,8 @@ type RedisStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:path=redises
+//+kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[0].status",description="Status"
+//+kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.conditions[0].message",description="Message"
 
 // Redis is the Schema for the redises API
 type Redis struct {
