@@ -54,6 +54,9 @@ type RedisSpecCore struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for Redis service and internal Redis replication
 	TLS tls.SimpleService `json:"tls,omitempty"`
+        // +kubebuilder:validation:Optional
+        // NodeSelector to target subset of worker nodes running this service
+        NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // RedisStatus defines the observed state of Redis
