@@ -71,6 +71,9 @@ rules:
   verbs:
   - get
   - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -90,6 +93,19 @@ rules:
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - frrk8s.metallb.io
+  resources:
+  - frrconfigurations
+  verbs:
+  - create
+  - delete
+  - deletecollection
   - get
   - list
   - patch
@@ -153,6 +169,32 @@ rules:
   - memcached.openstack.org
   resources:
   - memcacheds/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - bgpconfigurations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - bgpconfigurations/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - bgpconfigurations/status
   verbs:
   - get
   - patch

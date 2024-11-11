@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
@@ -69,6 +70,7 @@ func init() {
 	utilruntime.Must(instancehav1.AddToScheme(scheme))
 	utilruntime.Must(redisv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
+	utilruntime.Must(frrk8sv1.AddToScheme(scheme))
 	utilruntime.Must(k8s_networkv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
@@ -204,6 +206,15 @@ func main() {
 		Scheme:  mgr.GetScheme(),
 	}).SetupWithManager(context.Background(), mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPSet")
+		os.Exit(1)
+	}
+
+	if err = (&networkcontrollers.BGPConfigurationReconciler{
+		Client:  mgr.GetClient(),
+		Kclient: kclient,
+		Scheme:  mgr.GetScheme(),
+	}).SetupWithManager(context.Background(), mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "BGPConfiguration")
 		os.Exit(1)
 	}
 
