@@ -37,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
@@ -85,11 +87,25 @@ var _ = BeforeSuite(func() {
 		"github.com/rabbitmq/cluster-operator/v2", "../../go.mod", "config/crd/bases")
 	Expect(err).ShouldNot(HaveOccurred())
 
+	frrCRDs, err := test.GetCRDDirFromModule(
+		"github.com/metallb/frr-k8s", "../../go.mod", "config/crd/bases")
+	Expect(err).ShouldNot(HaveOccurred())
+
+	networkv1CRD, err := test.GetCRDDirFromModule(
+		"github.com/k8snetworkplumbingwg/network-attachment-definition-client", "../../go.mod", "artifacts/networks-crd.yaml")
+	Expect(err).ShouldNot(HaveOccurred())
+
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
 			rabbitmqv2CRDs,
+			frrCRDs,
+		},
+		CRDInstallOptions: envtest.CRDInstallOptions{
+			Paths: []string{
+				networkv1CRD,
+			},
 		},
 		ErrorIfCRDPathMissing: true,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
@@ -117,6 +133,10 @@ var _ = BeforeSuite(func() {
 	err = rabbitmqclusterv2.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = memcachedv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = k8s_networkv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = frrk8sv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	//+kubebuilder:scaffold:scheme
 
@@ -188,6 +208,13 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&network_ctrl.IPSetReconciler{
+		Client:  k8sManager.GetClient(),
+		Scheme:  k8sManager.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(context.Background(), k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&network_ctrl.BGPConfigurationReconciler{
 		Client:  k8sManager.GetClient(),
 		Scheme:  k8sManager.GetScheme(),
 		Kclient: kclient,

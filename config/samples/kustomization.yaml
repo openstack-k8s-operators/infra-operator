@@ -9,4 +9,5 @@ resources:
 - network_v1beta1_netconfig.yaml
 - network_v1beta1_ipset.yaml
 - network_v1beta1_reservation.yaml
+- network_v1beta1_bgpconfiguration.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
