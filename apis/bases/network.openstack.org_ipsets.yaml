@@ -195,7 +195,6 @@ spec:
                   - address
                   - dnsDomain
                   - network
-                  - serviceNetwork
                   - subnet
                   type: object
                 type: array
