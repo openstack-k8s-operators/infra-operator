@@ -83,6 +83,7 @@ type IPSetReservation struct {
 	// DNSDomain of the subnet
 	DNSDomain string `json:"dnsDomain"`
 
+	// +kubebuilder:validation:Optional
 	// ServiceNetwork mapping
 	ServiceNetwork ServiceNetNameStr `json:"serviceNetwork"`
 }
