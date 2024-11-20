@@ -82,7 +82,6 @@ func Deployment(
 					ServiceAccountName:            instance.RbacResourceName(),
 					Volumes:                       volumes,
 					TerminationGracePeriodSeconds: ptr.To[int64](0),
-					NodeSelector:                  instance.Spec.NodeSelector,
 					Containers: []corev1.Container{{
 						Name:    "instanceha",
 						Image:   containerImage,
@@ -110,6 +109,10 @@ func Deployment(
 				},
 			},
 		},
+	}
+
+	if instance.Spec.NodeSelector != nil {
+		dep.Spec.Template.Spec.NodeSelector = *instance.Spec.NodeSelector
 	}
 
 	return dep
