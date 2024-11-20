@@ -110,8 +110,8 @@ func StatefulSet(
 		},
 		corev1.LabelHostname,
 	)
-	if m.Spec.NodeSelector != nil && len(m.Spec.NodeSelector) > 0 {
-		sfs.Spec.Template.Spec.NodeSelector = m.Spec.NodeSelector
+	if m.Spec.NodeSelector != nil {
+		sfs.Spec.Template.Spec.NodeSelector = *m.Spec.NodeSelector
 	}
 
 	return sfs

@@ -28,7 +28,7 @@ const (
 
 	// InstanceHaContainerImage is the fall-back container image for InstanceHa
 	InstanceHaContainerImage = "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
-	OpenStackCloud          = "default"
+	OpenStackCloud           = "default"
 )
 
 // InstanceHaSpec defines the desired state of InstanceHa
@@ -38,10 +38,10 @@ type InstanceHaSpec struct {
 	// ContainerImage for the the InstanceHa container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
-        // +kubebuilder:validation:Required
-        // +kubebuilder:default="default"
-        // OpenStackClould is the name of the Cloud to use as per clouds.yaml (will be set to "default" if empty)
-        OpenStackCloud string `json:"openStackCloud"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:default="default"
+	// OpenStackClould is the name of the Cloud to use as per clouds.yaml (will be set to "default" if empty)
+	OpenStackCloud string `json:"openStackCloud"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=openstack-config
@@ -68,8 +68,8 @@ type InstanceHaSpec struct {
 	InstanceHaKdumpPort int32 `json:"instanceHaKdumpPort"`
 
 	// +kubebuilder:validation:Optional
-	// NodeSelector to target subset of worker nodes running control plane services (currently only applies to KeystoneAPI and PlacementAPI)
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	// NodeSelector to target subset of worker nodes running control plane services
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// NetworkAttachments is a list of NetworkAttachment resource names to expose
