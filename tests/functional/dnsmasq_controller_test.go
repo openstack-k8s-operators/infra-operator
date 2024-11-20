@@ -266,4 +266,110 @@ var _ = Describe("DNSMasq controller", func() {
 			})
 		})
 	})
+
+	When("A DNSMasq is created with nodeSelector", func() {
+		BeforeEach(func() {
+			spec := GetDefaultDNSMasqSpec()
+			spec["nodeSelector"] = map[string]interface{}{
+				"foo": "bar",
+			}
+			instance := CreateDNSMasq(namespace, spec)
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			dnsMasqServiceAccountName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+			dnsMasqRoleName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-role",
+			}
+			dnsMasqRoleBindingName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-rolebinding",
+			}
+			deploymentName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+
+			dnsDataCM = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "some-dnsdata",
+			}
+
+			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
+			})
+			cm := th.GetConfigMap(dnsDataCM)
+			cm.Labels = util.MergeStringMaps(cm.Labels, map[string]string{
+				"dnsmasqhosts": "dnsdata",
+			})
+			Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
+
+			DeferCleanup(th.DeleteConfigMap, dnsDataCM)
+			DeferCleanup(th.DeleteInstance, instance)
+			th.SimulateLoadBalancerServiceIP(deploymentName)
+		})
+
+		It("sets nodeSelector in resource specs", func() {
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"foo": "bar"}))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("updates nodeSelector in resource specs when changed", func() {
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"foo": "bar"}))
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				newNodeSelector := map[string]string{
+					"foo2": "bar2",
+				}
+				dnsmasq.Spec.NodeSelector = &newNodeSelector
+				g.Expect(k8sClient.Update(ctx, dnsmasq)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"foo2": "bar2"}))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("removes nodeSelector from resource specs when cleared", func() {
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"foo": "bar"}))
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				emptyNodeSelector := map[string]string{}
+				dnsmasq.Spec.NodeSelector = &emptyNodeSelector
+				g.Expect(k8sClient.Update(ctx, dnsmasq)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("removes nodeSelector from resource specs when nilled", func() {
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(Equal(map[string]string{"foo": "bar"}))
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				dnsmasq.Spec.NodeSelector = nil
+				g.Expect(k8sClient.Update(ctx, dnsmasq)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
 })

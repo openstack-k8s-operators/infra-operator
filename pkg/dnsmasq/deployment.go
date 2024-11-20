@@ -173,8 +173,8 @@ func Deployment(
 		},
 		corev1.LabelHostname,
 	)
-	if instance.Spec.NodeSelector != nil && len(instance.Spec.NodeSelector) > 0 {
-		deployment.Spec.Template.Spec.NodeSelector = instance.Spec.NodeSelector
+	if instance.Spec.NodeSelector != nil {
+		deployment.Spec.Template.Spec.NodeSelector = *instance.Spec.NodeSelector
 	}
 
 	return deployment

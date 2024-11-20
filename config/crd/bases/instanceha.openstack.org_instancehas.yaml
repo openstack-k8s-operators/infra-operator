@@ -77,8 +77,7 @@ spec:
                 additionalProperties:
                   type: string
                 description: NodeSelector to target subset of worker nodes running
-                  control plane services (currently only applies to KeystoneAPI and
-                  PlacementAPI)
+                  control plane services
                 type: object
               openStackCloud:
                 default: default

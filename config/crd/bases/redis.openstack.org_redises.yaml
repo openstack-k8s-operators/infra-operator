@@ -48,6 +48,12 @@ spec:
                 description: Name of the redis container image to run (will be set
                   to environmental default if empty)
                 type: string
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: NodeSelector to target subset of worker nodes running
+                  this service
+                type: object
               replicas:
                 default: 1
                 description: Size of the redis cluster
