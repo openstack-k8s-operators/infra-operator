@@ -17,6 +17,7 @@ func StatefulSet(
 	configHash string,
 ) *appsv1.StatefulSet {
 	matchls := map[string]string{
+		"app":                m.Name,
 		common.AppSelector:   m.Name,
 		"cr":                 m.Name,
 		common.OwnerSelector: "infra-operator",
