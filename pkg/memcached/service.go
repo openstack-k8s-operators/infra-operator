@@ -11,6 +11,7 @@ import (
 // HeadlessService exposes all memcached repliscas for a memcached CR
 func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 	labels := labels.GetLabels(m, "memcached", map[string]string{
+		"app":                m.GetName(),
 		common.OwnerSelector: "infra-operator",
 		"cr":                 m.GetName(),
 		common.AppSelector:   m.GetName(),
@@ -21,6 +22,7 @@ func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 		Labels:    labels,
 		Selector: map[string]string{
 			common.AppSelector: m.GetName(),
+			"app":              m.GetName(),
 		},
 		Ports: []corev1.ServicePort{
 			{Name: "memcached", Protocol: "TCP", Port: MemcachedPort},
