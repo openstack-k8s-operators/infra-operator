@@ -29,10 +29,10 @@ const (
 	// RedisContainerImage is the fall-back container image for Redis
 	RedisContainerImage = "quay.io/podified-antelope-centos9/openstack-redis:current-podified"
 
-        // CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
-        // omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
-        // Int32 is a 10 character + hyphen = 11
-        CrMaxLengthCorrection = 11
+	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
+	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+	// Int32 is a 10 character + hyphen = 11
+	CrMaxLengthCorrection = 11
 )
 
 // RedisSpec defines the desired state of Redis
@@ -54,6 +54,9 @@ type RedisSpecCore struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for Redis service and internal Redis replication
 	TLS tls.SimpleService `json:"tls,omitempty"`
+	// +kubebuilder:validation:Optional
+	// NodeSelector to target subset of worker nodes running this service
+	NodeSelector *map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // RedisStatus defines the observed state of Redis

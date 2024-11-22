@@ -141,5 +141,9 @@ func StatefulSet(
 		},
 	}
 
+	if r.Spec.NodeSelector != nil {
+		sts.Spec.Template.Spec.NodeSelector = *r.Spec.NodeSelector
+	}
+
 	return sts
 }
