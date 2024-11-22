@@ -123,6 +123,14 @@ rules:
   - patch
   - update
 - apiGroups:
+  - k8s.cni.cncf.io
+  resources:
+  - network-attachment-definitions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - memcached.openstack.org
   resources:
   - memcacheds
