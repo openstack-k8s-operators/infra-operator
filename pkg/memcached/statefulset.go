@@ -15,7 +15,7 @@ import (
 func StatefulSet(
 	m *memcachedv1.Memcached,
 	configHash string,
-) *appsv1.StatefulSet {
+) (*appsv1.StatefulSet, error) {
 	matchls := map[string]string{
 		"app":                m.Name,
 		common.AppSelector:   m.Name,
@@ -104,16 +104,18 @@ func StatefulSet(
 	// If possible two pods of the same service should not
 	// run on the same worker node. If this is not possible
 	// the get still created on the same worker node.
-	sfs.Spec.Template.Spec.Affinity = affinity.DistributePods(
+	var err error
+	sfs.Spec.Template.Spec.Affinity, err = affinity.DistributePods(
 		common.AppSelector,
 		[]string{
 			m.Name,
 		},
 		corev1.LabelHostname,
+		nil,
 	)
 	if m.Spec.NodeSelector != nil {
 		sfs.Spec.Template.Spec.NodeSelector = *m.Spec.NodeSelector
 	}
 
-	return sfs
+	return sfs, err
 }
