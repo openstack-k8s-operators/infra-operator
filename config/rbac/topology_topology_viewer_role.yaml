@@ -1,0 +1,27 @@
+# permissions for end users to view topologies.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: topology-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: infra-operator
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: topology-viewer-role
+rules:
+- apiGroups:
+  - topology.openstack.org
+  resources:
+  - topologies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - topology.openstack.org
+  resources:
+  - topologies/status
+  verbs:
+  - get
