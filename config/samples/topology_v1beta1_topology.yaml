@@ -1,0 +1,12 @@
+apiVersion: topology.openstack.org/v1beta1
+kind: Topology
+metadata:
+  labels:
+    app.kubernetes.io/name: topology
+    app.kubernetes.io/instance: topology-sample
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: infra-operator
+  name: topology-sample
+spec:
+  # TODO(user): Add fields here
