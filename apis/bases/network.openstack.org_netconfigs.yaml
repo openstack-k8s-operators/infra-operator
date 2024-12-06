@@ -3,8 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.11.1
-  creationTimestamp: null
+    controller-gen.kubebuilder.io/version: v0.14.0
   name: netconfigs.network.openstack.org
 spec:
   group: network.openstack.org
@@ -24,14 +23,19 @@ spec:
         description: NetConfig is the Schema for the netconfigs API
         properties:
           apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
@@ -65,9 +69,9 @@ spec:
                         description: Subnet definition
                         properties:
                           allocationRanges:
-                            description: AllocationRanges a list of AllocationRange
-                              for assignment. Allocation will start from first range,
-                              first address.
+                            description: |-
+                              AllocationRanges a list of AllocationRange for assignment. Allocation will start
+                              from first range, first address.
                             items:
                               description: AllocationRange definition
                               properties:
@@ -90,8 +94,8 @@ spec:
                               the DNSDomain of the Network
                             type: string
                           excludeAddresses:
-                            description: ExcludeAddresses a set of IPs that should
-                              be excluded from used as reservation, for both dynamic
+                            description: |-
+                              ExcludeAddresses a set of IPs that should be excluded from used as reservation, for both dynamic
                               and static via IPSet FixedIP parameter
                             items:
                               type: string
