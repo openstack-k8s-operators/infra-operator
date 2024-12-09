@@ -25,8 +25,8 @@ package v1beta1
 import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-        "k8s.io/apimachinery/pkg/runtime/schema"
-        "k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -91,21 +91,21 @@ var _ webhook.Validator = &Redis{}
 func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 	redislog.Info("validate create", "name", r.Name)
 
-        var allErrs field.ErrorList
-        var allWarn []string
+	var allErrs field.ErrorList
+	var allWarn []string
 
-        allErrs = common_webhook.ValidateDNS1123Label(
-                field.NewPath("metadata").Child("name"),
-                []string{r.Name},
-                CrMaxLengthCorrection) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+	allErrs = common_webhook.ValidateDNS1123Label(
+		field.NewPath("metadata").Child("name"),
+		[]string{r.Name},
+		CrMaxLengthCorrection) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 
-        if len(allErrs) != 0 {
-                return allWarn, apierrors.NewInvalid(
-                        schema.GroupKind{Group: "redis.openstack.org", Kind: "Redis"},
-                        r.Name, allErrs)
-        }
+	if len(allErrs) != 0 {
+		return allWarn, apierrors.NewInvalid(
+			schema.GroupKind{Group: "redis.openstack.org", Kind: "Redis"},
+			r.Name, allErrs)
+	}
 
-        return allWarn, nil
+	return allWarn, nil
 
 }
 

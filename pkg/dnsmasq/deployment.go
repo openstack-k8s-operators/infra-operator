@@ -45,7 +45,7 @@ func Deployment(
 	labels map[string]string,
 	annotations map[string]string,
 	cms *corev1.ConfigMapList,
-) *appsv1.Deployment {
+) (*appsv1.Deployment, error) {
 	terminationGracePeriodSeconds := int64(10)
 
 	livenessProbe := &corev1.Probe{
@@ -166,16 +166,18 @@ func Deployment(
 	// If possible two pods of the same service should not
 	// run on the same worker node. If this is not possible
 	// the get still created on the same worker node.
-	deployment.Spec.Template.Spec.Affinity = affinity.DistributePods(
+	var err error
+	deployment.Spec.Template.Spec.Affinity, err = affinity.DistributePods(
 		common.AppSelector,
 		[]string{
 			ServiceName,
 		},
 		corev1.LabelHostname,
+		nil,
 	)
 	if instance.Spec.NodeSelector != nil {
 		deployment.Spec.Template.Spec.NodeSelector = *instance.Spec.NodeSelector
 	}
 
-	return deployment
+	return deployment, err
 }

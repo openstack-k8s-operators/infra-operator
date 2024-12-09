@@ -433,7 +433,10 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
 	// Define a new Deployment object
-	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps)
+	deplDef, err := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps)
+	if err != nil {
+		return ctrlResult, err
+	}
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,

@@ -104,12 +104,13 @@ func StatefulSet(
 	// If possible two pods of the same service should not
 	// run on the same worker node. If this is not possible
 	// the get still created on the same worker node.
-	sfs.Spec.Template.Spec.Affinity = affinity.DistributePods(
+	sfs.Spec.Template.Spec.Affinity, _ = affinity.DistributePods(
 		common.AppSelector,
 		[]string{
 			m.Name,
 		},
 		corev1.LabelHostname,
+		nil,
 	)
 	if m.Spec.NodeSelector != nil {
 		sfs.Spec.Template.Spec.NodeSelector = *m.Spec.NodeSelector
