@@ -1,0 +1,12 @@
+apiVersion: network.openstack.org/v1beta1
+kind: BGPConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/name: bgpconfiguration
+    app.kubernetes.io/instance: bgpconfiguration-sample
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: infra-operator
+  name: bgpconfiguration-sample
+spec:
+  frrConfigurationNamespace: metallb-system

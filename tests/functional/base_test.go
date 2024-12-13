@@ -35,6 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -696,4 +698,173 @@ func GetMemcached(name types.NamespacedName) *memcachedv1.Memcached {
 		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
 	}, timeout, interval).Should(Succeed())
 	return instance
+}
+
+func CreateBGPConfiguration(namespace string, spec map[string]interface{}) client.Object {
+	name := uuid.New().String()
+
+	raw := map[string]interface{}{
+		"apiVersion": "network.openstack.org/v1beta1",
+		"kind":       "BGPConfiguration",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetBGPConfiguration(name types.NamespacedName) *networkv1.BGPConfiguration {
+	instance := &networkv1.BGPConfiguration{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func GetBGPConfigurationSpec(namespace string) map[string]interface{} {
+	if namespace != "" {
+		return map[string]interface{}{
+			"frrConfigurationNamespace": namespace,
+		}
+	}
+	return map[string]interface{}{}
+}
+
+func GetFRRConfiguration(name types.NamespacedName) *frrk8sv1.FRRConfiguration {
+	instance := &frrk8sv1.FRRConfiguration{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func CreateFRRConfiguration(name types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "frrk8s.metallb.io/v1beta1",
+		"kind":       "FRRConfiguration",
+		"metadata": map[string]interface{}{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
+	return map[string]interface{}{
+		"bgp": map[string]interface{}{
+			"routers": []map[string]interface{}{
+				{
+					"asn": 64999,
+					"neighbors": []map[string]interface{}{
+						{
+							"address":       "10.10.10.10",
+							"asn":           64999,
+							"disableMP":     false,
+							"holdTime":      "1m30s",
+							"keepaliveTime": "30s",
+							"password":      "foo",
+							"port":          179,
+							"toAdvertise": map[string]interface{}{
+								"allowed": map[string]interface{}{
+									"mode": "filtered",
+									"prefixes": []string{
+										"11.11.11.11/32",
+										"11.11.11.12/32",
+									},
+								},
+							},
+							"toReceive": map[string]interface{}{
+								"allowed": map[string]interface{}{
+									"mode": "filtered",
+								},
+							},
+						},
+					},
+					"prefixes": []string{
+						"11.11.11.11/32",
+						"11.11.11.12/32",
+					},
+				},
+			},
+		},
+		"nodeSelector": map[string]interface{}{
+			"matchLabels": map[string]interface{}{
+				"kubernetes.io/hostname": node,
+			},
+		},
+	}
+}
+
+func GetNADSpec() map[string]interface{} {
+	return map[string]interface{}{
+		"config": `{
+      "cniVersion": "0.3.1",
+      "name": "internalapi",
+      "type": "bridge",
+      "isDefaultGateway": true,
+      "isGateway": true,
+      "forceAddress": false,
+      "ipMasq": true,
+      "hairpinMode": true,
+      "bridge": "internalapi",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "172.17.0.0/24",
+        "range_start": "172.17.0.30",
+        "range_end": "172.17.0.70",
+        "gateway": "172.17.0.1"
+      }
+    }`,
+	}
+}
+
+func GetPodSpec(node string) map[string]interface{} {
+	return map[string]interface{}{
+		"containers": []map[string]interface{}{
+			{
+				"name":  "foo",
+				"image": "foo:latest",
+				"ports": []map[string]interface{}{
+					{
+						"containerPort": 80,
+					},
+				},
+			},
+		},
+		"terminationGracePeriodSeconds": 0,
+		"nodeName":                      node,
+	}
+}
+
+func GetPodAnnotation(namespace string) map[string]string {
+	return map[string]string{
+		k8s_networkv1.NetworkStatusAnnot: fmt.Sprintf(`[{
+    "name": "ovn-kubernetes",
+    "interface": "eth0",
+    "ips": [
+      "192.168.56.59"
+    ],
+    "mac": "0a:58:c0:a8:38:3b",
+    "default": true,
+    "dns": {}
+},{
+    "name": "%s/internalapi",
+    "interface": "internalapi",
+    "ips": [
+      "172.17.0.40"
+    ],
+    "mac": "de:39:07:a1:b5:6b",
+    "dns": {},
+    "gateway": [
+      "172.17.0.1"
+    ]
+}]`, namespace),
+		k8s_networkv1.NetworkAttachmentAnnot: fmt.Sprintf(`[{"name":"internalapi","namespace":"%s","interface":"internalapi","default-route":["172.17.0.1"]}]`, namespace),
+	}
 }

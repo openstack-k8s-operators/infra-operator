@@ -1,0 +1,31 @@
+# permissions for end users to edit bgpconfigurations.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: bgpconfiguration-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: infra-operator
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: bgpconfiguration-editor-role
+rules:
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - bgpconfigurations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - network.openstack.org
+  resources:
+  - bgpconfigurations/status
+  verbs:
+  - get
