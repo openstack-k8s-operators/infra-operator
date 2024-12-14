@@ -142,6 +142,7 @@ spec:
                               (https://tools.ietf.org/html/rfc1123) and requires `type` to be "ExternalName".
                             type: string
                           externalTrafficPolicy:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0ServiceExternalTrafficPolicy'
                             description: |-
                               externalTrafficPolicy describes how nodes distribute service traffic they
                               receive on one of the Service's "externally-facing" addresses (NodePorts,
@@ -156,8 +157,8 @@ spec:
                               within the cluster will always get "Cluster" semantics, but clients sending to
                               a NodePort from within the cluster may need to take traffic policy into account
                               when picking a node.
-                            type: string
                           internalTrafficPolicy:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0ServiceInternalTrafficPolicy'
                             description: |-
                               InternalTrafficPolicy describes how nodes distribute service traffic they
                               receive on the ClusterIP. If set to "Local", the proxy will assume that pods
@@ -165,8 +166,8 @@ spec:
                               dropping the traffic if there are no local endpoints. The default value,
                               "Cluster", uses the standard behavior of routing to all endpoints evenly
                               (possibly modified by topology and other features).
-                            type: string
                           ipFamilyPolicy:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0IPFamilyPolicy'
                             description: |-
                               IPFamilyPolicy represents the dual-stack-ness requested or required by
                               this Service. If there is no value provided, then this field will be set
@@ -176,7 +177,6 @@ spec:
                               (two IP families on dual-stack configured clusters, otherwise fail). The
                               ipFamilies and clusterIPs fields depend on the value of this field. This
                               field will be wiped when updating a service to type ExternalName.
-                            type: string
                           loadBalancerClass:
                             description: |-
                               loadBalancerClass is the class of the load balancer implementation this Service belongs to.
@@ -200,31 +200,19 @@ spec:
                               type: string
                             type: array
                           sessionAffinity:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0ServiceAffinity'
                             description: |-
                               Supports "ClientIP" and "None". Used to maintain session affinity.
                               Enable client IP based session affinity.
                               Must be ClientIP or None.
                               Defaults to None.
                               More info: https://kubernetes.io/docs/concepts/services-networking/service/#virtual-ips-and-service-proxies
-                            type: string
                           sessionAffinityConfig:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0SessionAffinityConfig'
                             description: sessionAffinityConfig contains the configurations
                               of session affinity.
-                            properties:
-                              clientIP:
-                                description: clientIP contains the configurations
-                                  of Client IP based session affinity.
-                                properties:
-                                  timeoutSeconds:
-                                    description: |-
-                                      timeoutSeconds specifies the seconds of ClientIP type session sticky time.
-                                      The value must be >0 && <=86400(for 1 day) if ServiceAffinity == "ClientIP".
-                                      Default value is 10800(for 3 hours).
-                                    format: int32
-                                    type: integer
-                                type: object
-                            type: object
                           type:
+                            $ref: '#/definitions/k8s.io~1api~1core~1v1~0ServiceType'
                             description: |-
                               type determines how the Service is exposed. Defaults to ClusterIP. Valid
                               options are ExternalName, ClusterIP, NodePort, and LoadBalancer.
@@ -242,7 +230,6 @@ spec:
                               "ExternalName" aliases this service to the specified externalName.
                               Several other fields do not apply to ExternalName services.
                               More info: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
-                            type: string
                         type: object
                     type: object
                 type: object
@@ -286,8 +273,8 @@ spec:
                         For conditions where Status=Unknown or Status=True the Severity should be SeverityNone.
                       type: string
                     status:
+                      $ref: '#/definitions/k8s.io~1api~1core~1v1~0ConditionStatus'
                       description: Status of the condition, one of True, False, Unknown.
-                      type: string
                     type:
                       description: Type of condition in CamelCase.
                       type: string
