@@ -18,6 +18,11 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: BGPConfiguration is the Schema for the bgpconfigurations API
+      displayName: BGPConfiguration
+      kind: BGPConfiguration
+      name: bgpconfigurations.network.openstack.org
+      version: v1beta1
     - description: DNSData is the Schema for the dnsdata API
       displayName: DNSData
       kind: DNSData
