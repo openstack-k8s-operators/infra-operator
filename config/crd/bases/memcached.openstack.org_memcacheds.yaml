@@ -114,8 +114,8 @@ spec:
                         For conditions where Status=Unknown or Status=True the Severity should be SeverityNone.
                       type: string
                     status:
+                      $ref: '#/definitions/k8s.io~1api~1core~1v1~0ConditionStatus'
                       description: Status of the condition, one of True, False, Unknown.
-                      type: string
                     type:
                       description: Type of condition in CamelCase.
                       type: string
