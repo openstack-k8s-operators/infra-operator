@@ -5,6 +5,7 @@ import (
 
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/clusterdns"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -61,6 +62,7 @@ func StatefulSet(
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
 	}
 	name := r.Name + "-" + "redis"
+	clusterDomain := clusterdns.GetDNSClusterDomain()
 
 	commonEnvVars := []corev1.EnvVar{{
 		Name:  "KOLLA_CONFIG_STRATEGY",
@@ -69,8 +71,7 @@ func StatefulSet(
 		Name: "SVC_FQDN",
 		// https://github.com/kubernetes/dns/blob/master/docs/specification.md
 		// Headless services only publish dns entries that include cluster domain.
-		// For the time being, assume this is .cluster.local
-		Value: name + "." + r.GetNamespace() + ".svc.cluster.local",
+		Value: name + "." + r.GetNamespace() + ".svc." + clusterDomain,
 	}, {
 		Name:  "CONFIG_HASH",
 		Value: configHash,
