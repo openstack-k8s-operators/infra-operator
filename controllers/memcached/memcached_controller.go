@@ -394,6 +394,8 @@ func (r *Reconciler) generateConfigMaps(
 		"memcachedTLSListen":  memcachedTLSListen,
 		"memcachedTLSOptions": memcachedTLSOptions,
 		"memcachedPort":       memcachedPort,
+		"memcachedCacheSize":  instance.Spec.CacheSize,
+		"memcachedMaxConn":    instance.Spec.MaxConn,
 	}
 
 	cms := []util.Template{

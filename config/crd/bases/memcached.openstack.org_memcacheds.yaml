@@ -48,10 +48,20 @@ spec:
           spec:
             description: MemcachedSpec defines the desired state of Memcached
             properties:
+              cacheSize:
+                default: 9932
+                description: Maximum Memcached cache size in MB
+                format: int32
+                type: integer
               containerImage:
                 description: Name of the memcached container image to run (will be
                   set to environmental default if empty)
                 type: string
+              maxConn:
+                default: 8192
+                description: Maximum number of connections accepted by Memcached
+                format: int32
+                type: integer
               nodeSelector:
                 additionalProperties:
                   type: string
