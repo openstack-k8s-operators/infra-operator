@@ -60,6 +60,16 @@ type MemcachedSpecCore struct {
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for memcached service
 	TLS tls.SimpleService `json:"tls,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=9932
+	// Maximum Memcached cache size in MB
+	CacheSize int32 `json:"cacheSize"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=8192
+	// Maximum number of connections accepted by Memcached
+	MaxConn int32 `json:"maxConn"`
 }
 
 // MemcachedStatus defines the observed state of Memcached
