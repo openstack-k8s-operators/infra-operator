@@ -383,6 +383,12 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 					Port:       dnsmasq.DNSPort,
 					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: dnsmasq.DNSTargetPort},
 				},
+				{
+					Name:       dnsmasq.ServiceName + "-tcp",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       dnsmasq.DNSPort,
+					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: dnsmasq.DNSTargetPort},
+				},
 			},
 		}),
 		5,
