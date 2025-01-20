@@ -34,7 +34,6 @@ const (
 // InstanceHaSpec defines the desired state of InstanceHa
 type InstanceHaSpec struct {
 	// +kubebuilder:validation:Required
-	// +kubebuilder:default="quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
 	// ContainerImage for the the InstanceHa container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
