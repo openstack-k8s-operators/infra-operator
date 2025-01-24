@@ -353,7 +353,6 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 	// Get a list of pods which are in the same namespace as the ctlplane
 	// to verify if a FRRConfiguration needs to be created for.
 	podList := &corev1.PodList{}
-
 	listOpts := []client.ListOption{
 		client.InNamespace(instance.Namespace),
 	}
@@ -367,18 +366,19 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 		return ctrl.Result{}, err
 	}
 
+	// get all frrconfigs
+	frrConfigList := &frrk8sv1.FRRConfigurationList{}
+	listOpts = []client.ListOption{
+		client.InNamespace(instance.Spec.FRRConfigurationNamespace), // defaults to metallb-system
+	}
+	if err := r.Client.List(ctx, frrConfigList, listOpts...); err != nil {
+		return ctrl.Result{}, fmt.Errorf("Unable to retrieve FRRConfigurationList %w", err)
+	}
+
 	// get all frr configs for the nodes pods are scheduled on
 	groupLabel := labels.GetGroupLabel("bgpconfiguration")
 	frrNodeConfigs := map[string]frrk8sv1.FRRConfiguration{}
 	for _, nodeName := range bgp.GetNodesRunningPods(podNetworkDetailList) {
-		frrConfigList := &frrk8sv1.FRRConfigurationList{}
-		listOpts := []client.ListOption{
-			client.InNamespace(instance.Spec.FRRConfigurationNamespace), // defaults to metallb-system
-		}
-		if err := r.Client.List(ctx, frrConfigList, listOpts...); err != nil {
-			return ctrl.Result{}, fmt.Errorf("Unable to retrieve FRRConfigurationList %w", err)
-		}
-
 		var nodeSelector metav1.LabelSelector
 
 		// validate if a nodeSelector is configured for the nodeName
@@ -405,23 +405,7 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 		for _, cfg := range frrConfigList.Items {
 			frrLabels := cfg.GetLabels()
 			// skip checking our own managed FRRConfigurations,
-			// but validate if the FRRConfiguration is still needed,
-			// or the pod was deleted/completed/failed/unknown
 			if _, ok := frrLabels[labels.GetOwnerNameLabelSelector(labels.GetGroupLabel("bgpconfiguration"))]; ok {
-				if podName, ok := frrLabels[groupLabel+"/pod-name"]; ok {
-					f := func(p bgp.PodDetail) bool {
-						return p.Name == podName && p.Namespace == instance.Namespace
-					}
-					idx := slices.IndexFunc(podNetworkDetailList, f)
-					if idx < 0 {
-						// There is no pod in the namespace corrsponding to the FRRConfiguration, delete it
-						if err := r.Client.Delete(ctx, &cfg); err != nil && k8s_errors.IsNotFound(err) {
-							return ctrl.Result{}, fmt.Errorf("Unable to delete FRRConfiguration %w", err)
-						}
-						Log.Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown , deleted FRRConfiguration %s", podName, cfg.Name))
-					}
-				}
-				// skip our own managed FRRConfigurations
 				continue
 			}
 			if equality.Semantic.DeepEqual(cfg.Spec.NodeSelector, nodeSelector) {
@@ -455,6 +439,27 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 		}
 	}
 
+	// delete our managed FRRConfigurations where there is no longer a pod in podNetworkDetailList
+	// because the pod was deleted/completed/failed/unknown
+	for _, cfg := range frrConfigList.Items {
+		frrLabels := cfg.GetLabels()
+		if _, ok := frrLabels[labels.GetOwnerNameLabelSelector(labels.GetGroupLabel("bgpconfiguration"))]; ok {
+			if podName, ok := frrLabels[groupLabel+"/pod-name"]; ok {
+				f := func(p bgp.PodDetail) bool {
+					return p.Name == podName && p.Namespace == instance.Namespace
+				}
+				idx := slices.IndexFunc(podNetworkDetailList, f)
+				if idx < 0 {
+					// There is no pod in the namespace corrsponding to the FRRConfiguration, delete it
+					if err := r.Client.Delete(ctx, &cfg); err != nil && k8s_errors.IsNotFound(err) {
+						return ctrl.Result{}, fmt.Errorf("Unable to delete FRRConfiguration %w", err)
+					}
+					Log.Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown , deleted FRRConfiguration %s", podName, cfg.Name))
+				}
+			}
+		}
+	}
+
 	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
 }
@@ -474,6 +479,7 @@ func getPodNetworkDetails(
 		for _, pod := range pods.Items {
 			// skip pods which are in deletion to make sure its FRRConfiguration gets deleted
 			if !pod.DeletionTimestamp.IsZero() {
+				Log.Info(fmt.Sprintf("Skipping pod as its in deletion with DeletionTimestamp set: %s", pod.Name))
 				continue
 			}
 			// skip pods which are not in Running phase (deleted/completed/failed/unknown)
