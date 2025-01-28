@@ -59,7 +59,7 @@ type MemcachedSpecCore struct {
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for memcached service
-	TLS tls.SimpleService `json:"tls,omitempty"`
+	TLS TLSSection `json:"tls,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=9932
@@ -70,6 +70,21 @@ type MemcachedSpecCore struct {
 	// +kubebuilder:default=8192
 	// Maximum number of connections accepted by Memcached
 	MaxConn int32 `json:"maxConn"`
+}
+
+// TLSSection
+type TLSSection struct {
+	tls.SimpleService `json:",inline"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum="None";"Request";"Require"
+	// +kubebuilder:default="None"
+	// Used to enforce client side tls cert validation
+	SslVerifyMode string `json:"sslVerifyMode"`
+
+	// +kubebuilder:validation:Optional
+	// Name of the secret containing the cert used to perform mtls auth
+	AuthCertSecret string `json:"authCertSecret"`
 }
 
 // MemcachedStatus defines the observed state of Memcached
