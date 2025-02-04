@@ -21,6 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
@@ -179,9 +180,89 @@ var _ = Describe("BGPConfiguration controller", func() {
 		})
 	})
 
+	When("a pod gets re-created on another node", func() {
+		var podFrrNameList []types.NamespacedName
+		var podNameList []types.NamespacedName
+
+		BeforeEach(func() {
+			metallbNS := th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			// create a FRR configuration for 2 nodes
+			meallbFRRCfgWorker0 := CreateFRRConfiguration(
+				types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"},
+				GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfgWorker0).To(Not(BeNil()))
+			meallbFRRCfgWorker1 := CreateFRRConfiguration(
+				types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-1"},
+				GetMetalLBFRRConfigurationSpec("worker-1"))
+			Expect(meallbFRRCfgWorker1).To(Not(BeNil()))
+
+			// create a nad config with gateway
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podNameList = []types.NamespacedName{
+				{Namespace: namespace, Name: "foo"},
+				{Namespace: namespace, Name: "bar"},
+			}
+
+			for _, podName := range podNameList {
+				// create pod with NAD annotation
+				th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+				th.SimulatePodPhaseRunning(podName)
+
+				podFrrName := types.NamespacedName{
+					Name:      podName.Namespace + "-" + podName.Name,
+					Namespace: metallbNS.Name,
+				}
+				podFrrNameList = append(podFrrNameList, podFrrName)
+
+				Eventually(func(g Gomega) {
+					frr := GetFRRConfiguration(podFrrName)
+					g.Expect(frr).To(Not(BeNil()))
+				}, timeout, interval).Should(Succeed())
+			}
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfgWorker0)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfgWorker1)
+		})
+
+		It("should re-create/update the FRRConfiguration with the new nodeselector", func() {
+			// delete pod foo
+			pod := th.GetPod(podNameList[0])
+			Expect(pod).To(Not(BeNil()))
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Delete(ctx, pod)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// validate that the corresponding frr cfg is gone
+			frr := &frrk8sv1.FRRConfiguration{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, podFrrNameList[0], frr)).Should(Not(Succeed()))
+			}, timeout, interval).Should(Succeed())
+
+			// re-create pod on different node
+			th.CreatePod(podNameList[0], GetPodAnnotation(namespace), GetPodSpec("worker-1"))
+			th.SimulatePodPhaseRunning(podNameList[0])
+
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(podFrrNameList[0])
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.NodeSelector.MatchLabels).Should(BeEquivalentTo(
+					map[string]string{
+						corev1.LabelHostname: "worker-1",
+					}))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("a pod with NAD gets deleted", func() {
-		var podFrrName types.NamespacedName
-		var podName types.NamespacedName
+		var podFrrNameList []types.NamespacedName
+		var podNameList []types.NamespacedName
 
 		BeforeEach(func() {
 			metallbNS := th.CreateNamespace(frrCfgNamespace + "-" + namespace)
@@ -197,32 +278,65 @@ var _ = Describe("BGPConfiguration controller", func() {
 			bgpcfgName.Name = bgpcfg.GetName()
 			bgpcfgName.Namespace = bgpcfg.GetNamespace()
 
-			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
-			// create pod with NAD annotation
-			th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
-			th.SimulatePodPhaseRunning(podName)
+			podNameList = []types.NamespacedName{
+				{Namespace: namespace, Name: "foo"},
+				{Namespace: namespace, Name: "bar"},
+			}
 
-			podFrrName.Name = podName.Namespace + "-" + podName.Name
-			podFrrName.Namespace = metallbNS.Name
+			for _, podName := range podNameList {
+				// create pod with NAD annotation
+				th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+				th.SimulatePodPhaseRunning(podName)
+
+				podFrrName := types.NamespacedName{
+					Name:      podName.Namespace + "-" + podName.Name,
+					Namespace: metallbNS.Name,
+				}
+				podFrrNameList = append(podFrrNameList, podFrrName)
+
+				Eventually(func(g Gomega) {
+					frr := GetFRRConfiguration(podFrrName)
+					g.Expect(frr).To(Not(BeNil()))
+				}, timeout, interval).Should(Succeed())
+			}
 
 			DeferCleanup(th.DeleteInstance, bgpcfg)
 			DeferCleanup(th.DeleteInstance, nad)
 			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
 		})
 
-		It("should delete the FRRConfiguration for the pod", func() {
-			// delete the pod
-			pod := th.GetPod(podName)
+		It("should delete the FRRConfiguration when on pod gets deleted", func() {
+			// delete pod foo
+			pod := th.GetPod(podNameList[0])
 			Expect(pod).To(Not(BeNil()))
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Delete(ctx, pod)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			// validate that the frr cfg is gone
+			// validate that the corresponding frr cfg is gone
 			frr := &frrk8sv1.FRRConfiguration{}
 			Eventually(func(g Gomega) {
-				g.Expect(k8sClient.Get(ctx, podFrrName, frr)).Should(Not(Succeed()))
+				g.Expect(k8sClient.Get(ctx, podFrrNameList[0], frr)).Should(Not(Succeed()))
 			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should delete all FRRConfiguration when all pod gets deleted", func() {
+			// delete all pod
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.DeleteAllOf(
+					ctx,
+					&corev1.Pod{},
+					client.InNamespace(podNameList[0].Namespace),
+				)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			for idx := range podNameList {
+				// validate that the frr cfgs are gone
+				frr := &frrk8sv1.FRRConfiguration{}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, podFrrNameList[idx], frr)).Should(Not(Succeed()))
+				}, timeout, interval).Should(Succeed())
+			}
 		})
 	})
 })
