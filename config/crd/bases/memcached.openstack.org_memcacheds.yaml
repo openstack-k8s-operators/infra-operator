@@ -78,12 +78,24 @@ spec:
               tls:
                 description: TLS settings for memcached service
                 properties:
+                  authCertSecret:
+                    description: Name of the secret containing the cert used to perform
+                      mtls auth
+                    type: string
                   caBundleSecretName:
                     description: CaBundleSecretName - holding the CA certs in a pre-created
                       bundle file
                     type: string
                   secretName:
                     description: SecretName - holding the cert, key for the service
+                    type: string
+                  sslVerifyMode:
+                    default: None
+                    description: Used to enforce client side tls cert validation
+                    enum:
+                    - None
+                    - Request
+                    - Require
                     type: string
                 type: object
             required:

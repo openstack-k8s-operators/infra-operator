@@ -382,6 +382,15 @@ func (r *Reconciler) generateConfigMaps(
 			"-o ssl_chain_cert=/etc/pki/tls/certs/memcached.crt " +
 			"-o ssl_key=/etc/pki/tls/private/memcached.key " +
 			"-o ssl_ca_cert=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+
+		if instance.Spec.TLS.SslVerifyMode == "Request" {
+			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_verify_mode=1"
+		} else if instance.Spec.TLS.SslVerifyMode == "Require" {
+			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_verify_mode=2"
+		} else {
+			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_verify_mode=0"
+		}
+
 		memcachedPort = fmt.Sprint(memcached.MemcachedTLSPort)
 		instance.Status.TLSSupport = true
 	} else {
