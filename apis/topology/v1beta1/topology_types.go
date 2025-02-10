@@ -18,12 +18,17 @@ package v1beta1
 
 import (
 	"context"
+	"fmt"
+
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	corev1 "k8s.io/api/core/v1"
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // TopologySpec defines the desired state of Topology
@@ -47,7 +52,7 @@ type TopologySpec struct {
 type Topology struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec   TopologySpec   `json:"spec,omitempty"`
+	Spec              TopologySpec `json:"spec,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -61,6 +66,22 @@ type TopologyList struct {
 
 func init() {
 	SchemeBuilder.Register(&Topology{}, &TopologyList{})
+}
+
+// TopoRef - it models a Topology reference and it can be included in the
+// service operators API. It is used to retrieve the referenced Topology
+type TopoRef struct {
+	// +kubebuilder:validation:Optional
+	// Name - The Topology CR name that the Service references
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Optional
+	// Namespace - The Namespace to fetch the Topology CR referenced
+	// NOTE: Namespace currently points by default to the same namespace where
+	// the Service is deployed. Customizing the namespace is not supported and
+	// webhooks prevent editing this field to a value different from the
+	// current project
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // GetTopologyByName - a function exposed to the service operators
@@ -88,10 +109,105 @@ func GetTopologyByName(
 
 // ValidateTopologyNamespace - returns a field.Error when the Service
 // references a Topoology deployed on a different namespace
-func ValidateTopologyNamespace(refNs string, basePath field.Path, validNs string) (*field.Error) {
-	if refNs != "" &&  refNs != validNs {
+func ValidateTopologyNamespace(refNs string, basePath field.Path, validNs string) *field.Error {
+	if refNs != "" && refNs != validNs {
 		topologyNamespace := basePath.Child("topology").Key("namespace")
 		return field.Invalid(topologyNamespace, "namespace", "Customizing namespace field is not supported")
 	}
 	return nil
+}
+
+// EnsureTopologyRef - retrieve the Topology CR referenced and add a finalizer
+func EnsureTopologyRef(
+	ctx context.Context,
+	h *helper.Helper,
+	topologyRef *TopoRef,
+	finalizer string,
+	defaultLabelSelector *metav1.LabelSelector,
+) (*Topology, string, error) {
+
+	var err error
+	var hash string
+
+	// no Topology is passed at all or it is missing some data
+	if topologyRef == nil || (topologyRef.Name == "" || topologyRef.Namespace == "") {
+		return nil, "", fmt.Errorf("No valid TopologyRef input passed")
+	}
+
+	topology, hash, err := GetTopologyByName(
+		ctx,
+		h,
+		topologyRef.Name,
+		topologyRef.Namespace,
+	)
+	if err != nil {
+		return topology, hash, err
+	}
+
+	// Add finalizer (if not present) to the resource consumed by the Service
+	if controllerutil.AddFinalizer(topology, fmt.Sprintf("%s-%s", h.GetFinalizer(), finalizer)) {
+		if err := h.GetClient().Update(ctx, topology); err != nil {
+			return topology, hash, err
+		}
+	}
+
+	if defaultLabelSelector != nil {
+		// Set default LabelSelector on topologyConstraints if not set, similar to cluster level default:
+		// https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/#cluster-level-default-constraints
+		topology = topology.DeepCopy()
+
+		topologyConstraints := topology.Spec.TopologySpreadConstraints
+		if topologyConstraints != nil {
+			for i := 0; i < len(*topologyConstraints); i++ {
+				current := &(*topologyConstraints)[i]
+				if current.LabelSelector == nil {
+					current.LabelSelector = defaultLabelSelector
+				}
+			}
+		}
+
+		hash, err = util.ObjectHash(topology.Spec)
+		if err != nil {
+			return topology, hash, err
+		}
+	}
+
+	return topology, hash, nil
+}
+
+// EnsureDeletedTopologyRef - remove the finalizer (passed as input) from the
+// referenced topology CR
+func EnsureDeletedTopologyRef(
+	ctx context.Context,
+	h *helper.Helper,
+	topologyRef *TopoRef,
+	finalizer string,
+) (ctrl.Result, error) {
+
+	// no Topology is passed at all or some data is missing
+	if topologyRef == nil || (topologyRef.Name == "" || topologyRef.Namespace == "") {
+		return ctrl.Result{}, nil
+	}
+
+	// Remove the finalizer from the Topology CR
+	topology, _, err := GetTopologyByName(
+		ctx,
+		h,
+		topologyRef.Name,
+		topologyRef.Namespace,
+	)
+
+	if err != nil && !k8s_errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	if !k8s_errors.IsNotFound(err) {
+		if controllerutil.RemoveFinalizer(topology, fmt.Sprintf("%s-%s", h.GetFinalizer(), finalizer)) {
+			err = h.GetClient().Update(ctx, topology)
+			if err != nil && !k8s_errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			util.LogForObject(h, "Removed finalizer from Topology", topology)
+		}
+	}
+	return ctrl.Result{}, nil
 }
