@@ -8,7 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// HeadlessService exposes all memcached repliscas for a memcached CR
+// HeadlessService exposes all memcached replicas for a memcached CR
 func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 	labels := labels.GetLabels(m, "memcached", map[string]string{
 		"app":                m.GetName(),
@@ -16,6 +16,16 @@ func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 		"cr":                 m.GetName(),
 		common.AppSelector:   m.GetName(),
 	})
+
+	ports := []corev1.ServicePort{
+		{Name: "memcached-tls", Protocol: "TCP", Port: MemcachedTLSPort},
+		{Name: "memcached", Protocol: "TCP", Port: MemcachedPort},
+	}
+
+	if m.Spec.TLS.MTLS.SslVerifyMode == "Require" {
+		ports = []corev1.ServicePort{{Name: "memcached-tls", Protocol: "TCP", Port: MemcachedTLSPort}}
+	}
+
 	details := &service.GenericServiceDetails{
 		Name:      m.GetName(),
 		Namespace: m.GetNamespace(),
@@ -24,10 +34,7 @@ func HeadlessService(m *memcachedv1.Memcached) *corev1.Service {
 			common.AppSelector: m.GetName(),
 			"app":              m.GetName(),
 		},
-		Ports: []corev1.ServicePort{
-			{Name: "memcached", Protocol: "TCP", Port: MemcachedPort},
-			{Name: "memcached-tls", Protocol: "TCP", Port: MemcachedTLSPort},
-		},
+		Ports:     ports,
 		ClusterIP: "None",
 	}
 
