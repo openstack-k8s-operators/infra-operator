@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
 )
 
@@ -90,22 +91,31 @@ var _ webhook.Validator = &Redis{}
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 	redislog.Info("validate create", "name", r.Name)
+	var allErrs field.ErrorList
+	var allWarn []string
+	basePath := field.NewPath("spec")
 
-        var allErrs field.ErrorList
-        var allWarn []string
+	// When a TopologyRef CR is referenced, fail if a different Namespace is
+	// referenced because is not supported
+	if r.Spec.TopologyRef != nil {
+		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
+	allErrs = common_webhook.ValidateDNS1123Label(
+		field.NewPath("metadata").Child("name"),
+		[]string{r.Name},
+		CrMaxLengthCorrection,
+	) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 
-        allErrs = common_webhook.ValidateDNS1123Label(
-                field.NewPath("metadata").Child("name"),
-                []string{r.Name},
-                CrMaxLengthCorrection) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+	if len(allErrs) != 0 {
+		return allWarn, apierrors.NewInvalid(
+			schema.GroupKind{Group: "redis.openstack.org", Kind: "Redis"},
+			r.Name, allErrs,
+		)
+	}
 
-        if len(allErrs) != 0 {
-                return allWarn, apierrors.NewInvalid(
-                        schema.GroupKind{Group: "redis.openstack.org", Kind: "Redis"},
-                        r.Name, allErrs)
-        }
-
-        return allWarn, nil
+	return allWarn, nil
 
 }
 
@@ -113,8 +123,18 @@ func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 func (r *Redis) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	redislog.Info("validate update", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object update.
-	return nil, nil
+	var allErrs field.ErrorList
+	var allWarn []string
+	basePath := field.NewPath("spec")
+
+	// When a TopologyRef CR is referenced, fail if a different Namespace is
+	// referenced because is not supported
+	if r.Spec.TopologyRef != nil {
+		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
+	return allWarn, nil
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type

@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"time"
 
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	configmap "github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	commonstatefulset "github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
@@ -45,26 +47,28 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/go-logr/logr"
+	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
+	memcached "github.com/openstack-k8s-operators/infra-operator/pkg/memcached"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
-	memcached "github.com/openstack-k8s-operators/infra-operator/pkg/memcached"
 )
 
 // fields to index to reconcile on CR change
 const (
 	serviceSecretNameField = ".spec.tls.genericService.SecretName"
 	caSecretNameField      = ".spec.tls.ca.caBundleSecretName"
+	topologyField          = ".spec.topologyRef.Name"
 )
 
 var (
 	allWatchFields = []string{
 		serviceSecretNameField,
 		caSecretNameField,
+		topologyField,
 	}
 )
 
@@ -100,6 +104,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile - Memcached
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -193,6 +198,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	if instance.Status.ServerListWithInet == nil {
 		instance.Status.ServerListWithInet = []string{}
+	}
+
+	// Init Topology condition if there's a reference
+	if instance.Spec.TopologyRef != nil {
+		c := condition.UnknownCondition(condition.TopologyReadyCondition, condition.InitReason, condition.TopologyReadyInitMessage)
+		cl.Set(c)
+	}
+
+	// Handle service delete
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, helper)
 	}
 
 	//
@@ -383,8 +399,46 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
+	//
+	// Handle Topology
+	//
+	lastTopologyRef := topologyv1.TopoRef{
+		Name:      instance.Status.LastAppliedTopology,
+		Namespace: instance.Namespace,
+	}
+	topology, err := ensureTopology(
+		ctx,
+		helper,
+		instance.Spec.TopologyRef,
+		&lastTopologyRef,
+		instance.Name,
+		"memcached",
+	)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.TopologyReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.TopologyReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("waiting for Topology requirements: %w", err)
+	}
+
+	// If TopologyRef is present and ensureHeatTopology returned a valid
+	// topology object, set .Status.LastAppliedTopology to the referenced one
+	// and mark the condition as true
+	if instance.Spec.TopologyRef != nil {
+		// update the Status with the last retrieved Topology name
+		instance.Status.LastAppliedTopology = instance.Spec.TopologyRef.Name
+		// update the TopologyRef associated condition
+		instance.Status.Conditions.MarkTrue(condition.TopologyReadyCondition, condition.TopologyReadyMessage)
+	} else {
+		// remove LastAppliedTopology from the .Status
+		instance.Status.LastAppliedTopology = ""
+	}
 	// Statefulset for stable names
-	commonstatefulset := commonstatefulset.NewStatefulSet(memcached.StatefulSet(instance, hashOfHashes), time.Duration(5)*time.Second)
+	commonstatefulset := commonstatefulset.NewStatefulSet(
+		memcached.StatefulSet(instance, hashOfHashes, topology), time.Duration(5)*time.Second)
 	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
@@ -500,6 +554,18 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
+	// index topologyField
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &memcachedv1.Memcached{}, topologyField, func(rawObj client.Object) []string {
+		// Extract the topology name from the spec, if one is provided
+		cr := rawObj.(*memcachedv1.Memcached)
+		if cr.Spec.TopologyRef == nil {
+			return nil
+		}
+		return []string{cr.Spec.TopologyRef.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&memcachedv1.Memcached{}).
 		Owns(&appsv1.StatefulSet{}).
@@ -512,6 +578,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
+		Watches(&topologyv1.Topology{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
 
@@ -550,6 +619,30 @@ func (r *Reconciler) findObjectsForSrc(_ context.Context, src client.Object) []r
 	return requests
 }
 
+func (r *Reconciler) reconcileDelete(ctx context.Context, instance *memcachedv1.Memcached, helper *helper.Helper) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service delete")
+
+	// Remove finalizer on the Topology CR
+	if ctrlResult, err := topologyv1.EnsureDeletedTopologyRef(
+		ctx,
+		helper,
+		&topologyv1.TopoRef{
+			Name:      instance.Status.LastAppliedTopology,
+			Namespace: instance.Namespace,
+		},
+		instance.Name,
+	); err != nil {
+		return ctrlResult, err
+	}
+
+	// Service is deleted so remove the finalizer.
+	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
+	Log.Info("Reconciled Service delete successfully")
+
+	return ctrl.Result{}, nil
+}
+
 // GetServerLists returns list of memcached server without/with inet prefix
 func (r *Reconciler) GetServerLists(
 	instance *memcachedv1.Memcached,
@@ -578,4 +671,62 @@ func (r *Reconciler) GetServerLists(
 	}
 
 	return serverList, serverListWithInet
+}
+
+// ensureTopology - when a Topology CR is referenced, remove the
+// finalizer from a previous referenced Topology (if any), and retrieve the
+// newly referenced topology object
+func ensureTopology(
+	ctx context.Context,
+	helper *helper.Helper,
+	tpRef *topologyv1.TopoRef,
+	lastAppliedTopology *topologyv1.TopoRef,
+	finalizer string,
+	selector string,
+) (*topologyv1.Topology, error) {
+
+	var podTopology *topologyv1.Topology
+	var err error
+
+	// Remove (if present) the finalizer from a previously referenced topology
+	//
+	// 1. a topology reference is removed (tpRef == nil) from the Service Component
+	//    subCR and the finalizer should be deleted from the last applied topology
+	//    (lastAppliedTopology != "")
+	// 2. a topology reference is updated in the Service Component CR (tpRef != nil)
+	//    and the finalizer should be removed from the previously
+	//    referenced topology (tpRef.Name != lastAppliedTopology.Name)
+	if (tpRef == nil && lastAppliedTopology.Name != "") ||
+		(tpRef != nil && tpRef.Name != lastAppliedTopology.Name) {
+		_, err = topologyv1.EnsureDeletedTopologyRef(
+			ctx,
+			helper,
+			lastAppliedTopology,
+			finalizer,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// TopologyRef is passed as input, get the Topology object
+	if tpRef != nil {
+		// no Namespace is provided, default to instance.Namespace
+		if tpRef.Namespace == "" {
+			tpRef.Namespace = helper.GetBeforeObject().GetNamespace()
+		}
+		// Build a defaultLabelSelector (service=<service>)
+		defaultLabelSelector := labels.GetAppLabelSelector(selector)
+		// Retrieve the referenced Topology
+		podTopology, _, err = topologyv1.EnsureTopologyRef(
+			ctx,
+			helper,
+			tpRef,
+			finalizer,
+			&defaultLabelSelector,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return podTopology, nil
 }

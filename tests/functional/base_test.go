@@ -73,6 +73,20 @@ func CreateDNSMasq(namespace string, spec map[string]interface{}) client.Object 
 	return th.CreateUnstructured(raw)
 }
 
+func CreateDNSMasqWithName(name string, namespace string, spec map[string]interface{}) client.Object {
+
+	raw := map[string]interface{}{
+		"apiVersion": "network.openstack.org/v1beta1",
+		"kind":       "DNSMasq",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
 func GetDefaultDNSMasqSpec() map[string]interface{} {
 	spec := make(map[string]interface{})
 	spec["containerImage"] = "test-dnsmasq-container-image"
@@ -670,6 +684,20 @@ func GetReservationFromNet(ipsetName types.NamespacedName, netName string) netwo
 	return res
 }
 
+func CreateMemcachedConfigWithName(name string, namespace string, spec map[string]interface{}) client.Object {
+
+	raw := map[string]interface{}{
+		"apiVersion": "memcached.openstack.org/v1beta1",
+		"kind":       "Memcached",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
 func CreateMemcachedConfig(namespace string, spec map[string]interface{}) client.Object {
 	name := uuid.New().String()
 
@@ -866,5 +894,59 @@ func GetPodAnnotation(namespace string) map[string]string {
     ]
 }]`, namespace),
 		k8s_networkv1.NetworkAttachmentAnnot: fmt.Sprintf(`[{"name":"internalapi","namespace":"%s","interface":"internalapi","default-route":["172.17.0.1"]}]`, namespace),
+	}
+}
+
+// GetSampleTopologySpec - A sample (and opinionated) Topology Spec used to
+// test Services
+// Note this is just an example that should not be used in production for
+// multiple reasons:
+// 1. It uses ScheduleAnyway as strategy, which is something we might
+// want to avoid by default
+// 2. Usually a topologySpreadConstraints is used to take care about
+// multi AZ, which is not applicable in this context
+func GetSampleTopologySpec(selector string) map[string]interface{} {
+	// Build the topology Spec
+	topologySpec := map[string]interface{}{
+		"topologySpreadConstraints": []map[string]interface{}{
+			{
+				"maxSkew":           1,
+				"topologyKey":       corev1.LabelHostname,
+				"whenUnsatisfiable": "ScheduleAnyway",
+				"labelSelector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{
+						"service": selector,
+					},
+				},
+			},
+		},
+	}
+	return topologySpec
+}
+
+// CreateTopology - Creates a Topology CR based on the spec passed as input
+func CreateTopology(topology types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "topology.openstack.org/v1beta1",
+		"kind":       "Topology",
+		"metadata": map[string]interface{}{
+			"name":      topology.Name,
+			"namespace": topology.Namespace,
+		},
+		"spec": spec,
+	}
+	return th.CreateUnstructured(raw)
+}
+
+func GetTopologyRef(name string, namespace string) []types.NamespacedName {
+	return []types.NamespacedName{
+		{
+			Namespace: namespace,
+			Name:      fmt.Sprintf("%s-topology", name),
+		},
+		{
+			Namespace: namespace,
+			Name:      fmt.Sprintf("%s-topology-alt", name),
+		},
 	}
 }

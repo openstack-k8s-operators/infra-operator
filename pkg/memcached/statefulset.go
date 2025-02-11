@@ -2,6 +2,7 @@ package memcached
 
 import (
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
@@ -15,6 +16,7 @@ import (
 func StatefulSet(
 	m *memcachedv1.Memcached,
 	configHash string,
+	topology *topologyv1.Topology,
 ) *appsv1.StatefulSet {
 	matchls := map[string]string{
 		"app":                m.Name,
@@ -100,20 +102,31 @@ func StatefulSet(
 			},
 		},
 	}
-
-	// If possible two pods of the same service should not
-	// run on the same worker node. If this is not possible
-	// the get still created on the same worker node.
-	sfs.Spec.Template.Spec.Affinity = affinity.DistributePods(
-		common.AppSelector,
-		[]string{
-			m.Name,
-		},
-		corev1.LabelHostname,
-	)
 	if m.Spec.NodeSelector != nil {
 		sfs.Spec.Template.Spec.NodeSelector = *m.Spec.NodeSelector
 	}
-
+	if topology != nil {
+		// Get the Topology .Spec
+		ts := topology.Spec
+		// Process TopologySpreadConstraints if defined in the referenced Topology
+		if ts.TopologySpreadConstraints != nil {
+			sfs.Spec.Template.Spec.TopologySpreadConstraints = *topology.Spec.TopologySpreadConstraints
+		}
+		// Process Affinity if defined in the referenced Topology
+		if ts.Affinity != nil {
+			sfs.Spec.Template.Spec.Affinity = ts.Affinity
+		}
+	} else {
+		// If possible two pods of the same service should not
+		// run on the same worker node. If this is not possible
+		// the get still created on the same worker node.
+		sfs.Spec.Template.Spec.Affinity = affinity.DistributePods(
+			common.AppSelector,
+			[]string{
+				m.Name,
+			},
+			corev1.LabelHostname,
+		)
+	}
 	return sfs
 }

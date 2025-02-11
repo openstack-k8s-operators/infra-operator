@@ -32,6 +32,10 @@ import (
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 )
 
+const (
+	dnsMasqDefaultName = "dnsmasq-0"
+)
+
 var _ = Describe("DNSMasq controller", func() {
 	var dnsMasqName types.NamespacedName
 	var dnsMasqServiceAccountName types.NamespacedName
@@ -39,6 +43,7 @@ var _ = Describe("DNSMasq controller", func() {
 	var dnsMasqRoleBindingName types.NamespacedName
 	var deploymentName types.NamespacedName
 	var dnsDataCM types.NamespacedName
+	var dnsmasqTopologies []types.NamespacedName
 
 	When("A DNSMasq is created", func() {
 		BeforeEach(func() {
@@ -369,6 +374,98 @@ var _ = Describe("DNSMasq controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.NodeSelector).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+	When("A DNSMasq is created with topologyref", func() {
+		BeforeEach(func() {
+
+			dnsmasqTopologies = GetTopologyRef(dnsMasqDefaultName, namespace)
+			// Create Test Topologies
+			topologySpec := GetSampleTopologySpec(dnsMasqDefaultName)
+			for _, t := range dnsmasqTopologies {
+				CreateTopology(t, topologySpec)
+			}
+
+			spec := GetDefaultDNSMasqSpec()
+			spec["topologyRef"] = map[string]interface{}{
+				"name": dnsmasqTopologies[0].Name,
+			}
+			instance := CreateDNSMasqWithName(dnsMasqDefaultName, namespace, spec)
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			dnsMasqServiceAccountName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+			dnsMasqRoleName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-role",
+			}
+			dnsMasqRoleBindingName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-rolebinding",
+			}
+			deploymentName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+
+			dnsDataCM = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "some-dnsdata",
+			}
+
+			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
+			})
+			cm := th.GetConfigMap(dnsDataCM)
+			cm.Labels = util.MergeStringMaps(cm.Labels, map[string]string{
+				"dnsmasqhosts": "dnsdata",
+			})
+			Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
+
+			DeferCleanup(th.DeleteConfigMap, dnsDataCM)
+			DeferCleanup(th.DeleteInstance, instance)
+			th.SimulateLoadBalancerServiceIP(deploymentName)
+		})
+
+		It("sets topology in CR status", func() {
+			dnsmasqTopologies = GetTopologyRef(dnsMasqName.Name, namespace)
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(dnsmasqTopologies[0].Name))
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.TopologySpreadConstraints).ToNot(BeNil())
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.Affinity).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("updates topology when the reference changes", func() {
+			dnsmasqTopologies = GetTopologyRef(dnsMasqName.Name, namespace)
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				dnsmasq.Spec.TopologyRef.Name = dnsmasqTopologies[1].Name
+				g.Expect(k8sClient.Update(ctx, dnsmasq)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(dnsmasqTopologies[1].Name))
+			}, timeout, interval).Should(Succeed())
+		})
+		It("removes topologyRef from the spec", func() {
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				// Remove the TopologyRef from the existing DNSMasq .Spec
+				dnsmasq.Spec.TopologyRef = nil
+				g.Expect(k8sClient.Update(ctx, dnsmasq)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				g.Expect(dnsmasq.Status.LastAppliedTopology).Should(BeEmpty())
 			}, timeout, interval).Should(Succeed())
 		})
 	})

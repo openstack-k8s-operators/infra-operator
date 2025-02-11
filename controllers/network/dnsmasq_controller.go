@@ -19,6 +19,8 @@ package network
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 	"sort"
 	"strings"
 	"time"
@@ -43,6 +45,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	dnsmasq "github.com/openstack-k8s-operators/infra-operator/pkg/dnsmasq"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -63,6 +66,17 @@ type DNSMasqReconciler struct {
 	Scheme  *runtime.Scheme
 }
 
+// fields to index to reconcile on CR change
+const (
+	topologyField = ".spec.topologyRef.Name"
+)
+
+var (
+	allWatchFields = []string{
+		topologyField,
+	}
+)
+
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *DNSMasqReconciler) GetLogger(ctx context.Context) logr.Logger {
 	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
@@ -82,6 +96,7 @@ func (r *DNSMasqReconciler) GetLogger(ctx context.Context) logr.Logger {
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -165,6 +180,12 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	if instance.Status.Hash == nil {
 		instance.Status.Hash = map[string]string{}
+	}
+
+	// Init Topology condition if there's a reference
+	if instance.Spec.TopologyRef != nil {
+		c := condition.UnknownCondition(condition.TopologyReadyCondition, condition.InitReason, condition.TopologyReadyInitMessage)
+		cl.Set(c)
 	}
 
 	// Handle service delete
@@ -259,6 +280,18 @@ func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		},
 	}
 
+	// index topologyField
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &networkv1.DNSMasq{}, topologyField, func(rawObj client.Object) []string {
+		// Extract the topology name from the spec, if one is provided
+		cr := rawObj.(*networkv1.DNSMasq)
+		if cr.Spec.TopologyRef == nil {
+			return nil
+		}
+		return []string{cr.Spec.TopologyRef.Name}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1.DNSMasq{}).
 		Owns(&appsv1.Deployment{}).
@@ -270,7 +303,45 @@ func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		Watches(&corev1.ConfigMap{},
 			dnsmasqFN,
 			builder.WithPredicates(p)).
+		Watches(&topologyv1.Topology{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
+}
+
+// findObjectsForSrc - returns a reconcile request if the object is referenced by a Redis CR
+func (r *DNSMasqReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
+	requests := []reconcile.Request{}
+
+	l := log.FromContext(context.Background()).WithName("Controllers").WithName("Redis")
+
+	for _, field := range allWatchFields {
+		crList := &networkv1.DNSMasqList{}
+		listOps := &client.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(field, src.GetName()),
+			Namespace:     src.GetNamespace(),
+		}
+		err := r.List(ctx, crList, listOps)
+		if err != nil {
+			l.Error(err, fmt.Sprintf("listing %s for field: %s - %s", crList.GroupVersionKind().Kind, field, src.GetNamespace()))
+			return requests
+		}
+
+		for _, item := range crList.Items {
+			l.Info(fmt.Sprintf("input source %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
+
+			requests = append(requests,
+				reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      item.GetName(),
+						Namespace: item.GetNamespace(),
+					},
+				},
+			)
+		}
+	}
+
+	return requests
 }
 
 func (r *DNSMasqReconciler) reconcileDelete(ctx context.Context, instance *networkv1.DNSMasq, helper *helper.Helper) (ctrl.Result, error) {
@@ -438,8 +509,46 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 
 	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
+	//
+	// Handle Topology
+	//
+	lastTopologyRef := topologyv1.TopoRef{
+		Name:      instance.Status.LastAppliedTopology,
+		Namespace: instance.Namespace,
+	}
+	topology, err := ensureTopology(
+		ctx,
+		helper,
+		instance.Spec.TopologyRef,
+		&lastTopologyRef,
+		instance.Name,
+		dnsmasq.ServiceName,
+	)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.TopologyReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.TopologyReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("waiting for Topology requirements: %w", err)
+	}
+
+	// If TopologyRef is present and ensureHeatTopology returned a valid
+	// topology object, set .Status.LastAppliedTopology to the referenced one
+	// and mark the condition as true
+	if instance.Spec.TopologyRef != nil {
+		// update the Status with the last retrieved Topology name
+		instance.Status.LastAppliedTopology = instance.Spec.TopologyRef.Name
+		// update the TopologyRef associated condition
+		instance.Status.Conditions.MarkTrue(condition.TopologyReadyCondition, condition.TopologyReadyMessage)
+	} else {
+		// remove LastAppliedTopology from the .Status
+		instance.Status.LastAppliedTopology = ""
+	}
+
 	// Define a new Deployment object
-	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps)
+	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps, topology)
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,
@@ -523,4 +632,62 @@ func (r *DNSMasqReconciler) generateServiceConfigMaps(
 	}
 
 	return configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
+}
+
+// ensureTopology - when a Topology CR is referenced, remove the
+// finalizer from a previous referenced Topology (if any), and retrieve the
+// newly referenced topology object
+func ensureTopology(
+	ctx context.Context,
+	helper *helper.Helper,
+	tpRef *topologyv1.TopoRef,
+	lastAppliedTopology *topologyv1.TopoRef,
+	finalizer string,
+	selector string,
+) (*topologyv1.Topology, error) {
+
+	var podTopology *topologyv1.Topology
+	var err error
+
+	// Remove (if present) the finalizer from a previously referenced topology
+	//
+	// 1. a topology reference is removed (tpRef == nil) from the Service Component
+	//    subCR and the finalizer should be deleted from the last applied topology
+	//    (lastAppliedTopology != "")
+	// 2. a topology reference is updated in the Service Component CR (tpRef != nil)
+	//    and the finalizer should be removed from the previously
+	//    referenced topology (tpRef.Name != lastAppliedTopology.Name)
+	if (tpRef == nil && lastAppliedTopology.Name != "") ||
+		(tpRef != nil && tpRef.Name != lastAppliedTopology.Name) {
+		_, err = topologyv1.EnsureDeletedTopologyRef(
+			ctx,
+			helper,
+			lastAppliedTopology,
+			finalizer,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// TopologyRef is passed as input, get the Topology object
+	if tpRef != nil {
+		// no Namespace is provided, default to instance.Namespace
+		if tpRef.Namespace == "" {
+			tpRef.Namespace = helper.GetBeforeObject().GetNamespace()
+		}
+		// Build a defaultLabelSelector (service=<service>)
+		defaultLabelSelector := labels.GetAppLabelSelector(selector)
+		// Retrieve the referenced Topology
+		podTopology, _, err = topologyv1.EnsureTopologyRef(
+			ctx,
+			helper,
+			tpRef,
+			finalizer,
+			&defaultLabelSelector,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return podTopology, nil
 }

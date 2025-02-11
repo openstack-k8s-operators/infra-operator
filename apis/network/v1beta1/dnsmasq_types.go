@@ -20,7 +20,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -79,6 +79,11 @@ type DNSMasqSpecCore struct {
 	// +kubebuilder:validation:Optional
 	// Override, provides the ability to override the generated manifest of several child resources.
 	Override DNSMasqOverrideSpec `json:"override,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// TopologyRef to apply the Topology defined by the associated CR referenced
+	// by name
+	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
 }
 
 // DNSMasqOverrideSpec to override the generated manifest of several child resources.
@@ -109,6 +114,9 @@ type DNSMasqStatus struct {
 	// then the controller has not processed the latest changes injected by
 	// the opentack-operator in the top-level CR (e.g. the ContainerImage)
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// LastAppliedTopology - the last applied Topology
+	LastAppliedTopology string `json:"lastAppliedTopology,omitempty"`
 }
 
 //+kubebuilder:object:root=true
