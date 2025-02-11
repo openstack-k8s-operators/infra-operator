@@ -59,7 +59,7 @@ type MemcachedSpecCore struct {
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// TLS settings for memcached service
-	TLS tls.SimpleService `json:"tls,omitempty"`
+	TLS TLSSection `json:"tls,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=9932
@@ -70,6 +70,26 @@ type MemcachedSpecCore struct {
 	// +kubebuilder:default=8192
 	// Maximum number of connections accepted by Memcached
 	MaxConn int32 `json:"maxConn"`
+}
+
+// TLSSection
+type TLSSection struct {
+	tls.SimpleService `json:",inline"`
+
+	// +kubebuilder:validation:Optional
+	MTLS MTLSSection `json:"mtls,omitempty"`
+}
+
+type MTLSSection struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum="None";"Request";"Require"
+	// Used to enforce client side tls cert validation
+	SslVerifyMode string `json:"sslVerifyMode,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Name of the secret containing the client cert used to perform mtls auth
+	AuthCertSecret tls.GenericService `json:"authcertsecret,omitempty"`
 }
 
 // MemcachedStatus defines the observed state of Memcached
@@ -91,6 +111,9 @@ type MemcachedStatus struct {
 
 	// Whether TLS is supported by the memcached instance
 	TLSSupport bool `json:"tlsSupport,omitempty"`
+
+	// Name of the certificate used for MTLS
+	MTLSCert string `json:"mtlsCert,omitempty"`
 
 	// ObservedGeneration - the most recent generation observed for this
 	// service. If the observed generation is less than the spec generation,

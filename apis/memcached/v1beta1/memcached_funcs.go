@@ -85,6 +85,16 @@ func (instance *Memcached) GetMemcachedTLSSupport() bool {
 	return instance.Status.TLSSupport
 }
 
+// GetMemcachedMTLSSecret - return the secret containing the MTLS cert
+func (instance *Memcached) GetMemcachedMTLSSecret() string {
+	if instance.Spec.TLS.MTLS.SslVerifyMode == "Request" || instance.Spec.TLS.MTLS.SslVerifyMode == "Require" {
+		secret := *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName
+		return secret
+	} else {
+		return ""
+	}
+}
+
 // GetMemcachedByName - gets the Memcached instance
 func GetMemcachedByName(
 	ctx context.Context,
