@@ -89,7 +89,7 @@ type MTLSSection struct {
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// Name of the secret containing the client cert used to perform mtls auth
-	AuthCertSecret tls.GenericService `json:"authcertsecret,omitempty"`
+	AuthCertSecret tls.GenericService `json:"authCertSecret,omitempty"`
 }
 
 // MemcachedStatus defines the observed state of Memcached

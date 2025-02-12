@@ -54,7 +54,7 @@ spec:
       - description: Name of the secret containing the client cert used to perform
           mtls auth
         displayName: Auth Cert Secret
-        path: tls.mtls.authcertsecret
+        path: tls.mtls.authCertSecret
       version: v1beta1
     - description: NetConfig is the Schema for the netconfigs API
       displayName: Net Config

@@ -84,7 +84,7 @@ spec:
                     type: string
                   mtls:
                     properties:
-                      authcertsecret:
+                      authCertSecret:
                         description: Name of the secret containing the client cert
                           used to perform mtls auth
                         properties:
