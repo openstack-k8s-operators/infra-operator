@@ -99,7 +99,6 @@ spec:
                   the secure.yaml
                 type: string
             required:
-            - containerImage
             - fencingSecret
             - instanceHaConfigMap
             - instanceHaKdumpPort
