@@ -211,3 +211,77 @@ func EnsureDeletedTopologyRef(
 	}
 	return ctrl.Result{}, nil
 }
+
+// Given a StatefulSet/Deployment/DaemonSet PodTemplateSpec, apply the referenced
+// topology
+func (t Topology) ApplyTo(
+	pod *corev1.PodTemplateSpec,
+) {
+	// Get the Topology .Spec
+	ts := t.Spec
+	// Process TopologySpreadConstraints if defined in the referenced Topology
+	if ts.TopologySpreadConstraints != nil {
+		pod.Spec.TopologySpreadConstraints = *t.Spec.TopologySpreadConstraints
+	}
+	// Process Affinity if defined in the referenced Topology
+	if ts.Affinity != nil {
+		pod.Spec.Affinity = ts.Affinity
+	}
+}
+
+
+// ensureServiceTopology - when a Topology CR is referenced, remove the
+// finalizer from a previous referenced Topology (if any), and retrieve the
+// newly referenced topology object
+func EnsureServiceTopology(
+	ctx context.Context,
+	helper *helper.Helper,
+	tpRef *TopoRef,
+	lastAppliedTopology *TopoRef,
+	finalizer string,
+	defaultLabelSelector metav1.LabelSelector,
+) (*Topology, error) {
+
+	var podTopology *Topology
+	var err error
+
+	// Remove (if present) the finalizer from a previously referenced topology
+	//
+	// 1. a topology reference is removed (tpRef == nil) from the Service Component
+	//    subCR and the finalizer should be deleted from the last applied topology
+	//    (lastAppliedTopology != nil)
+	// 2. a topology reference is updated in the Service Component CR (tpRef != nil)
+	//    and the finalizer should be removed from the previously
+	//    referenced topology (tpRef.Name != lastAppliedTopology.Name)
+	if (tpRef == nil && lastAppliedTopology != nil) ||
+		(tpRef != nil && tpRef.Name != lastAppliedTopology.Name) {
+		_, err = EnsureDeletedTopologyRef(
+			ctx,
+			helper,
+			lastAppliedTopology,
+			finalizer,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// TopologyRef is passed as input, get the Topology object
+	if tpRef != nil {
+		// no Namespace is provided, default to instance.Namespace
+		if tpRef.Namespace == "" {
+			tpRef.Namespace = helper.GetBeforeObject().GetNamespace()
+		}
+		// Retrieve the referenced Topology
+		podTopology, _, err = EnsureTopologyRef(
+			ctx,
+			helper,
+			tpRef,
+			finalizer,
+			&defaultLabelSelector,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return podTopology, nil
+}
