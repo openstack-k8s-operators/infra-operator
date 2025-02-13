@@ -31,6 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
 )
@@ -99,6 +100,13 @@ func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
 		[]string{r.Name},
 		CrMaxLengthCorrection) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 
+	// When a TopologyRef CR is referenced, fail if a different Namespace is
+	// referenced because is not supported
+	if r.Spec.TopologyRef != nil {
+		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *field.NewPath("spec"), r.Namespace); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "memcached.openstack.org", Kind: "Memcached"},
@@ -112,8 +120,23 @@ func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
 func (r *Memcached) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	memcachedlog.Info("validate update", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object update.
-	return nil, nil
+	var allErrs field.ErrorList
+	var allWarn []string
+	basePath := field.NewPath("spec")
+
+	// When a TopologyRef CR is referenced, fail if a different Namespace is
+	// referenced because is not supported
+	if r.Spec.TopologyRef != nil {
+		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
+			allErrs = append(allErrs, err)
+		}
+	}
+	if len(allErrs) != 0 {
+		return allWarn, apierrors.NewInvalid(
+			schema.GroupKind{Group: "memcached.openstack.org", Kind: "Memcached"},
+			r.Name, allErrs)
+	}
+	return allWarn, nil
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type

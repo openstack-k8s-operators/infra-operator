@@ -14,6 +14,7 @@ package instanceha
 
 import (
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,6 +31,7 @@ func Deployment(
 	openstackcloud string,
 	configHash string,
 	containerImage string,
+	topology *topologyv1.Topology,
 ) *appsv1.Deployment {
 
 	replicas := int32(1)
@@ -113,6 +115,19 @@ func Deployment(
 
 	if instance.Spec.NodeSelector != nil {
 		dep.Spec.Template.Spec.NodeSelector = *instance.Spec.NodeSelector
+	}
+
+	if topology != nil {
+		// Get the Topology .Spec
+		ts := topology.Spec
+		// Process TopologySpreadConstraints if defined in the referenced Topology
+		if ts.TopologySpreadConstraints != nil {
+			dep.Spec.Template.Spec.TopologySpreadConstraints = *topology.Spec.TopologySpreadConstraints
+		}
+		// Process Affinity if defined in the referenced Topology
+		if ts.Affinity != nil {
+			dep.Spec.Template.Spec.Affinity = ts.Affinity
+		}
 	}
 
 	return dep

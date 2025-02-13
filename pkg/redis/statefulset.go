@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/clusterdns"
@@ -18,6 +19,7 @@ import (
 func StatefulSet(
 	r *redisv1.Redis,
 	configHash string,
+	topology *topologyv1.Topology,
 ) *appsv1.StatefulSet {
 	matchls := map[string]string{
 		common.AppSelector:   "redis",
@@ -143,19 +145,32 @@ func StatefulSet(
 		},
 	}
 
-	// If possible two pods of the same service should not
-	// run on the same worker node. If this is not possible
-	// the get still created on the same worker node.
-	sts.Spec.Template.Spec.Affinity = affinity.DistributePods(
-		common.AppSelector,
-		[]string{
-			r.Name,
-		},
-		corev1.LabelHostname,
-	)
 	if r.Spec.NodeSelector != nil {
 		sts.Spec.Template.Spec.NodeSelector = *r.Spec.NodeSelector
 	}
 
+	if topology != nil {
+		// Get the Topology .Spec
+		ts := topology.Spec
+		// Process TopologySpreadConstraints if defined in the referenced Topology
+		if ts.TopologySpreadConstraints != nil {
+			sts.Spec.Template.Spec.TopologySpreadConstraints = *topology.Spec.TopologySpreadConstraints
+		}
+		// Process Affinity if defined in the referenced Topology
+		if ts.Affinity != nil {
+			sts.Spec.Template.Spec.Affinity = ts.Affinity
+		}
+	} else {
+		// If possible two pods of the same service should not
+		// run on the same worker node. If this is not possible
+		// the get still created on the same worker node.
+		sts.Spec.Template.Spec.Affinity = affinity.DistributePods(
+			common.AppSelector,
+			[]string{
+				r.Name,
+			},
+			corev1.LabelHostname,
+		)
+	}
 	return sts
 }
