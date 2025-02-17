@@ -130,6 +130,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-rabbitmq-openstack-org-v1beta1-rabbitmq
+  failurePolicy: Fail
+  name: mrabbitmq.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   name: mredis.kb.io
@@ -270,6 +290,26 @@ webhooks:
     - UPDATE
     resources:
     - reservations
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmq
+  failurePolicy: Fail
+  name: vrabbitmq.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqs
   sideEffects: None
 - admissionReviewVersions:
   - v1
