@@ -69,18 +69,20 @@ var _ = Describe("Memcached Controller", func() {
 			DeferCleanup(th.DeleteInstance, memcached)
 		})
 
-		It("should have created a Memcached", func() {
-			Eventually(func(_ Gomega) {
-				GetMemcached(memcachedName)
-			}, timeout, interval).Should(Succeed())
-		})
 		It("sets topology in CR status", func() {
 			memcachedTopologies = GetTopologyRef(memcachedName.Name, memcachedName.Namespace)
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
-				g.Expect(mc.Status.LastAppliedTopology).To(Equal(memcachedTopologies[0].Name))
+				g.Expect(mc.Status.LastAppliedTopology).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
 
+			Eventually(func(g Gomega) {
+				mc := GetMemcached(memcachedName)
+				g.Expect(mc.Status.LastAppliedTopology.Name).To(Equal(memcachedTopologies[0].Name))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("sets topology in CR deployment", func() {
 			Eventually(func(g Gomega) {
 				g.Expect(th.GetStatefulSet(memcachedName).Spec.Template.Spec.TopologySpreadConstraints).ToNot(BeNil())
 				g.Expect(th.GetStatefulSet(memcachedName).Spec.Template.Spec.Affinity).To(BeNil())
@@ -96,7 +98,12 @@ var _ = Describe("Memcached Controller", func() {
 
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
-				g.Expect(mc.Status.LastAppliedTopology).To(Equal(memcachedTopologies[1].Name))
+				g.Expect(mc.Status.LastAppliedTopology).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				mc := GetMemcached(memcachedName)
+				g.Expect(mc.Status.LastAppliedTopology.Name).To(Equal(memcachedTopologies[1].Name))
 			}, timeout, interval).Should(Succeed())
 		})
 		It("removes topologyRef from the spec", func() {
@@ -109,7 +116,7 @@ var _ = Describe("Memcached Controller", func() {
 
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
-				g.Expect(mc.Status.LastAppliedTopology).Should(BeEmpty())
+				g.Expect(mc.Status.LastAppliedTopology).Should(BeNil())
 			}, timeout, interval).Should(Succeed())
 		})
 	})
