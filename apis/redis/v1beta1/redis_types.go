@@ -78,7 +78,7 @@ type RedisStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// LastAppliedTopology - the last applied Topology
-	LastAppliedTopology string `json:"lastAppliedTopology,omitempty"`
+	LastAppliedTopology *topologyv1.TopoRef `json:"lastAppliedTopology,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -137,4 +137,17 @@ func SetupDefaults() {
 	}
 
 	SetupRedisDefaults(redisDefaults)
+}
+
+// GetLastAppliedTopologyRef - Returns the lastAppliedTopologyName that can be
+// processed by the handle topology logic
+func (instance Redis) GetLastAppliedTopologyRef() *topologyv1.TopoRef {
+	lastAppliedTopologyName := ""
+	if instance.Status.LastAppliedTopology != nil {
+			lastAppliedTopologyName = instance.Status.LastAppliedTopology.Name
+	}
+	return &topologyv1.TopoRef{
+			Name:	   lastAppliedTopologyName,
+			Namespace: instance.Namespace,
+	}
 }

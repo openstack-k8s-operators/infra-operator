@@ -352,6 +352,16 @@ func (r *DNSMasqReconciler) reconcileDelete(ctx context.Context, instance *netwo
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
 	Log.Info("Reconciled Service delete successfully")
 
+	// Remove finalizer on the Topology CR
+	if ctrlResult, err := topologyv1.EnsureDeletedTopologyRef(
+		ctx,
+		helper,
+		instance.Status.LastAppliedTopology,
+		instance.Name,
+	); err != nil {
+		return ctrlResult, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -512,17 +522,13 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	//
 	// Handle Topology
 	//
-	lastTopologyRef := topologyv1.TopoRef{
-		Name:      instance.Status.LastAppliedTopology,
-		Namespace: instance.Namespace,
-	}
-	topology, err := ensureTopology(
+	topology, err := topologyv1.EnsureServiceTopology(
 		ctx,
 		helper,
 		instance.Spec.TopologyRef,
-		&lastTopologyRef,
+		instance.GetLastAppliedTopologyRef(),
 		instance.Name,
-		dnsmasq.ServiceName,
+		labels.GetAppLabelSelector(dnsmasq.ServiceName),
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -534,17 +540,17 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, fmt.Errorf("waiting for Topology requirements: %w", err)
 	}
 
-	// If TopologyRef is present and ensureHeatTopology returned a valid
+	// If TopologyRef is present and ensureServiceTopology returned a valid
 	// topology object, set .Status.LastAppliedTopology to the referenced one
 	// and mark the condition as true
 	if instance.Spec.TopologyRef != nil {
 		// update the Status with the last retrieved Topology name
-		instance.Status.LastAppliedTopology = instance.Spec.TopologyRef.Name
+		instance.Status.LastAppliedTopology = instance.Spec.TopologyRef
 		// update the TopologyRef associated condition
 		instance.Status.Conditions.MarkTrue(condition.TopologyReadyCondition, condition.TopologyReadyMessage)
 	} else {
 		// remove LastAppliedTopology from the .Status
-		instance.Status.LastAppliedTopology = ""
+		instance.Status.LastAppliedTopology = nil
 	}
 
 	// Define a new Deployment object
@@ -632,62 +638,4 @@ func (r *DNSMasqReconciler) generateServiceConfigMaps(
 	}
 
 	return configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
-}
-
-// ensureTopology - when a Topology CR is referenced, remove the
-// finalizer from a previous referenced Topology (if any), and retrieve the
-// newly referenced topology object
-func ensureTopology(
-	ctx context.Context,
-	helper *helper.Helper,
-	tpRef *topologyv1.TopoRef,
-	lastAppliedTopology *topologyv1.TopoRef,
-	finalizer string,
-	selector string,
-) (*topologyv1.Topology, error) {
-
-	var podTopology *topologyv1.Topology
-	var err error
-
-	// Remove (if present) the finalizer from a previously referenced topology
-	//
-	// 1. a topology reference is removed (tpRef == nil) from the Service Component
-	//    subCR and the finalizer should be deleted from the last applied topology
-	//    (lastAppliedTopology != "")
-	// 2. a topology reference is updated in the Service Component CR (tpRef != nil)
-	//    and the finalizer should be removed from the previously
-	//    referenced topology (tpRef.Name != lastAppliedTopology.Name)
-	if (tpRef == nil && lastAppliedTopology.Name != "") ||
-		(tpRef != nil && tpRef.Name != lastAppliedTopology.Name) {
-		_, err = topologyv1.EnsureDeletedTopologyRef(
-			ctx,
-			helper,
-			lastAppliedTopology,
-			finalizer,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-	// TopologyRef is passed as input, get the Topology object
-	if tpRef != nil {
-		// no Namespace is provided, default to instance.Namespace
-		if tpRef.Namespace == "" {
-			tpRef.Namespace = helper.GetBeforeObject().GetNamespace()
-		}
-		// Build a defaultLabelSelector (service=<service>)
-		defaultLabelSelector := labels.GetAppLabelSelector(selector)
-		// Retrieve the referenced Topology
-		podTopology, _, err = topologyv1.EnsureTopologyRef(
-			ctx,
-			helper,
-			tpRef,
-			finalizer,
-			&defaultLabelSelector,
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return podTopology, nil
 }

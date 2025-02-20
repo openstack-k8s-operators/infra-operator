@@ -436,7 +436,16 @@ var _ = Describe("DNSMasq controller", func() {
 			dnsmasqTopologies = GetTopologyRef(dnsMasqName.Name, namespace)
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
-				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(dnsmasqTopologies[0].Name))
+				g.Expect(dnsmasq.Status.LastAppliedTopology).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				g.Expect(dnsmasq.Status.LastAppliedTopology.Name).To(Equal(dnsmasqTopologies[0].Name))
+			}, timeout, interval).Should(Succeed())
+		})
+		It("sets topology in CR deployment", func() {
+			Eventually(func(g Gomega) {
 				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.TopologySpreadConstraints).ToNot(BeNil())
 				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.Affinity).To(BeNil())
 			}, timeout, interval).Should(Succeed())
@@ -452,7 +461,12 @@ var _ = Describe("DNSMasq controller", func() {
 
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
-				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(dnsmasqTopologies[1].Name))
+				g.Expect(dnsmasq.Status.LastAppliedTopology).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				dnsmasq := GetDNSMasq(dnsMasqName)
+				g.Expect(dnsmasq.Status.LastAppliedTopology.Name).To(Equal(dnsmasqTopologies[1].Name))
 			}, timeout, interval).Should(Succeed())
 		})
 		It("removes topologyRef from the spec", func() {
@@ -465,7 +479,7 @@ var _ = Describe("DNSMasq controller", func() {
 
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
-				g.Expect(dnsmasq.Status.LastAppliedTopology).Should(BeEmpty())
+				g.Expect(dnsmasq.Status.LastAppliedTopology).Should(BeNil())
 			}, timeout, interval).Should(Succeed())
 		})
 	})
