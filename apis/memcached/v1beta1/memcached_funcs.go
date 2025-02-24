@@ -22,8 +22,30 @@ import (
 
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+)
+
+const (
+	// CertKey - mtls cert file name
+	CertKey = "mtls.crt"
+	// PrivateKey - mtls private key file name
+	PrivateKey = "mtls.key"
+	// CAKey - mtls cacert file name
+	CAKey = "mtls-ca.crt"
+
+	// CertPathDst - path to the client certificate
+	CertPathDst = "/etc/pki/tls/certs"
+	// KeyPathDst - path to the key
+	KeyPathDst = "/etc/pki/tls/private"
+
+	// DefaultCertMountDir - default path to mount cert files inside container
+	DefaultCertMountDir = "/var/lib/config-data/mtls/certs"
+	// DefaultKeyMountDir - default path to mount cert keys inside container
+	DefaultKeyMountDir = "/var/lib/config-data/mtls/private"
 )
 
 // IsReady - returns true if Memcached is reconciled successfully
@@ -114,4 +136,74 @@ func GetMemcachedByName(
 		return nil, err
 	}
 	return memcached, err
+}
+
+// CreateMTLSVolumeMounts - add volume mount for MTLS certificates and CA certificate
+func (instance *Memcached) CreateMTLSVolumeMounts(CertMountPath *string, KeyMountPath *string) []corev1.VolumeMount {
+	volumeMounts := []corev1.VolumeMount{}
+	if instance.Spec.TLS.MTLS.AuthCertSecret.SecretName != nil {
+		CertPath := DefaultCertMountDir + "/" + CertKey
+		CaPath := DefaultCertMountDir + "/" + CAKey
+		KeyPath := DefaultKeyMountDir + "/" + PrivateKey
+
+		if CertMountPath != nil {
+			CertPath = *CertMountPath + "/" + CertKey
+			CaPath = *CertMountPath + "/" + CAKey
+		}
+		if KeyMountPath != nil {
+			KeyPath = *KeyMountPath + "/" + PrivateKey
+		}
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName,
+			MountPath: CertPath,
+			SubPath:   tls.CertKey,
+			ReadOnly:  true,
+		}, corev1.VolumeMount{
+			Name:      *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName,
+			MountPath: KeyPath,
+			SubPath:   tls.PrivateKey,
+			ReadOnly:  true,
+		}, corev1.VolumeMount{
+			Name:      *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName,
+			MountPath: CaPath,
+			SubPath:   tls.CAKey,
+			ReadOnly:  true,
+		})
+	}
+
+	return volumeMounts
+}
+
+// CreateMTLSVolume - add volume for MTLS certificates and CA certificate for the service
+func (instance *Memcached) CreateMTLSVolume() corev1.Volume {
+	volume := corev1.Volume{}
+	if instance.Spec.TLS.MTLS.AuthCertSecret.SecretName != nil {
+		volume = corev1.Volume{
+			Name: *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName,
+					DefaultMode: ptr.To[int32](0400),
+				},
+			},
+		}
+	}
+
+	return volume
+}
+
+// CaMountPath - returns path to the ca certificate
+func CaMountPath() string {
+	return CertPathDst + "/" + CAKey
+}
+
+// CertMountPath - returns path to the certificate
+func CertMountPath() string {
+	return CertPathDst + "/" + CertKey
+}
+
+// KeyMountPath - returns path to the key
+func KeyMountPath() string {
+	return KeyPathDst + "/" + PrivateKey
 }
