@@ -941,12 +941,12 @@ func CreateTopology(topology types.NamespacedName, spec map[string]interface{}) 
 func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 	return []types.NamespacedName{
 		{
-			Namespace: namespace,
 			Name:      fmt.Sprintf("%s-topology", name),
+			Namespace: namespace,
 		},
 		{
-			Namespace: namespace,
 			Name:      fmt.Sprintf("%s-topology-alt", name),
+			Namespace: namespace,
 		},
 	}
 }

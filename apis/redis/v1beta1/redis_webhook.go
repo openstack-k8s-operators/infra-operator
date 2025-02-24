@@ -95,6 +95,12 @@ func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 	var allWarn []string
 	basePath := field.NewPath("spec")
 
+	allErrs = common_webhook.ValidateDNS1123Label(
+		field.NewPath("metadata").Child("name"),
+		[]string{r.Name},
+		CrMaxLengthCorrection,
+	) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
+
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
 	if r.Spec.TopologyRef != nil {
@@ -102,11 +108,6 @@ func (r *Redis) ValidateCreate() (admission.Warnings, error) {
 			allErrs = append(allErrs, err)
 		}
 	}
-	allErrs = common_webhook.ValidateDNS1123Label(
-		field.NewPath("metadata").Child("name"),
-		[]string{r.Name},
-		CrMaxLengthCorrection,
-	) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
