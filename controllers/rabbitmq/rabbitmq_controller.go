@@ -254,7 +254,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("error calculating configmap hash: %w", err)
 	}
 
-	IPv6Enabled, err := ocp.HasIPv6ClusterNetwork(ctx, helper)
+	IPv6Enabled, err := ocp.FirstClusterNetworkIsIPv6(ctx, helper)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ServiceConfigReadyCondition,

@@ -51,6 +51,7 @@ import (
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmq_ctrl "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
 
+	ocp_configv1 "github.com/openshift/api/config/v1"
 	infra_test "github.com/openstack-k8s-operators/infra-operator/apis/test/helpers"
 	test "github.com/openstack-k8s-operators/lib-common/modules/test"
 	//+kubebuilder:scaffold:imports
@@ -88,6 +89,9 @@ var _ = BeforeSuite(func() {
 		"github.com/rabbitmq/cluster-operator/v2", "../../go.mod", "config/crd/bases")
 	Expect(err).ShouldNot(HaveOccurred())
 
+	ocpconfigv1CRDs, err := test.GetOpenShiftCRDDir("config/v1", "../../go.mod")
+	Expect(err).ShouldNot(HaveOccurred())
+
 	frrCRDs, err := test.GetCRDDirFromModule(
 		"github.com/metallb/frr-k8s", "../../go.mod", "config/crd/bases")
 	Expect(err).ShouldNot(HaveOccurred())
@@ -100,6 +104,7 @@ var _ = BeforeSuite(func() {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
+			ocpconfigv1CRDs,
 			rabbitmqv2CRDs,
 			frrCRDs,
 		},
@@ -141,6 +146,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = topologyv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
+	err = ocp_configv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	//+kubebuilder:scaffold:scheme
 
 	logger = ctrl.Log.WithName("---Test---")
@@ -237,6 +245,8 @@ var _ = BeforeSuite(func() {
 		Kclient: kclient,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
+
+	th.CreateClusterNetworkConfig()
 
 	go func() {
 		defer GinkgoRecover()
