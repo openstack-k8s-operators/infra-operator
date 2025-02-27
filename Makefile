@@ -99,7 +99,7 @@ manifests: gowork controller-gen ## Generate WebhookConfiguration, ClusterRole a
 	rm -f apis/bases/* && cp -a config/crd/bases apis/
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: gowork controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 .PHONY: fmt
