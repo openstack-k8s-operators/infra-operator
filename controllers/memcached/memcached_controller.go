@@ -398,6 +398,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.ServerListWithInet = serverListWithInet
 
 	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+	serviceLabels := map[string]string{
+		"app":                instance.Name,
+		common.AppSelector:   instance.Name,
+		"cr":                 instance.Name,
+		common.OwnerSelector: "infra-operator",
+	}
 
 	//
 	// Handle Topology
@@ -408,7 +414,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Spec.TopologyRef,
 		instance.GetLastAppliedTopologyRef(),
 		instance.Name,
-		labels.GetAppLabelSelector("memcached"),
+		labels.GetLabelSelector(serviceLabels),
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
