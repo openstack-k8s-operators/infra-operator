@@ -192,7 +192,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return rbacResult, nil
 	}
 
-	Labels := map[string]string{
+	deploymentLabels := map[string]string{
 		common.AppSelector: "instanceha",
 	}
 
@@ -420,7 +420,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Spec.TopologyRef,
 		instance.GetLastAppliedTopologyRef(),
 		instance.Name,
-		labels.GetAppLabelSelector("instanceha"),
+		labels.GetLabelSelector(deploymentLabels),
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -444,7 +444,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// remove LastAppliedTopology from the .Status
 		instance.Status.LastAppliedTopology = nil
 	}
-	commondeployment := commondeployment.NewDeployment(instanceha.Deployment(instance, Labels, serviceAnnotations, cloud, configVarsHash, containerImage, topology), time.Duration(5)*time.Second)
+	commondeployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology), time.Duration(5)*time.Second)
 	sfres, sferr := commondeployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
@@ -454,7 +454,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// END deployment
 
 	// NetworkAttachments
-	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, instance.Spec.NetworkAttachments, Labels, 1)
+	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, instance.Spec.NetworkAttachments, deploymentLabels, 1)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

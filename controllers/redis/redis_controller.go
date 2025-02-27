@@ -373,13 +373,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	//
 	// Handle Topology
 	//
+	serviceLabels := map[string]string{
+		common.AppSelector:   "redis",
+		common.OwnerSelector: instance.Name,
+	}
 	topology, err := topologyv1.EnsureServiceTopology(
 		ctx,
 		helper,
 		instance.Spec.TopologyRef,
 		instance.GetLastAppliedTopologyRef(),
 		instance.Name,
-		labels.GetAppLabelSelector("redis"),
+		labels.GetLabelSelector(serviceLabels),
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(

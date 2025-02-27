@@ -528,7 +528,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		instance.Spec.TopologyRef,
 		instance.GetLastAppliedTopologyRef(),
 		instance.Name,
-		labels.GetAppLabelSelector(dnsmasq.ServiceName),
+		labels.GetLabelSelector(serviceLabels),
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
