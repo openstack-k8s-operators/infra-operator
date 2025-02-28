@@ -1,0 +1,12 @@
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMq
+metadata:
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/instance: rabbitmq-sample
+    app.kubernetes.io/part-of: infra-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: infra-operator
+  name: rabbitmq-sample
+spec:
+  # TODO(user): Add fields here

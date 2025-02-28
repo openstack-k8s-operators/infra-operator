@@ -43,6 +43,7 @@ import (
 
 	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
+	ocp_configv1 "github.com/openshift/api/config/v1"
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
@@ -74,6 +75,7 @@ func init() {
 	utilruntime.Must(frrk8sv1.AddToScheme(scheme))
 	utilruntime.Must(k8s_networkv1.AddToScheme(scheme))
 	utilruntime.Must(topologyv1beta1.AddToScheme(scheme))
+	utilruntime.Must(ocp_configv1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -220,6 +222,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err = (&rabbitmqcontrollers.Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RabbitMq")
+		os.Exit(1)
+	}
+
 	// Acquire environmental defaults and initialize operator defaults with them
 	memcachedv1.SetupDefaults()
 	redisv1.SetupDefaults()
@@ -255,6 +265,10 @@ func main() {
 		}
 		if err = (&networkv1.IPSet{}).SetupWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "IPSet")
+			os.Exit(1)
+		}
+		if err = (&rabbitmqv1beta1.RabbitMq{}).SetupWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMq")
 			os.Exit(1)
 		}
 		checker = mgr.GetWebhookServer().StartedChecker()
