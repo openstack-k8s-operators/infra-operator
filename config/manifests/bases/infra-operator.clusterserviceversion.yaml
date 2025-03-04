@@ -61,6 +61,15 @@ spec:
       kind: NetConfig
       name: netconfigs.network.openstack.org
       version: v1beta1
+    - description: RabbitMq is the Schema for the rabbitmqs API
+      displayName: Rabbit Mq
+      kind: RabbitMq
+      name: rabbitmqs.rabbitmq.openstack.org
+      specDescriptors:
+      - description: NodeSelector to target subset of worker nodes running this service
+        displayName: Node Selector
+        path: nodeSelector
+      version: v1beta1
     - description: Redis is the Schema for the redises API
       displayName: Redis
       kind: Redis
