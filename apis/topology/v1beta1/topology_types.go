@@ -107,11 +107,24 @@ func GetTopologyByName(
 	return topology, hash, nil
 }
 
+// ValidateTopologyRef - returns a field.ErrorList when the Service references an
+// invalid Topology. It currently validates the Namespace but it can be extended
+// as needed
+func ValidateTopologyRef(t *TopoRef, basePath field.Path, namespace string) field.ErrorList {
+	error := field.ErrorList{}
+	if t != nil {
+		if err := ValidateTopologyNamespace(t.Namespace, basePath, namespace); err != nil {
+			error = append(error, err)
+		}
+	}
+	return error
+}
+
 // ValidateTopologyNamespace - returns a field.Error when the Service
 // references a Topoology deployed on a different namespace
 func ValidateTopologyNamespace(refNs string, basePath field.Path, validNs string) *field.Error {
 	if refNs != "" && refNs != validNs {
-		topologyNamespace := basePath.Child("topology").Key("namespace")
+		topologyNamespace := basePath.Key("namespace")
 		return field.Invalid(topologyNamespace, "namespace", "Customizing namespace field is not supported")
 	}
 	return nil
