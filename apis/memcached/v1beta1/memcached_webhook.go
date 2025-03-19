@@ -31,7 +31,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
 )
@@ -102,11 +101,9 @@ func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	if r.Spec.TopologyRef != nil {
-		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *field.NewPath("spec"), r.Namespace); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
+	basePath := field.NewPath("spec")
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "memcached.openstack.org", Kind: "Memcached"},
@@ -126,11 +123,8 @@ func (r *Memcached) ValidateUpdate(_ runtime.Object) (admission.Warnings, error)
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	if r.Spec.TopologyRef != nil {
-		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "memcached.openstack.org", Kind: "Memcached"},

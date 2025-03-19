@@ -24,6 +24,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 const (
@@ -162,4 +163,16 @@ func (instance RabbitMq) GetLastAppliedTopologyRef() *topologyv1.TopoRef {
 		Name:      lastAppliedTopologyName,
 		Namespace: instance.Namespace,
 	}
+}
+
+// ValidateTopology -
+func (instance *RabbitMqSpecCore) ValidateTopology(
+	basePath *field.Path,
+	namespace string,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	allErrs = append(allErrs, topologyv1.ValidateTopologyRef(
+		instance.TopologyRef,
+		*basePath.Child("topologyRef"), namespace)...)
+	return allErrs
 }
