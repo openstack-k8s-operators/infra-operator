@@ -124,7 +124,7 @@ func ValidateTopologyRef(t *TopoRef, basePath field.Path, namespace string) fiel
 // references a Topoology deployed on a different namespace
 func ValidateTopologyNamespace(refNs string, basePath field.Path, validNs string) *field.Error {
 	if refNs != "" && refNs != validNs {
-		topologyNamespace := basePath.Key("namespace")
+		topologyNamespace := basePath.Child("namespace")
 		return field.Invalid(topologyNamespace, "namespace", "Customizing namespace field is not supported")
 	}
 	return nil
