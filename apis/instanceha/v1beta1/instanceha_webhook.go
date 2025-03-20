@@ -28,7 +28,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 )
 
 // InstanceHaDefaults -
@@ -87,11 +86,8 @@ func (r *InstanceHa) ValidateCreate() (admission.Warnings, error) {
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	if r.Spec.TopologyRef != nil {
-		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "instanceha.openstack.org", Kind: "InstanceHa"},
@@ -110,11 +106,8 @@ func (r *InstanceHa) ValidateUpdate(old runtime.Object) (admission.Warnings, err
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	if r.Spec.TopologyRef != nil {
-		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "instanceha.openstack.org", Kind: "InstanceHa"},

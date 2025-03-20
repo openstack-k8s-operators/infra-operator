@@ -25,7 +25,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 )
 
 // DNSMasqDefaults -
@@ -90,11 +89,7 @@ func (r *DNSMasq) ValidateCreate() (admission.Warnings, error) {
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	if r.Spec.TopologyRef != nil {
-		if err := topologyv1.ValidateTopologyNamespace(r.Spec.TopologyRef.Namespace, *basePath, r.Namespace); err != nil {
-			allErrs = append(allErrs, err)
-		}
-	}
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -108,7 +103,19 @@ func (r *DNSMasq) ValidateCreate() (admission.Warnings, error) {
 func (r *DNSMasq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
 	dnsmasqlog.Info("validate update", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object update.
+	var allErrs field.ErrorList
+	var allWarn []string
+	basePath := field.NewPath("spec")
+
+	// When a TopologyRef CR is referenced, fail if a different Namespace is
+	// referenced because is not supported
+	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+
+	if len(allErrs) != 0 {
+		return allWarn, apierrors.NewInvalid(
+			schema.GroupKind{Group: "network.openstack.org", Kind: "DNSMasq"},
+			r.Name, allErrs)
+	}
 	return nil, nil
 }
 
