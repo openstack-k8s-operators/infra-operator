@@ -21,6 +21,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 )
 
@@ -168,4 +169,16 @@ func (instance InstanceHa) GetLastAppliedTopologyRef() *topologyv1.TopoRef {
 			Name:	   lastAppliedTopologyName,
 			Namespace: instance.Namespace,
 	}
+}
+
+// ValidateTopology -
+func (instance *InstanceHaSpec) ValidateTopology(
+	basePath *field.Path,
+	namespace string,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	allErrs = append(allErrs, topologyv1.ValidateTopologyRef(
+		instance.TopologyRef,
+		*basePath.Child("topologyRef"), namespace)...)
+	return allErrs
 }
