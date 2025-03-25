@@ -266,8 +266,8 @@ func EnsureServiceTopology(
 	// 2. a topology reference is updated in the Service Component CR (tpRef != nil)
 	//    and the finalizer should be removed from the previously
 	//    referenced topology (tpRef.Name != lastAppliedTopology.Name)
-	if (tpRef == nil && lastAppliedTopology != nil) ||
-		(tpRef != nil && tpRef.Name != lastAppliedTopology.Name) {
+	if (lastAppliedTopology != nil) &&
+		(tpRef == nil || tpRef.Name != lastAppliedTopology.Name) {
 		_, err = EnsureDeletedTopologyRef(
 			ctx,
 			helper,

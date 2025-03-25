@@ -303,7 +303,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		ctx,
 		helper,
 		instance.Spec.TopologyRef,
-		instance.GetLastAppliedTopologyRef(),
+		instance.Status.LastAppliedTopology,
 		instance.Name,
 		labels.GetLabelSelector(
 			map[string]string{
