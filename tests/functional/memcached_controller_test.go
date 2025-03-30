@@ -17,16 +17,18 @@ limitations under the License.
 package functional_test
 
 import (
+	"fmt"
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
-	memcachedDefaultName = "dnsmasq-0"
+	memcachedDefaultName = "memcached-0"
 )
 
 var _ = Describe("Memcached Controller", func() {
@@ -49,42 +51,58 @@ var _ = Describe("Memcached Controller", func() {
 	})
 
 	When("a default Memcached gets created with topologyRef", func() {
+		var topologyRef, topologyRefAlt *topologyv1.TopoRef
 		BeforeEach(func() {
 			// Build the topology Spec
 			spec := GetDefaultMemcachedSpec()
 			memcachedName.Name = memcachedDefaultName
 			memcachedName.Namespace = namespace
 
-			memcachedTopologies = GetTopologyRef(memcachedName.Name, memcachedName.Namespace)
-			spec["topologyRef"] = map[string]interface{}{
-				"name": memcachedTopologies[0].Name,
+			memcachedTopologies = GetTopologyRef(memcachedName.Name, namespace)
+			// Define the two topology references used in this test
+			topologyRef = &topologyv1.TopoRef{
+				Name:      memcachedTopologies[0].Name,
+				Namespace: namespace,
 			}
-
+			topologyRefAlt = &topologyv1.TopoRef{
+				Name:      memcachedTopologies[1].Name,
+				Namespace: namespace,
+			}
+			//memcachedTopologies = GetTopologyRef(memcachefName.Name, memcachedName.Namespace)
+			spec["topologyRef"] = map[string]interface{}{
+				"name": topologyRef.Name,
+			}
 			memcached := CreateMemcachedConfigWithName(memcachedName.Name, namespace, spec)
 			// Create Test Topologies
-			topologySpec := GetSampleTopologySpec(memcachedName.Name)
 			for _, t := range memcachedTopologies {
+				// Build topologySpec
+				topologySpec, _ := GetSampleTopologySpec(memcachedName.Name)
 				CreateTopology(t, topologySpec)
 			}
 			DeferCleanup(th.DeleteInstance, memcached)
 		})
 
 		It("sets topology in CR status", func() {
-			memcachedTopologies = GetTopologyRef(memcachedName.Name, memcachedName.Namespace)
 			Eventually(func(g Gomega) {
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRef.Name,
+					Namespace: topologyRef.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(HaveLen(1))
 				mc := GetMemcached(memcachedName)
 				g.Expect(mc.Status.LastAppliedTopology).ToNot(BeNil())
-			}, timeout, interval).Should(Succeed())
-
-			Eventually(func(g Gomega) {
-				mc := GetMemcached(memcachedName)
-				g.Expect(mc.Status.LastAppliedTopology.Name).To(Equal(memcachedTopologies[0].Name))
+				g.Expect(mc.Status.LastAppliedTopology).To(Equal(topologyRef))
+				g.Expect(finalizers).To(ContainElement(
+					fmt.Sprintf("openstack.org/memcached-%s", memcachedName.Name)))
 			}, timeout, interval).Should(Succeed())
 		})
 
 		It("sets topology in CR deployment", func() {
 			Eventually(func(g Gomega) {
+				_, topologySpecObj := GetSampleTopologySpec(memcachedName.Name)
 				g.Expect(th.GetStatefulSet(memcachedName).Spec.Template.Spec.TopologySpreadConstraints).ToNot(BeNil())
+				g.Expect(th.GetStatefulSet(memcachedName).Spec.Template.Spec.TopologySpreadConstraints).To(Equal(topologySpecObj))
 				g.Expect(th.GetStatefulSet(memcachedName).Spec.Template.Spec.Affinity).To(BeNil())
 			}, timeout, interval).Should(Succeed())
 		})
@@ -92,18 +110,32 @@ var _ = Describe("Memcached Controller", func() {
 			memcachedTopologies = GetTopologyRef(memcachedName.Name, memcachedName.Namespace)
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
-				mc.Spec.TopologyRef.Name = memcachedTopologies[1].Name
+				mc.Spec.TopologyRef.Name = topologyRefAlt.Name
 				g.Expect(k8sClient.Update(ctx, mc)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
 			Eventually(func(g Gomega) {
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRefAlt.Name,
+					Namespace: topologyRefAlt.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(HaveLen(1))
 				mc := GetMemcached(memcachedName)
 				g.Expect(mc.Status.LastAppliedTopology).ToNot(BeNil())
+				g.Expect(mc.Status.LastAppliedTopology).To(Equal(topologyRefAlt))
+				g.Expect(finalizers).To(ContainElement(
+					fmt.Sprintf("openstack.org/memcached-%s", memcachedName.Name)))
 			}, timeout, interval).Should(Succeed())
 
 			Eventually(func(g Gomega) {
-				mc := GetMemcached(memcachedName)
-				g.Expect(mc.Status.LastAppliedTopology.Name).To(Equal(memcachedTopologies[1].Name))
+				// Verify the previous referenced topology has no finalizers
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRef.Name,
+					Namespace: topologyRef.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(BeEmpty())
 			}, timeout, interval).Should(Succeed())
 		})
 		It("removes topologyRef from the spec", func() {
@@ -117,6 +149,18 @@ var _ = Describe("Memcached Controller", func() {
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
 				g.Expect(mc.Status.LastAppliedTopology).Should(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the existing topologies have no finalizer anymore
+			Eventually(func(g Gomega) {
+				for _, topology := range memcachedTopologies {
+					tp := GetTopology(types.NamespacedName{
+						Name:      topology.Name,
+						Namespace: topology.Namespace,
+					})
+					finalizers := tp.GetFinalizers()
+					g.Expect(finalizers).To(BeEmpty())
+				}
 			}, timeout, interval).Should(Succeed())
 		})
 	})
