@@ -152,19 +152,6 @@ func SetupDefaults() {
 	SetupRabbitMqDefaults(rabbitMqDefaults)
 }
 
-// GetLastAppliedTopologyRef - Returns the lastAppliedTopologyName that can be
-// processed by the handle topology logic
-func (instance RabbitMq) GetLastAppliedTopologyRef() *topologyv1.TopoRef {
-	lastAppliedTopologyName := ""
-	if instance.Status.LastAppliedTopology != nil {
-		lastAppliedTopologyName = instance.Status.LastAppliedTopology.Name
-	}
-	return &topologyv1.TopoRef{
-		Name:      lastAppliedTopologyName,
-		Namespace: instance.Namespace,
-	}
-}
-
 // ValidateTopology -
 func (instance *RabbitMqSpecCore) ValidateTopology(
 	basePath *field.Path,
