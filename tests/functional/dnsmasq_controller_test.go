@@ -272,6 +272,120 @@ var _ = Describe("DNSMasq controller", func() {
 		})
 	})
 
+	When("Deployment rollout is progressing", func() {
+		BeforeEach(func() {
+			instance := CreateDNSMasq(namespace, GetDefaultDNSMasqSpec())
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			dnsMasqServiceAccountName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+			dnsMasqRoleName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-role",
+			}
+			dnsMasqRoleBindingName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      dnsMasqServiceAccountName.Name + "-rolebinding",
+			}
+			deploymentName = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "dnsmasq-" + dnsMasqName.Name,
+			}
+
+			dnsDataCM = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "some-dnsdata",
+			}
+
+			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
+			})
+			cm := th.GetConfigMap(dnsDataCM)
+			cm.Labels = util.MergeStringMaps(cm.Labels, map[string]string{
+				"dnsmasqhosts": "dnsdata",
+			})
+			Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
+
+			DeferCleanup(th.DeleteConfigMap, dnsDataCM)
+			DeferCleanup(th.DeleteInstance, instance)
+
+			th.SimulateLoadBalancerServiceIP(deploymentName)
+			th.SimulateDeploymentProgressing(deploymentName)
+		})
+
+		It("shows the deployment progressing in DeploymentReadyCondition", func() {
+			th.ExpectConditionWithDetails(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+				condition.RequestedReason,
+				condition.DeploymentReadyRunningMessage,
+			)
+
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+
+		It("still shows the deployment progressing in DeploymentReadyCondition when rollout hits ProgressDeadlineExceeded", func() {
+			th.SimulateDeploymentProgressDeadlineExceeded(deploymentName)
+			th.ExpectConditionWithDetails(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+				condition.RequestedReason,
+				condition.DeploymentReadyRunningMessage,
+			)
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+
+		It("reaches Ready when deployment rollout finished", func() {
+			th.ExpectConditionWithDetails(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+				condition.RequestedReason,
+				condition.DeploymentReadyRunningMessage,
+			)
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionFalse,
+			)
+
+			th.SimulateDeploymentReplicaReady(deploymentName)
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionTrue,
+			)
+
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
+
 	When("A DNSMasq is created with nodeSelector", func() {
 		BeforeEach(func() {
 			spec := GetDefaultDNSMasqSpec()

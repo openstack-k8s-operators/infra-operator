@@ -444,17 +444,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// remove LastAppliedTopology from the .Status
 		instance.Status.LastAppliedTopology = nil
 	}
-	commondeployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology), time.Duration(5)*time.Second)
-	sfres, sferr := commondeployment.CreateOrPatch(ctx, helper)
+	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology), time.Duration(5)*time.Second)
+	sfres, sferr := deployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
 	}
-	deployment := commondeployment.GetDeployment()
 
 	// END deployment
 
 	// NetworkAttachments
-	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, instance.Spec.NetworkAttachments, deploymentLabels, 1)
+	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, instance.Spec.NetworkAttachments, deploymentLabels, deployment.GetDeployment().Status.ReadyReplicas)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -474,8 +473,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, err
 	}
 
-	if deployment.Status.ReadyReplicas > 0 {
-		instance.Status.Conditions.MarkTrue(instancehav1.InstanceHaReadyCondition, instancehav1.InstanceHaReadyMessage)
+	if commondeployment.IsReady(deployment.GetDeployment()) {
+		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
+		// It is OK to return success as we are watching for Deployment changes
+		return ctrl.Result{}, nil
 	}
 
 	return ctrl.Result{}, nil
