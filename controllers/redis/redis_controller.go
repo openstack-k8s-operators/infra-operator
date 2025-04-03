@@ -409,15 +409,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	// Statefulset
-	commonstatefulset := commonstatefulset.NewStatefulSet(redis.StatefulSet(instance, hashOfHashes, topology), 5)
-	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
+	ss := commonstatefulset.NewStatefulSet(redis.StatefulSet(instance, hashOfHashes, topology), 5)
+	sfres, sferr := ss.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
 	}
-	statefulset := commonstatefulset.GetStatefulSet()
 
-	if statefulset.Status.ReadyReplicas > 0 {
+	if commonstatefulset.IsReady(ss.GetStatefulSet()) {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
+		// It is OK to return success as we are watching for StatefulSet changes
+		return ctrl.Result{}, nil
 	}
 
 	// We reached the end of the Reconcile, update the Ready condition based on
