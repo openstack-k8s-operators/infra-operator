@@ -19,11 +19,12 @@ package network
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
 	"sort"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -577,9 +578,12 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			condition.DeploymentReadyRunningMessage))
 		return ctrlResult, nil
 	}
-	instance.Status.ReadyCount = depl.GetDeployment().Status.ReadyReplicas
 
-	if instance.Status.ReadyCount > 0 {
+	if depl.GetDeployment().Generation == depl.GetDeployment().Status.ObservedGeneration {
+		instance.Status.ReadyCount = depl.GetDeployment().Status.ReadyReplicas
+	}
+
+	if deployment.IsReady(depl.GetDeployment()) {
 		Log.Info("Deployment is ready: ", "Deployment", instance.Name)
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	} else {

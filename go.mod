@@ -92,3 +92,5 @@ replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-oper
 
 // pin frr-k8s to v0.0.11 because later versions have a req for golang 1.22
 replace github.com/metallb/frr-k8s => github.com/metallb/frr-k8s v0.0.11 //allow-merging
+
+replace github.com/openstack-k8s-operators/lib-common/modules/common => github.com/stuggi/lib-common/modules/common v0.0.0-20250404130940-ddf9e62c0399
