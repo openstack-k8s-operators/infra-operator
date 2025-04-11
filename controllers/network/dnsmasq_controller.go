@@ -19,11 +19,12 @@ package network
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
 	"sort"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -577,13 +578,21 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			condition.DeploymentReadyRunningMessage))
 		return ctrlResult, nil
 	}
-	instance.Status.ReadyCount = depl.GetDeployment().Status.ReadyReplicas
 
-	if instance.Status.ReadyCount > 0 {
-		Log.Info("Deployment is ready: ", "Deployment", instance.Name)
+	deploy := depl.GetDeployment()
+	if deploy.Generation == deploy.Status.ObservedGeneration {
+		instance.Status.ReadyCount = deploy.Status.ReadyReplicas
+	}
+
+	// Mark the Deployment as Ready only if the number of Replicas is equals
+	// to the Deployed instances (ReadyCount), and the the Status.Replicas
+	// match Status.ReadyReplicas. If a deployment update is in progress,
+	// Replicas > ReadyReplicas.
+	// In addition, make sure the controller sees the last Generation
+	// by comparing it with the ObservedGeneration.
+	if deployment.IsReady(deploy) {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	} else {
-		Log.Info("Deployment is not ready:", "Name", instance.Name, "deployment", depl.GetDeployment().Status)
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
 			condition.RequestedReason,
