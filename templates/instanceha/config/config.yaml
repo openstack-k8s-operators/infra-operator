@@ -2,6 +2,7 @@ config:
   EVACUABLE_TAG: "evacuable"
   TAGGED_IMAGES: "true"
   TAGGED_FLAVORS: "true"
+  TAGGED_AGGREGATES: "false"
   SMART_EVACUATION: "false"
   DELTA: "30"
   DELAY: "0"
