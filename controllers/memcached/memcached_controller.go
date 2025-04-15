@@ -439,9 +439,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.LastAppliedTopology = nil
 	}
 	// Statefulset for stable names
-	commonstatefulset := commonstatefulset.NewStatefulSet(
+	ss := commonstatefulset.NewStatefulSet(
 		memcached.StatefulSet(instance, hashOfHashes, topology), time.Duration(5)*time.Second)
-	sfres, sferr := commonstatefulset.CreateOrPatch(ctx, helper)
+	sfres, sferr := ss.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
 	}
@@ -449,9 +449,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	//
 	// Reconstruct the state of the memcached resource based on the statefulset and its pods
 	//
-	instance.Status.ReadyCount = commonstatefulset.GetStatefulSet().Status.ReadyReplicas
-	if instance.Status.ReadyCount > 0 {
+	deploy := ss.GetStatefulSet()
+	if deploy.Generation == deploy.Status.ObservedGeneration {
+		instance.Status.ReadyCount = deploy.Status.ReadyReplicas
+	}
+	if commonstatefulset.IsReady(deploy) {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
+		// It is OK to return success as we are watching for StatefulSet changes
+		return ctrl.Result{}, nil
 	}
 
 	// We reached the end of the Reconcile, update the Ready condition based on

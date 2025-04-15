@@ -419,6 +419,11 @@ func TransportURLConditionGetter(name types.NamespacedName) condition.Conditions
 	return instance.Status.Conditions
 }
 
+func MemcachedConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetMemcached(name)
+	return instance.Status.Conditions
+}
+
 func CreateLoadBalancerService(name types.NamespacedName, addDNSAnno bool) *corev1.Service {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -699,7 +704,11 @@ func CreateMemcachedConfigWithName(name string, namespace string, spec map[strin
 	return th.CreateUnstructured(raw)
 }
 func CreateMemcachedConfig(namespace string, spec map[string]interface{}) client.Object {
-	name := uuid.New().String()
+	// name is set as a label on the statefulset and must not start with numbers
+	// "error": "Service \"6057811f-1ab3-4ebb-adaf-2\" is invalid: metadata.name: Invalid value: \"6057811f-1ab3-4ebb-adaf-2\":
+	// a DNS-1035 label must consist of lower case alphanumeric characters or '-',start with an alphabetic character, and end
+	// with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"}
+	name := "memcached-" + uuid.New().String()[:25]
 
 	raw := map[string]interface{}{
 		"apiVersion": "memcached.openstack.org/v1beta1",

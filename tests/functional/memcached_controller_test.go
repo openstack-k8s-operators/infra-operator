@@ -21,6 +21,10 @@ import (
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	//revive:disable-next-line:dot-imports
+	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -45,6 +49,69 @@ var _ = Describe("Memcached Controller", func() {
 			Eventually(func(_ Gomega) {
 				GetMemcached(memcachedName)
 			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("Deployment rollout is progressing", func() {
+		BeforeEach(func() {
+			memcached := CreateMemcachedConfig(namespace, GetDefaultMemcachedSpec())
+			memcachedName.Name = memcached.GetName()
+			memcachedName.Namespace = memcached.GetNamespace()
+			DeferCleanup(th.DeleteInstance, memcached)
+
+			th.SimulateStatefulSetProgressing(memcachedName)
+		})
+
+		It("shows the deployment progressing in DeploymentReadyCondition", func() {
+			th.ExpectConditionWithDetails(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+				condition.RequestedReason,
+				condition.DeploymentReadyRunningMessage,
+			)
+
+			th.ExpectCondition(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+
+		It("reaches Ready when deployment rollout finished", func() {
+			th.ExpectConditionWithDetails(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+				condition.RequestedReason,
+				condition.DeploymentReadyRunningMessage,
+			)
+
+			th.ExpectCondition(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+			)
+
+			th.SimulateStatefulSetReplicaReady(memcachedName)
+
+			th.ExpectCondition(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionTrue,
+			)
+
+			th.ExpectCondition(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionTrue,
+			)
 		})
 	})
 
