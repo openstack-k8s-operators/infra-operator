@@ -692,7 +692,6 @@ def process_service(service, reserved_hosts, resume):
     if not resume:
         try:
             logging.info('Fencing %s' % service.host)
-            _host_fence(service.host, 'off')
             fence_result = _host_fence(service.host, 'off')
             if not fence_result:
                 logging.error('Fencing failed for %s, skipping evacuation' % service.host)
