@@ -53,11 +53,9 @@ func (a *AssignIPDetails) buildReserved() error {
 
 // AssignIP assigns an IP using a range and a reserve list.
 func (a *AssignIPDetails) AssignIP() (*networkv1.IPAddress, error) {
-
 	err := a.buildExcluded()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build excluded IPs: %w", err)
-
 	}
 	err = a.buildReserved()
 	if err != nil {
@@ -82,7 +80,6 @@ func (a *AssignIPDetails) AssignIP() (*networkv1.IPAddress, error) {
 }
 
 func (a *AssignIPDetails) fixedIPExists() (*networkv1.IPAddress, error) {
-
 	if _, ok := a.excluded[a.FixedIP]; ok {
 		return nil, fmt.Errorf("FixedIP %s is in ExcludeAddresses", a.FixedIP.String())
 	}
@@ -99,7 +96,6 @@ func (a *AssignIPDetails) fixedIPExists() (*networkv1.IPAddress, error) {
 }
 
 func (a *AssignIPDetails) iterateForAssignment() (*networkv1.IPAddress, error) {
-
 	for _, allocRange := range a.SubNet.AllocationRanges {
 		firstip, err := netip.ParseAddr(allocRange.Start)
 		if err != nil {
