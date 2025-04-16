@@ -15,24 +15,8 @@ limitations under the License.
 
 package v1beta1
 
-import (
-	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
-)
-
-// InstanceHa Condition Types used by API objects.
-const (
-	// InstanceHaReadyCondition Status=True condition which indicates if InstanceHa is configured and operational
-	InstanceHaReadyCondition condition.Type = "InstanceHaReady"
-)
-
-// InstanceHa Reasons used by API objects.
-const ()
-
 // Common Messages used by API objects.
 const (
-	// InstanceHaReadyInitMessage
-	InstanceHaReadyInitMessage = "Instance HA not started"
-
 	// InstanceHaOpenStackConfigMapWaitingMessage
 	InstanceHaOpenStackConfigMapWaitingMessage = "Instance HA waiting for OpenStack ConfigMap"
 
@@ -44,13 +28,4 @@ const (
 
 	// InstanceHaFencingSecretWaitingMessage
 	InstanceHaFencingSecretWaitingMessage = "Instance HA waiting for Fencing secret"
-
-	// InstanceHaInputReady
-	InstanceHaInputReady = "Instance HA input ready"
-
-	// InstanceHaReadyMessage
-	InstanceHaReadyMessage = "Instance HA created"
-
-	// InstanceHaReadyErrorMessage
-	InstanceHaReadyErrorMessage = "Instance HA error occured %s"
 )
