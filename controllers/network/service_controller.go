@@ -130,7 +130,7 @@ func (r *ServiceReconciler) getServiceDNSData(
 					for _, ingr := range svc.Status.LoadBalancer.Ingress {
 						addr := net.ParseIP(ingr.IP)
 						if addr == nil {
-							return nil, fmt.Errorf(fmt.Sprintf("unrecognized address %s", ingr.IP))
+							return nil, fmt.Errorf("unrecognized address %s", ingr.IP)
 						}
 
 						if host, ok := svcDNSHosts[addr.String()]; !ok {

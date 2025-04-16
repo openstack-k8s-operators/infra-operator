@@ -496,7 +496,7 @@ func getPodNetworkDetails(
 
 				// verify the nodeName information is already present in the pod spec, otherwise report an error to reconcile
 				if pod.Spec.NodeName == "" {
-					return detailList, fmt.Errorf(fmt.Sprintf("empty spec.nodeName on pod %s", pod.Name))
+					return detailList, fmt.Errorf("empty spec.nodeName on pod %s", pod.Name)
 				}
 
 				detail := bgp.PodDetail{
@@ -513,8 +513,8 @@ func getPodNetworkDetails(
 				// reflect all requested networks. return with an error to reconcile if the length
 				// is <= the status. Note: the status also has the pod network
 				if len(netsStatus) <= len(netAttach) {
-					return detailList, fmt.Errorf(fmt.Sprintf("metadata.Annotations['k8s.ovn.org/pod-networks'] %s on pod %s, does not match requested networks %s",
-						pod.GetAnnotations()[k8s_networkv1.NetworkStatusAnnot], pod.Name, netAttachString))
+					return detailList, fmt.Errorf("metadata.Annotations['k8s.ovn.org/pod-networks'] %s on pod %s, does not match requested networks %s",
+						pod.GetAnnotations()[k8s_networkv1.NetworkStatusAnnot], pod.Name, netAttachString)
 				}
 
 				var netsStatusCopy = make([]k8s_networkv1.NetworkStatus, len(netsStatus))
@@ -550,7 +550,7 @@ func getPodNetworkDetails(
 
 					// verify there is IP information for the network, otherwise report an error to reconcile
 					if len(netStat.IPs) == 0 {
-						return detailList, fmt.Errorf(fmt.Sprintf("no IP information for network %s on pod %s", netStat.Name, pod.Name))
+						return detailList, fmt.Errorf("no IP information for network %s on pod %s", netStat.Name, pod.Name)
 					}
 				}
 
