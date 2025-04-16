@@ -1,6 +1,6 @@
 module github.com/openstack-k8s-operators/infra-operator/apis
 
-go 1.21
+go 1.23
 
 require (
 	github.com/go-logr/logr v1.4.3
