@@ -70,8 +70,8 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	listOpts := []client.ListOption{
 		client.InNamespace(req.Namespace),
 	}
-	if err := r.Client.List(ctx, dnsmasqs, listOpts...); err != nil {
-		return ctrl.Result{}, fmt.Errorf("Unable to retrieve DNSMasqList %w", err)
+	if err := r.List(ctx, dnsmasqs, listOpts...); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unable to retrieve DNSMasqList %w", err)
 	}
 
 	dnsHosts, err := r.getServiceDNSData(ctx, req.Namespace)
@@ -101,7 +101,6 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
 		Complete(r)
@@ -130,7 +129,7 @@ func (r *ServiceReconciler) getServiceDNSData(
 					for _, ingr := range svc.Status.LoadBalancer.Ingress {
 						addr := net.ParseIP(ingr.IP)
 						if addr == nil {
-							return nil, fmt.Errorf(fmt.Sprintf("unrecognized address %s", ingr.IP))
+							return nil, fmt.Errorf("unrecognized address %s", ingr.IP)
 						}
 
 						if host, ok := svcDNSHosts[addr.String()]; !ok {
@@ -170,7 +169,6 @@ func (r *ServiceReconciler) createOrPatchDNSData(
 
 	// create or update the DNSData
 	op, err := controllerutil.CreateOrPatch(ctx, r.Client, svcDNSData, func() error {
-
 		svcDNSData.Spec.DNSDataLabelSelectorValue = dnsmasq.Spec.DNSDataLabelSelectorValue
 		svcDNSData.Spec.Hosts = svcDNSHosts
 

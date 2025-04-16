@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package main implements the infra-operator, a Kubernetes operator for managing infrastructure services
 package main
 
 import (

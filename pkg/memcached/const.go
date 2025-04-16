@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package memcached provides constants and configuration utilities for Memcached
 package memcached
 
 const (

@@ -10,6 +10,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package instanceha provides utilities for creating Kubernetes resources for InstanceHA
 package instanceha
 
 import (
@@ -24,6 +25,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// Deployment creates a Kubernetes Deployment for the InstanceHa resource
 func Deployment(
 	instance *instancehav1.InstanceHa,
 	labels map[string]string,
@@ -33,7 +35,6 @@ func Deployment(
 	containerImage string,
 	topology *topologyv1.Topology,
 ) *appsv1.Deployment {
-
 	replicas := int32(1)
 
 	envVars := map[string]env.Setter{}
@@ -168,8 +169,7 @@ func instancehaPodVolumeMounts() []corev1.VolumeMount {
 func instancehaPodVolumes(
 	instance *instancehav1.InstanceHa,
 ) []corev1.Volume {
-
-	var config0644AccessMode int32 = 0644
+	var config0644AccessMode int32 = 0o644
 	return []corev1.Volume{
 		{
 			Name: "openstack-config",
