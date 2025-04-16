@@ -46,6 +46,7 @@ import (
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 )
 
+// CtlPlaneNetwork defines the default control plane network name
 const CtlPlaneNetwork = "ctlplane"
 
 // IPSetReconciler reconciles a IPSet object
@@ -76,7 +77,7 @@ func (r *IPSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	Log := r.GetLogger(ctx)
 	// Fetch the IPSet instance
 	instance := &networkv1.IPSet{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -170,7 +171,7 @@ func (r *IPSetReconciler) SetupWithManager(_ context.Context, mgr ctrl.Manager) 
 		listOpts := []client.ListOption{
 			client.InNamespace(o.GetNamespace()),
 		}
-		if err := r.Client.List(ctx, ipsets, listOpts...); err != nil {
+		if err := r.List(ctx, ipsets, listOpts...); err != nil {
 			Log.Error(err, "Unable to retrieve IPSetList")
 			return nil
 		}

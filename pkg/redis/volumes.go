@@ -9,11 +9,12 @@ import (
 )
 
 const (
+	// RedisCertPrefix defines the prefix for Redis TLS certificates
 	RedisCertPrefix = "redis"
 )
 
 func getVolumes(r *redisv1.Redis) []corev1.Volume {
-	scriptsPerms := int32(0755)
+	scriptsPerms := int32(0o755)
 	configDataFiles := []corev1.KeyToPath{
 		{
 			Key:  "sentinel.conf.in",
@@ -124,15 +125,15 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 
 	if r.Spec.TLS.Enabled() {
 		svc := tls.Service{
-			SecretName: *r.Spec.TLS.GenericService.SecretName,
+			SecretName: *r.Spec.TLS.SecretName,
 			CertMount:  nil,
 			KeyMount:   nil,
 			CaMount:    nil,
 		}
 		serviceVolume := svc.CreateVolume(RedisCertPrefix)
 		vols = append(vols, serviceVolume)
-		if r.Spec.TLS.Ca.CaBundleSecretName != "" {
-			caVolume := r.Spec.TLS.Ca.CreateVolume()
+		if r.Spec.TLS.CaBundleSecretName != "" {
+			caVolume := r.Spec.TLS.CreateVolume()
 			vols = append(vols, caVolume)
 		}
 	}
@@ -144,15 +145,15 @@ func getTLSVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 	var vols []corev1.VolumeMount
 	if r.Spec.TLS.Enabled() {
 		svc := tls.Service{
-			SecretName: *r.Spec.TLS.GenericService.SecretName,
+			SecretName: *r.Spec.TLS.SecretName,
 			CertMount:  nil,
 			KeyMount:   nil,
 			CaMount:    nil,
 		}
 		serviceVolumeMounts := svc.CreateVolumeMounts(RedisCertPrefix)
 		vols = serviceVolumeMounts
-		if r.Spec.TLS.Ca.CaBundleSecretName != "" {
-			caVolumeMounts := r.Spec.TLS.Ca.CreateVolumeMounts(nil)
+		if r.Spec.TLS.CaBundleSecretName != "" {
+			caVolumeMounts := r.Spec.TLS.CreateVolumeMounts(nil)
 			vols = append(vols, caVolumeMounts...)
 		}
 	}

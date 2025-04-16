@@ -83,7 +83,7 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	Log := r.GetLogger(ctx)
 	// Fetch the TransportURL instance
 	instance := &rabbitmqv1.TransportURL{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -261,10 +261,8 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	tlsEnabled := false
-	if rabbit.Spec.TLS.SecretName != "" {
-		tlsEnabled = true
-	}
+	tlsEnabled := rabbit.Spec.TLS.SecretName != ""
+
 	Log.Info(fmt.Sprintf("rabbitmq cluster %s has TLS enabled: %t", rabbit.Name, tlsEnabled))
 
 	// Create a new secret with the transport URL for this CR

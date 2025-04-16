@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package network implements network controllers for managing BGP configuration and related network resources
 package network
 
 import (
@@ -85,7 +86,7 @@ func (r *BGPConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// Fetch the BGPConfiguration instance
 	instance := &networkv1.BGPConfiguration{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -175,7 +176,7 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		listOpts := []client.ListOption{
 			client.InNamespace(o.GetNamespace()),
 		}
-		if err := r.Client.List(ctx, bgpConfigurationList, listOpts...); err != nil {
+		if err := r.List(ctx, bgpConfigurationList, listOpts...); err != nil {
 			Log.Error(err, "Unable to retrieve BGPConfigurationList in namespace %s", o.GetNamespace())
 			return nil
 		}
@@ -214,7 +215,7 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		listOpts := []client.ListOption{
 			client.InNamespace(bgpConfigurationNamespace),
 		}
-		if err := r.Client.List(ctx, bgpConfigurationList, listOpts...); err != nil {
+		if err := r.List(ctx, bgpConfigurationList, listOpts...); err != nil {
 			Log.Error(err, "Unable to retrieve BGPConfigurationList in namespace %s", bgpConfigurationNamespace)
 			return nil
 		}
@@ -331,7 +332,7 @@ func (r *BGPConfigurationReconciler) reconcileDelete(ctx context.Context, instan
 
 	// Delete all FRRConfiguration in the Spec.FRRConfigurationNamespace namespace,
 	// which have the correct owner and ownernamespace label
-	err := r.Client.DeleteAllOf(
+	err := r.DeleteAllOf(
 		ctx,
 		&frrk8sv1.FRRConfiguration{},
 		client.InNamespace(instance.Spec.FRRConfigurationNamespace),
@@ -341,7 +342,7 @@ func (r *BGPConfigurationReconciler) reconcileDelete(ctx context.Context, instan
 		},
 	)
 	if err != nil && !k8s_errors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("Error DeleteAllOf FRRConfiguration: %w", err)
+		return ctrl.Result{}, fmt.Errorf("error DeleteAllOf FRRConfiguration: %w", err)
 	}
 
 	// Service is deleted so remove the finalizer.
@@ -361,8 +362,8 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 	listOpts := []client.ListOption{
 		client.InNamespace(instance.Namespace),
 	}
-	if err := r.Client.List(ctx, podList, listOpts...); err != nil {
-		return ctrl.Result{}, fmt.Errorf("Unable to retrieve PodList %w", err)
+	if err := r.List(ctx, podList, listOpts...); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unable to retrieve PodList %w", err)
 	}
 
 	// get podDetail all pods which have additional interfaces configured
@@ -376,8 +377,8 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 	listOpts = []client.ListOption{
 		client.InNamespace(instance.Spec.FRRConfigurationNamespace), // defaults to metallb-system
 	}
-	if err := r.Client.List(ctx, frrConfigList, listOpts...); err != nil {
-		return ctrl.Result{}, fmt.Errorf("Unable to retrieve FRRConfigurationList %w", err)
+	if err := r.List(ctx, frrConfigList, listOpts...); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unable to retrieve FRRConfigurationList %w", err)
 	}
 
 	// get all frr configs for the nodes pods are scheduled on
@@ -465,7 +466,7 @@ func (r *BGPConfigurationReconciler) deleteStaleFRRConfigurations(ctx context.Co
 				idx := slices.IndexFunc(podNetworkDetailList, f)
 				if idx < 0 {
 					// There is no pod in the namespace corrsponding to the FRRConfiguration, delete it
-					if err := r.Client.Delete(ctx, &cfg); err != nil && !k8s_errors.IsNotFound(err) {
+					if err := r.Delete(ctx, &cfg); err != nil && !k8s_errors.IsNotFound(err) {
 						return fmt.Errorf("unable to delete FRRConfiguration %w", err)
 					}
 					r.GetLogger(ctx).Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown, deleted FRRConfiguration %s", podName, cfg.Name))
@@ -508,7 +509,7 @@ func getPodNetworkDetails(
 
 				// verify the nodeName information is already present in the pod spec, otherwise report an error to reconcile
 				if pod.Spec.NodeName == "" {
-					return detailList, fmt.Errorf(fmt.Sprintf("empty spec.nodeName on pod %s", pod.Name))
+					return detailList, fmt.Errorf("empty spec.nodeName on pod %s", pod.Name)
 				}
 
 				detail := bgp.PodDetail{
@@ -525,11 +526,11 @@ func getPodNetworkDetails(
 				// reflect all requested networks. return with an error to reconcile if the length
 				// is <= the status. Note: the status also has the pod network
 				if len(netsStatus) <= len(netAttach) {
-					return detailList, fmt.Errorf(fmt.Sprintf("metadata.Annotations['k8s.ovn.org/pod-networks'] %s on pod %s, does not match requested networks %s",
-						pod.GetAnnotations()[k8s_networkv1.NetworkStatusAnnot], pod.Name, netAttachString))
+					return detailList, fmt.Errorf("metadata.Annotations['k8s.ovn.org/pod-networks'] %s on pod %s, does not match requested networks %s",
+						pod.GetAnnotations()[k8s_networkv1.NetworkStatusAnnot], pod.Name, netAttachString)
 				}
 
-				var netsStatusCopy = make([]k8s_networkv1.NetworkStatus, len(netsStatus))
+				netsStatusCopy := make([]k8s_networkv1.NetworkStatus, len(netsStatus))
 				copy(netsStatusCopy, netsStatus)
 				// verify there are IP information for all networks in the status, otherwise report an error to reconcile
 				for idx, netStat := range netsStatusCopy {
@@ -562,7 +563,7 @@ func getPodNetworkDetails(
 
 					// verify there is IP information for the network, otherwise report an error to reconcile
 					if len(netStat.IPs) == 0 {
-						return detailList, fmt.Errorf(fmt.Sprintf("no IP information for network %s on pod %s", netStat.Name, pod.Name))
+						return detailList, fmt.Errorf("no IP information for network %s on pod %s", netStat.Name, pod.Name)
 					}
 				}
 

@@ -1,3 +1,4 @@
+// Package impl provides implementation utilities for RabbitMQ cluster operations
 package impl
 
 import (
@@ -26,6 +27,7 @@ func NewRabbitMqCluster(
 	}
 }
 
+// CreateOrPatch creates or updates a RabbitMQ cluster resource
 func (r *RabbitMqCluster) CreateOrPatch(
 	ctx context.Context,
 	h *helper.Helper,
@@ -59,7 +61,6 @@ func (r *RabbitMqCluster) CreateOrPatch(
 		}
 
 		return nil
-
 	})
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
@@ -83,10 +84,9 @@ func (r *RabbitMqCluster) CreateOrPatch(
 	}
 
 	return ctrl.Result{}, nil
-
 }
 
-// GetStatefulSet - get the statefulset object.
+// GetRabbitMqCluster returns the RabbitMQ cluster object
 func (r *RabbitMqCluster) GetRabbitMqCluster() rabbitmqv2.RabbitmqCluster {
 	return *r.rabbitmqCluster
 }
@@ -98,7 +98,6 @@ func GetRabbitMqClusterWithName(
 	name string,
 	namespace string,
 ) (*rabbitmqv2.RabbitmqCluster, error) {
-
 	rabbitmq := &rabbitmqv2.RabbitmqCluster{}
 	err := h.GetClient().Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, rabbitmq)
 	if err != nil {
@@ -115,7 +114,7 @@ func (r *RabbitMqCluster) Delete(
 ) error {
 	err := h.GetClient().Delete(ctx, r.rabbitmqCluster)
 	if err != nil && !k8s_errors.IsNotFound(err) {
-		err = fmt.Errorf("Error deleting rabbitmqcluster %s: %w", r.rabbitmqCluster.Name, err)
+		err = fmt.Errorf("error deleting rabbitmqcluster %s: %w", r.rabbitmqCluster.Name, err)
 		return err
 	}
 

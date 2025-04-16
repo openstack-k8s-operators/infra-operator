@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package instanceha implements the InstanceHA controller for managing high availability instances
 package instanceha
 
 import (
@@ -62,7 +63,7 @@ import (
 	instanceha "github.com/openstack-k8s-operators/infra-operator/pkg/instanceha"
 )
 
-// InstanceHaReconciler reconciles a InstanceHa object
+// Reconciler reconciles a InstanceHa object
 type Reconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
@@ -91,11 +92,10 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 
 // Reconcile -
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
-
 	Log := r.GetLogger(ctx)
 
 	instance := &instancehav1.InstanceHa{}
-	err := r.Client.Get(context.TODO(), req.NamespacedName, instance)
+	err := r.Get(context.TODO(), req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			Log.Info("InstanceHa CR not found")
@@ -333,7 +333,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.TLSInputReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
-					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, instance.Spec.CaBundleSecretName)))
+					condition.TLSInputReadyWaitingMessage, instance.Spec.CaBundleSecretName))
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -495,7 +495,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	return ctrl.Result{}, nil
-
 }
 
 // fields to index to reconcile when change
@@ -508,20 +507,17 @@ const (
 	topologyField              = ".spec.topologyRef.Name"
 )
 
-var (
-	allWatchFields = []string{
-		caBundleSecretNameField,
-		openStackConfigMapField,
-		openStackConfigSecretField,
-		fencingSecretField,
-		instanceHaConfigMapField,
-		topologyField,
-	}
-)
+var allWatchFields = []string{
+	caBundleSecretNameField,
+	openStackConfigMapField,
+	openStackConfigSecretField,
+	fencingSecretField,
+	instanceHaConfigMapField,
+	topologyField,
+}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-
 	// index caBundleSecretNameField
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, caBundleSecretNameField, func(rawObj client.Object) []string {
 		cr := rawObj.(*instancehav1.InstanceHa)
@@ -644,6 +640,8 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	return requests
 }
 
+// GetContainerImage returns the container image to use for the instance, either from
+// the provided containerImage parameter or from the infra-instanceha-config ConfigMap
 func (r *Reconciler) GetContainerImage(
 	ctx context.Context,
 	containerImage string,
@@ -657,7 +655,7 @@ func (r *Reconciler) GetContainerImage(
 	}
 
 	objectKey := client.ObjectKey{Namespace: src.GetNamespace(), Name: instanceHaConfigMapName}
-	err := r.Client.Get(ctx, objectKey, cm)
+	err := r.Get(ctx, objectKey, cm)
 	if err != nil {
 		return "", err
 	}
