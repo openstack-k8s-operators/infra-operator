@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package rabbitmq implements the RabbitMQ controller for managing RabbitMQ cluster instances
 package rabbitmq
 
 import (
@@ -72,13 +73,11 @@ const (
 	topologyField          = ".spec.topologyRef.Name"
 )
 
-var (
-	rmqAllWatchFields = []string{
-		serviceSecretNameField,
-		caSecretNameField,
-		topologyField,
-	}
-)
+var rmqAllWatchFields = []string{
+	serviceSecretNameField,
+	caSecretNameField,
+	topologyField,
+}
 
 // Reconciler reconciles a RabbitMq object
 type Reconciler struct {
@@ -214,7 +213,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.TLSInputReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
-					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, err.Error())))
+					condition.TLSInputReadyWaitingMessage, err.Error()))
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -461,7 +460,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 }
 
 func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, config *rest.Config, apply bool) error {
-
 	cli := helper.GetKClient()
 
 	pod := types.NamespacedName{

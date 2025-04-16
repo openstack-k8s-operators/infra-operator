@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package redis implements the Redis controller for managing Redis instances
 package redis
 
 import (
@@ -71,13 +72,11 @@ const (
 	topologyField          = ".spec.topologyRef.Name"
 )
 
-var (
-	allWatchFields = []string{
-		serviceSecretNameField,
-		caSecretNameField,
-		topologyField,
-	}
-)
+var allWatchFields = []string{
+	serviceSecretNameField,
+	caSecretNameField,
+	topologyField,
+}
 
 // Reconciler reconciles a Redis object
 type Reconciler struct {
@@ -249,7 +248,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.TLSInputReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
-					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, instance.Spec.TLS.CaBundleSecretName)))
+					condition.TLSInputReadyWaitingMessage, instance.Spec.TLS.CaBundleSecretName))
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -275,7 +274,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.TLSInputReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
-					fmt.Sprintf(condition.TLSInputReadyWaitingMessage, err.Error())))
+					condition.TLSInputReadyWaitingMessage, err.Error()))
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -492,8 +491,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Extract the secret name from the spec, if one is provided
 		cr := rawObj.(*redisv1.Redis)
 		tls := &cr.Spec.TLS
-		if tls.Ca.CaBundleSecretName != "" {
-			return []string{tls.Ca.CaBundleSecretName}
+		if tls.CaBundleSecretName != "" {
+			return []string{tls.CaBundleSecretName}
 		}
 		return nil
 	}); err != nil {
@@ -505,7 +504,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		cr := rawObj.(*redisv1.Redis)
 		tls := &cr.Spec.TLS
 		if tls.Enabled() {
-			return []string{*tls.GenericService.SecretName}
+			return []string{*tls.SecretName}
 		}
 		return nil
 	}); err != nil {

@@ -13,6 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package dnsmasq provides constants and utilities for DNSMasq service configuration
 package dnsmasq
 
 const (
