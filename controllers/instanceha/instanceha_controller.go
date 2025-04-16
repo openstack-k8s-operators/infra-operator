@@ -150,7 +150,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}()
 
 	cl := condition.CreateList(
-		condition.UnknownCondition(instancehav1.InstanceHaReadyCondition, condition.InitReason, instancehav1.InstanceHaReadyInitMessage),
+		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+		condition.UnknownCondition(condition.InputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
+		condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
 		// service account, role, rolebinding conditions
 		condition.UnknownCondition(condition.ServiceAccountReadyCondition, condition.InitReason, condition.ServiceAccountReadyInitMessage),
 		condition.UnknownCondition(condition.RoleReadyCondition, condition.InitReason, condition.RoleReadyInitMessage),
@@ -202,17 +204,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHaReadyCondition,
+				condition.InputReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
 				instancehav1.InstanceHaOpenStackConfigMapWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHaReadyCondition,
+			condition.InputReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHaReadyErrorMessage,
+			condition.InputReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
@@ -222,17 +224,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHaReadyCondition,
+				condition.InputReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
 				instancehav1.InstanceHaOpenStackConfigSecretWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHaReadyCondition,
+			condition.InputReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHaReadyErrorMessage,
+			condition.InputReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
@@ -242,17 +244,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			instance.Status.Conditions.Set(condition.FalseCondition(
-				instancehav1.InstanceHaReadyCondition,
+				condition.InputReadyCondition,
 				condition.RequestedReason,
 				condition.SeverityInfo,
 				instancehav1.InstanceHaFencingSecretWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 		instance.Status.Conditions.Set(condition.FalseCondition(
-			instancehav1.InstanceHaReadyCondition,
+			condition.InputReadyCondition,
 			condition.ErrorReason,
 			condition.SeverityWarning,
-			instancehav1.InstanceHaReadyErrorMessage,
+			condition.InputReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, err
 	}
@@ -285,17 +287,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			if err != nil {
 				if k8s_errors.IsNotFound(err) {
 					instance.Status.Conditions.Set(condition.FalseCondition(
-						instancehav1.InstanceHaReadyCondition,
+						condition.InputReadyCondition,
 						condition.RequestedReason,
 						condition.SeverityInfo,
 						instancehav1.InstanceHaConfigMapWaitingMessage))
 					return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 				}
 				instance.Status.Conditions.Set(condition.FalseCondition(
-					instancehav1.InstanceHaReadyCondition,
+					condition.InputReadyCondition,
 					condition.ErrorReason,
 					condition.SeverityWarning,
-					instancehav1.InstanceHaReadyErrorMessage,
+					condition.InputReadyErrorMessage,
 					err.Error()))
 				return ctrl.Result{}, err
 			}
@@ -308,6 +310,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 	}
 	configVars[instance.Spec.InstanceHaConfigMap] = env.SetValue(configMapHash)
+
+	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, condition.InputReadyMessage)
 
 	if instance.Spec.CaBundleSecretName != "" {
 		secretHash, err := tls.ValidateCACertSecret(
