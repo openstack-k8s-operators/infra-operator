@@ -17,6 +17,7 @@ limitations under the License.
 package rabbitmq
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -43,6 +44,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/ocp"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
@@ -91,6 +93,10 @@ type Reconciler struct {
 
 // Required to determine IPv6 and FIPS
 // +kubebuilder:rbac:groups=config.openshift.io,resources=networks,verbs=get;list;watch;
+
+// Required to exec into pods
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete;
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 
 // Reconcile - RabbitMq
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -356,6 +362,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+
+		// Let's wait DeploymentReadyCondition=True to apply the policy
+		if instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
+			Log.Info("ha-all policy not present. Applying.")
+			err := updateMirroredPolicy(ctx, helper, instance, r.config, true)
+			if err != nil {
+				Log.Error(err, "Could not apply ha-all policy")
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.DeploymentReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.DeploymentReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
+			}
+		} else if instance.Spec.QueueType != "Mirrored" && instance.Status.QueueType == "Mirrored" {
+			Log.Info("Removing ha-all policy")
+			err := updateMirroredPolicy(ctx, helper, instance, r.config, false)
+			if err != nil {
+				Log.Error(err, "Could not remove ha-all policy")
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.DeploymentReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.DeploymentReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
+			}
+		}
+		instance.Status.QueueType = instance.Spec.QueueType
 	}
 
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
@@ -363,6 +397,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 	return ctrl.Result{}, nil
+}
+
+func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, config *rest.Config, apply bool) error {
+
+	cli := helper.GetKClient()
+
+	pod := types.NamespacedName{
+		Name:      instance.Name + "-server-0",
+		Namespace: instance.Namespace,
+	}
+
+	container := "rabbitmq"
+	s := []string{"/bin/bash", "-c", "rabbitmqctl clear_policy ha-all"}
+
+	if apply {
+		s = []string{"/bin/bash", "-c", "rabbitmqctl set_policy ha-all \"\" '{\"ha-mode\":\"exactly\",\"ha-params\":2,\"ha-promote-on-shutdown\":\"always\"}'"}
+	}
+
+	err := rsh.ExecInPod(ctx, cli, config, pod, container, s,
+		func(_ *bytes.Buffer, _ *bytes.Buffer) error {
+			return nil
+		})
+	return err
 }
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper) (ctrl.Result, error) {
