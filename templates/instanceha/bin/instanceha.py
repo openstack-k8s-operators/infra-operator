@@ -67,6 +67,7 @@ with open("/var/lib/instanceha/config.yaml", 'r') as stream:
 EVACUABLE_TAG = config["EVACUABLE_TAG"] if 'EVACUABLE_TAG' in config else "evacuable"
 TAGGED_IMAGES = config["TAGGED_IMAGES"] if 'TAGGED_IMAGES' in config else "true"
 TAGGED_FLAVORS = config["TAGGED_FLAVORS"] if 'TAGGED_FLAVORS' in config else "true"
+TAGGED_AGGREGATES = config["TAGGED_AGGREGATES"] if 'TAGGED_AGGREGATES' in config else "true"
 DELTA = int(config["DELTA"]) if 'DELTA' in config else 30
 DELAY = int(config["DELAY"]) if 'DELAY' in config else 0
 POLL = int(config["POLL"]) if 'POLL' in config else 45
@@ -146,10 +147,14 @@ def _is_aggregate_evacuable(connection, host):
     aggregates = connection.aggregates.list()
     evacuable_aggregates = [i for i in aggregates if EVACUABLE_TAG in i.metadata]
     result = any(host in i.hosts for i in evacuable_aggregates)
-    if not result:
-        logging.warning("Host %s is not part of an aggregate tagged with %s. It will not be evacuated" %(host, EVACUABLE_TAG))
 
     return result
+
+
+def _aggregate_ids(conn, service):
+
+    aggregates = conn.aggregates.list()
+    return [ag.id for ag in aggregates if service.host in ag.hosts]
 
 
 def _custom_check():
@@ -158,16 +163,11 @@ def _custom_check():
 
 
 def _host_evacuate(connection, service):
+
     host = service.host
     result = True
-    if 'true' in TAGGED_IMAGES:
-        images = _get_evacuable_images(connection)
-    else:
-        images = []
-    if 'true' in TAGGED_FLAVORS:
-        flavors = _get_evacuable_flavors(connection)
-    else:
-        flavors = []
+    images = _get_evacuable_images(connection) if 'true' in TAGGED_IMAGES else []
+    flavors = _get_evacuable_flavors(connection) if 'true' in TAGGED_FLAVORS else []
     servers = connection.servers.list(search_opts={'host': host, 'all_tenants': 1 })
     servers = [server for server in servers if server.status in {'ACTIVE', 'ERROR', 'STOPPED'}]
 
@@ -692,7 +692,10 @@ def process_service(service, reserved_hosts, resume):
     if not resume:
         try:
             logging.info('Fencing %s' % service.host)
-            _host_fence(service.host, 'off')
+            fence_result = _host_fence(service.host, 'off')
+            if not fence_result:
+                logging.error('Fencing failed for %s, skipping evacuation' % service.host)
+                return False
         except Exception as e:
             logging.error('Failed to fence %s: %s' % (service.host, e))
             return False
@@ -721,28 +724,43 @@ def process_service(service, reserved_hosts, resume):
             return False
 
     if 'true' in RESERVED_HOSTS.lower():
-        try:
-            if reserved_hosts:
+        if reserved_hosts:
+            if 'true' in TAGGED_AGGREGATES.lower():
+                # try enabling a compute in the same host aggregate
+                compute_aggregate_ids = _aggregate_ids(conn, service)
+                logging.debug("Aggregate IDs of failed compute %s: %s" % (service.host, compute_aggregate_ids))
+                logging.debug("Aggregate IDs of reserved hosts: %s" % {host.host: _aggregate_ids(conn, host) for host in reserved_hosts if _is_aggregate_evacuable(conn, host.host)})
+                service2_list = [
+                    host for host in reserved_hosts
+                    if _is_aggregate_evacuable(conn, host.host) and
+                       set(_aggregate_ids(conn, host)).intersection(compute_aggregate_ids)
+                ]
+
+                if service2_list:
+                    service2 = service2_list[0]
+                    reserved_hosts.remove(service2)
+                    _host_enable(conn, service2, reenable=False)
+                    logging.info('Enabled host %s from the reserved pool (from the same host aggregate of %s).' % (service2.host, service.host))
+                else:
+                    logging.warning('No reserved compute found in the same host aggregate of %s' % service.host)
+
+            else:
                 # try enabling a compute in the same AZ
                 try:
                     service2 = [host for host in reserved_hosts if host.zone == service.zone][0]
                     reserved_hosts.remove(service2)
                     _host_enable(conn, service2, reenable=False)
-                    logging.info('Enabled host %s from the reserved pool' % service2.host)
+                    logging.info('Enabled host %s from the reserved pool (same AZ).' % service2.host)
                 except:
                     #logging.error('No reserved compute found in the same AZ')
                     logging.warning('No reserved compute found in the same AZ')
                     #return False
-            else:
-                #for now we don't care if there are no available reserved hosts to enable
-                logging.warning('Not enough hosts available from the reserved pool')
-                #return True
-                #logging.error('Not enough hosts available from the reserved pool')
-                #return False
-        except Exception as e:
-            logging.warning('Failed to enable reserved compute for %s: %s' % (service.host, e))
-            logging.debug('Exception traceback:', exc_info=True)
-            return False
+        else:
+            #for now we don't care if there are no available reserved hosts to enable
+            logging.warning('Not enough hosts available from the reserved pool')
+            #return True
+            #logging.error('Not enough hosts available from the reserved pool')
+            #return False
 
     try:
         logging.info('Start evacuation of %s' % service.host)
@@ -838,36 +856,37 @@ def main():
                 # Filter out computes that have no vms running (we don't want to waste time evacuating those anyway)
                 compute_nodes = [service for service in compute_nodes if service not in [c for c in compute_nodes if not conn.servers.list(search_opts={'host': c.host, 'all_tenants': 1})]]
 
+                # Get list of reserved hosts (if feature is enabled)
+                reserved_hosts = [service for service in services if ('disabled' in service.status and 'reserved' in service.disabled_reason )] if 'true' in RESERVED_HOSTS.lower() else []
+                logging.debug('List of reserved hosts: %s' % [h.host for h in reserved_hosts])
+
                 # Check if there are images, flavors or aggregates configured with the EVACUABLE tag
-                images = _get_evacuable_images(conn)
-                flavors = _get_evacuable_flavors(conn)
-                evacuable_aggregates = [i for i in conn.aggregates.list() if EVACUABLE_TAG in i.metadata]
+                images = _get_evacuable_images(conn) if TAGGED_IMAGES else []
+                flavors = _get_evacuable_flavors(conn) if TAGGED_FLAVORS else []
 
                 if flavors or images:
                     compute_nodes = [s for s in compute_nodes if [v for v in conn.servers.list(search_opts={'host': s.host, 'all_tenants': 1 }) if _is_server_evacuable(v, flavors, images)]]
 
-                if evacuable_aggregates:
+                if 'true' in TAGGED_AGGREGATES.lower():
+                    compute_nodes_down = compute_nodes
                     # Filter out computes not part of evacuable aggregates (if any aggregate is tagged, otherwise evacuate them all)
                     compute_nodes = [service for service in compute_nodes if _is_aggregate_evacuable(conn, service.host)]
+                    # Override services to only account the ones that are part of evacuable aggregates
+                    services = [service for service in services if _is_aggregate_evacuable(conn, service.host)]
+                    # warn user about non tagged computes
+                    down_not_tagged = [service.host for service in compute_nodes_down if service not in compute_nodes]
+                    if down_not_tagged:
+                        logging.warning('The following computes are not part of an evacuable aggregate, so they will not be recovered: %s' % down_not_tagged)
 
                 logging.debug('List of stale services is %s' % [service.host for service in compute_nodes])
 
-                # Get list of reserved hosts (if feature is enabled)
-                if 'true' in RESERVED_HOSTS.lower():
-                    reserved_hosts = [service for service in services if ('disabled' in service.status and 'reserved' in service.disabled_reason )]
-                else:
-                    reserved_hosts = []
-
                 if compute_nodes or to_resume:
                     if (len(compute_nodes) / len(services) * 100) > THRESHOLD:
-                        logging.error('Number of impacted computes exceeds the defined threshold. There is something wrong.')
+                        logging.error('Number of impacted computes exceeds the defined threshold. There is something wrong. Not evacuating.')
                         pass
                     else:
-                        if 'true' in CHECK_KDUMP.lower():
-                            # Check if some of these computes are crashed and currently kdumping
-                            to_evacuate = _check_kdump(compute_nodes)
-                        else:
-                            to_evacuate = compute_nodes
+                        # Check if some of these computes are crashed and currently kdumping
+                        to_evacuate = _check_kdump(compute_nodes) if 'true' in CHECK_KDUMP.lower() else compute_nodes
 
                         if 'false' in DISABLED.lower():
                             # process computes that are seen as down for the first time
@@ -883,7 +902,6 @@ def main():
 
                         else:
                             logging.info('InstanceHa DISABLE is true, not evacuating')
-
 
             # We need to wait until a compute is back and for the migrations to move from 'done' to 'completed' before we can force_down=false
 
