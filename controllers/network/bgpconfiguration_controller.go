@@ -20,9 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/api/equality"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"

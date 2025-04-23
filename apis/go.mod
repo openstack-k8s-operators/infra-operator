@@ -8,7 +8,6 @@ require (
 	github.com/onsi/gomega v1.34.1
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20250419062702-0acec6a591c8
 	github.com/rabbitmq/cluster-operator/v2 v2.9.0
-	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	k8s.io/api v0.29.15
 	k8s.io/apimachinery v0.29.15
 	k8s.io/client-go v0.29.15
@@ -53,6 +52,7 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
+	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56 // indirect
 	golang.org/x/net v0.28.0 // indirect
 	golang.org/x/oauth2 v0.18.0 // indirect
 	golang.org/x/sys v0.23.0 // indirect

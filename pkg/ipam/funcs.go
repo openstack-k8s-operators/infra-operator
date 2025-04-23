@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
-	"golang.org/x/exp/slices"
 )
 
 // AssignIPDetails -

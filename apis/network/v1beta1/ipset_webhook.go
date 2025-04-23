@@ -19,9 +19,9 @@ package v1beta1
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
