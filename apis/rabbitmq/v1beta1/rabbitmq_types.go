@@ -61,6 +61,11 @@ type RabbitMqSpecCore struct {
 	// TopologyRef to apply the Topology defined by the associated CR referenced
 	// by name
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=None;Mirrored
+	// +kubebuilder:default=Mirrored
+	// QueueType to eventually apply the ha-all policy to the cluster
+	QueueType string `json:"queueType"`
 }
 
 // Method to convert RabbitMqSpec to RabbitmqClusterSpec
@@ -92,6 +97,9 @@ type RabbitMqStatus struct {
 
 	// LastAppliedTopology - the last applied Topology
 	LastAppliedTopology *topologyv1.TopoRef `json:"lastAppliedTopology,omitempty"`
+
+	// QueueType - store whether default ha-all policy is present or not
+	QueueType string `json:"queueType,omitempty"`
 }
 
 //+kubebuilder:object:root=true
