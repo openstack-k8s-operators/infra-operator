@@ -12,7 +12,7 @@ require (
 	github.com/openshift/api v3.9.0+incompatible
 	github.com/openstack-k8s-operators/infra-operator/apis v0.6.1-0.20250319162810-463dd75a4cc4
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20250423055245-3cb2ae8df6f0
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20250419062702-0acec6a591c8
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20250423055245-3cb2ae8df6f0
 	github.com/rabbitmq/cluster-operator/v2 v2.9.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
