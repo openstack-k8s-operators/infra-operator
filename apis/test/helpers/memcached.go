@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 
 	base "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 )
@@ -151,4 +152,13 @@ func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
 	}, tc.Timeout, tc.Interval).Should(t.Succeed())
 
 	tc.Logger.Info("Simulated memcached ready", "on", name)
+}
+
+// GetDefaultMemcachedSpec returns memcachedv1.MemcachedSpec for test-helpers
+func (tc *TestHelper) GetDefaultMemcachedSpec() memcachedv1.MemcachedSpec {
+	return memcachedv1.MemcachedSpec{
+		MemcachedSpecCore: memcachedv1.MemcachedSpecCore{
+			Replicas: ptr.To(int32(3)),
+		},
+	}
 }
