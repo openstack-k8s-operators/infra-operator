@@ -55,6 +55,7 @@ import (
 	networkcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/network"
 	rabbitmqcontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/rabbitmq"
 	rediscontrollers "github.com/openstack-k8s-operators/infra-operator/controllers/redis"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/operator"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -105,7 +106,7 @@ func main() {
 		c.NextProtos = []string{"http/1.1"}
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	options := ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
@@ -129,7 +130,15 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+
+	err := operator.SetManagerOptions(&options, setupLog)
+	if err != nil {
+		setupLog.Error(err, "unable to set manager options")
+		os.Exit(1)
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), options)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
