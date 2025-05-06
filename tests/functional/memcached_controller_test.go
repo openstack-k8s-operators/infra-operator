@@ -167,7 +167,16 @@ var _ = Describe("Memcached Controller", func() {
 				mc := GetMemcached(memcachedName)
 				g.Expect(mc.Status.LastAppliedTopology).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
-
+		})
+		It("checks the memcached topology Condition", func() {
+			th.ExpectCondition(
+				memcachedName,
+				ConditionGetterFunc(MemcachedConditionGetter),
+				condition.TopologyReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+		It("checks the previous topology has no reference anymore", func() {
 			Eventually(func(g Gomega) {
 				mc := GetMemcached(memcachedName)
 				g.Expect(mc.Status.LastAppliedTopology.Name).To(Equal(memcachedTopologies[1].Name))

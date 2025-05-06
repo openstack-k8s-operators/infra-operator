@@ -577,7 +577,8 @@ var _ = Describe("DNSMasq controller", func() {
 				dnsmasq := GetDNSMasq(dnsMasqName)
 				g.Expect(dnsmasq.Status.LastAppliedTopology).ToNot(BeNil())
 			}, timeout, interval).Should(Succeed())
-
+		})
+		It("checks the previous topology has no reference anymore", func() {
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
 				g.Expect(dnsmasq.Status.LastAppliedTopology.Name).To(Equal(dnsmasqTopologies[1].Name))
