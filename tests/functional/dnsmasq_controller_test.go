@@ -603,7 +603,8 @@ var _ = Describe("DNSMasq controller", func() {
 				g.Expect(finalizers).To(ContainElement(
 					fmt.Sprintf("openstack.org/dnsmasq-%s", dnsMasqName.Name)))
 			}, timeout, interval).Should(Succeed())
-
+		})
+		It("checks the previous topology has no reference anymore", func() {
 			Eventually(func(g Gomega) {
 				// Verify the previous referenced topology has no finalizers
 				tp := GetTopology(types.NamespacedName{
