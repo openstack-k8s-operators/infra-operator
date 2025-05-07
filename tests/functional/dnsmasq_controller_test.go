@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
@@ -492,18 +493,28 @@ var _ = Describe("DNSMasq controller", func() {
 		})
 	})
 	When("A DNSMasq is created with topologyref", func() {
+		var topologyRef, topologyRefAlt *topologyv1.TopoRef
 		BeforeEach(func() {
-
 			dnsmasqTopologies = GetTopologyRef(dnsMasqDefaultName, namespace)
 			// Create Test Topologies
-			topologySpec := GetSampleTopologySpec(dnsMasqDefaultName)
 			for _, t := range dnsmasqTopologies {
+				// Build topologySpec
+				topologySpec, _ := GetSampleTopologySpec(dnsMasqDefaultName)
 				CreateTopology(t, topologySpec)
+			}
+			// Define the two topology references used in this test
+			topologyRef = &topologyv1.TopoRef{
+				Name:      dnsmasqTopologies[0].Name,
+				Namespace: dnsmasqTopologies[0].Namespace,
+			}
+			topologyRefAlt = &topologyv1.TopoRef{
+				Name:      dnsmasqTopologies[1].Name,
+				Namespace: dnsmasqTopologies[1].Namespace,
 			}
 
 			spec := GetDefaultDNSMasqSpec()
 			spec["topologyRef"] = map[string]interface{}{
-				"name": dnsmasqTopologies[0].Name,
+				"name": topologyRef.Name,
 			}
 			instance := CreateDNSMasqWithName(dnsMasqDefaultName, namespace, spec)
 			dnsMasqName = types.NamespacedName{
@@ -547,20 +558,25 @@ var _ = Describe("DNSMasq controller", func() {
 		})
 
 		It("sets topology in CR status", func() {
-			dnsmasqTopologies = GetTopologyRef(dnsMasqName.Name, namespace)
 			Eventually(func(g Gomega) {
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRef.Name,
+					Namespace: topologyRef.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(HaveLen(1))
 				dnsmasq := GetDNSMasq(dnsMasqName)
 				g.Expect(dnsmasq.Status.LastAppliedTopology).ToNot(BeNil())
-			}, timeout, interval).Should(Succeed())
-
-			Eventually(func(g Gomega) {
-				dnsmasq := GetDNSMasq(dnsMasqName)
-				g.Expect(dnsmasq.Status.LastAppliedTopology.Name).To(Equal(dnsmasqTopologies[0].Name))
+				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(topologyRef))
+				g.Expect(finalizers).To(ContainElement(
+					fmt.Sprintf("openstack.org/dnsmasq-%s", dnsMasqName.Name)))
 			}, timeout, interval).Should(Succeed())
 		})
 		It("sets topology in CR deployment", func() {
 			Eventually(func(g Gomega) {
+				_, topologySpecObj := GetSampleTopologySpec(dnsMasqName.Name)
 				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.TopologySpreadConstraints).ToNot(BeNil())
+				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.TopologySpreadConstraints).To(Equal(topologySpecObj))
 				g.Expect(th.GetDeployment(deploymentName).Spec.Template.Spec.Affinity).To(BeNil())
 			}, timeout, interval).Should(Succeed())
 		})
@@ -569,18 +585,34 @@ var _ = Describe("DNSMasq controller", func() {
 			dnsmasqTopologies = GetTopologyRef(dnsMasqName.Name, namespace)
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
-				dnsmasq.Spec.TopologyRef.Name = dnsmasqTopologies[1].Name
+				dnsmasq.Spec.TopologyRef.Name = topologyRefAlt.Name
 				g.Expect(k8sClient.Update(ctx, dnsmasq)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
 			Eventually(func(g Gomega) {
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRefAlt.Name,
+					Namespace: topologyRefAlt.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(HaveLen(1))
+
 				dnsmasq := GetDNSMasq(dnsMasqName)
 				g.Expect(dnsmasq.Status.LastAppliedTopology).ToNot(BeNil())
+				g.Expect(dnsmasq.Status.LastAppliedTopology).To(Equal(topologyRefAlt))
+				g.Expect(finalizers).To(ContainElement(
+					fmt.Sprintf("openstack.org/dnsmasq-%s", dnsMasqName.Name)))
 			}, timeout, interval).Should(Succeed())
-
+		})
+		It("checks the previous topology has no reference anymore", func() {
 			Eventually(func(g Gomega) {
-				dnsmasq := GetDNSMasq(dnsMasqName)
-				g.Expect(dnsmasq.Status.LastAppliedTopology.Name).To(Equal(dnsmasqTopologies[1].Name))
+				// Verify the previous referenced topology has no finalizers
+				tp := GetTopology(types.NamespacedName{
+					Name:      topologyRef.Name,
+					Namespace: topologyRef.Namespace,
+				})
+				finalizers := tp.GetFinalizers()
+				g.Expect(finalizers).To(BeEmpty())
 			}, timeout, interval).Should(Succeed())
 		})
 		It("removes topologyRef from the spec", func() {
@@ -594,6 +626,18 @@ var _ = Describe("DNSMasq controller", func() {
 			Eventually(func(g Gomega) {
 				dnsmasq := GetDNSMasq(dnsMasqName)
 				g.Expect(dnsmasq.Status.LastAppliedTopology).Should(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the existing topologies have no finalizer anymore
+			Eventually(func(g Gomega) {
+				for _, topology := range dnsmasqTopologies {
+					tp := GetTopology(types.NamespacedName{
+						Name:      topology.Name,
+						Namespace: topology.Namespace,
+					})
+					finalizers := tp.GetFinalizers()
+					g.Expect(finalizers).To(BeEmpty())
+				}
 			}, timeout, interval).Should(Succeed())
 		})
 	})
