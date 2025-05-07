@@ -282,7 +282,7 @@ func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 	}
 
 	// index topologyField
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &networkv1.DNSMasq{}, topologyField, func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &networkv1.DNSMasq{}, topologyField, func(rawObj client.Object) []string {
 		// Extract the topology name from the spec, if one is provided
 		cr := rawObj.(*networkv1.DNSMasq)
 		if cr.Spec.TopologyRef == nil {
@@ -310,11 +310,11 @@ func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		Complete(r)
 }
 
-// findObjectsForSrc - returns a reconcile request if the object is referenced by a Redis CR
+// findObjectsForSrc - returns a reconcile request if the object is referenced by a DNSMasq CR
 func (r *DNSMasqReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 
-	l := log.FromContext(context.Background()).WithName("Controllers").WithName("Redis")
+	l := log.FromContext(ctx).WithName("Controllers").WithName("DNSMasq")
 
 	for _, field := range allWatchFields {
 		crList := &networkv1.DNSMasqList{}
