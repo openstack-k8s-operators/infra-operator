@@ -25,7 +25,7 @@ import (
 type FRRNodeConfigurationSelectorType struct {
 	// +kubebuilder:validation:Optional
 	// NodeName -  name of the node object as seen by running the `oc get nodes` command
-	NodeName string `json:"frrConfigurationNamespace,omitempty"`
+	NodeName string `json:"nodeName,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// NodeSelector  to identify the correct FRRConfiguration from spec.nodeSelector
