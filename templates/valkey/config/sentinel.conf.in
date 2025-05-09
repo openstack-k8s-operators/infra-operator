@@ -1,0 +1,8 @@
+dir /var/lib/valkey
+bind { POD_FQDN } localhost
+sentinel resolve-hostnames yes
+sentinel announce-hostnames yes
+sentinel announce-ip { POD_FQDN }
+sentinel down-after-milliseconds valkey 10000
+sentinel failover-timeout valkey 20000
+sentinel client-reconfig-script valkey /var/lib/operator-scripts/check_valkey_endpoints.sh

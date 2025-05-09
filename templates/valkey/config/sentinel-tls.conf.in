@@ -1,0 +1,9 @@
+include /var/lib/valkey/sentinel.conf
+
+port 0
+tls-port 26379
+tls-cert-file /etc/pki/tls/certs/valkey.crt
+tls-key-file /etc/pki/tls/private/valkey.key
+tls-ca-cert-file /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+tls-replication yes
+tls-auth-clients optional
