@@ -123,7 +123,7 @@ PROC_CMD = --procs ${PROCS}
 test: manifests generate gowork fmt vet envtest ginkgo ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" \
 	OPERATOR_TEMPLATES="$(PWD)/templates" \
-	$(GINKGO) --trace --cover --coverpkg=../../pkg/dnsmasq,../../pkg/ipam,../../controllers,../../apis/network/v1beta1 --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./tests/... ./apis/network/...
+	$(GINKGO) --trace --cover --coverpkg=../../pkg/bgp,../../pkg/dnsmasq,../../pkg/ipam,../../controllers,../../apis/network/v1beta1 --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./tests/... ./apis/network/...
 
 ##@ Build
 
