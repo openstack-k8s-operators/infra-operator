@@ -441,6 +441,15 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 
 	// delete our managed FRRConfigurations where there is no longer a pod in podNetworkDetailList
 	// because the pod was deleted/completed/failed/unknown
+	if err := r.deleteStaleFRRConfigurations(ctx, instance, podNetworkDetailList, frrConfigList, groupLabel); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	Log.Info("Reconciled Service successfully")
+	return ctrl.Result{}, nil
+}
+
+func (r *BGPConfigurationReconciler) deleteStaleFRRConfigurations(ctx context.Context, instance *networkv1.BGPConfiguration, podNetworkDetailList []bgp.PodDetail, frrConfigList *frrk8sv1.FRRConfigurationList, groupLabel string) error {
 	for _, cfg := range frrConfigList.Items {
 		frrLabels := cfg.GetLabels()
 		if _, ok := frrLabels[labels.GetOwnerNameLabelSelector(labels.GetGroupLabel("bgpconfiguration"))]; ok {
@@ -451,17 +460,15 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 				idx := slices.IndexFunc(podNetworkDetailList, f)
 				if idx < 0 {
 					// There is no pod in the namespace corrsponding to the FRRConfiguration, delete it
-					if err := r.Client.Delete(ctx, &cfg); err != nil && k8s_errors.IsNotFound(err) {
-						return ctrl.Result{}, fmt.Errorf("Unable to delete FRRConfiguration %w", err)
+					if err := r.Client.Delete(ctx, &cfg); err != nil && !k8s_errors.IsNotFound(err) {
+						return fmt.Errorf("unable to delete FRRConfiguration %w", err)
 					}
-					Log.Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown , deleted FRRConfiguration %s", podName, cfg.Name))
+					r.GetLogger(ctx).Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown, deleted FRRConfiguration %s", podName, cfg.Name))
 				}
 			}
 		}
 	}
-
-	Log.Info("Reconciled Service successfully")
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // getPodNetworkDetails - returns the podDetails for a list of pods in status.phase: Running
