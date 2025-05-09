@@ -49,6 +49,53 @@ var _ = Describe("BGPConfiguration controller", func() {
 		})
 	})
 
+	When("a BGPConfiguration CR is deleted, finalizer logic removes owned FRRConfiguration objects", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+		var bgpcfg client.Object
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			// create a FRR configuration for a node
+			meallbFRRCfgName = types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"}
+			meallbFRRCfg := CreateFRRConfiguration(meallbFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfg).To(Not(BeNil()))
+
+			// create a nad config with gateway
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg = CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			// create pod without NAD annotation
+			th.CreatePod(podName, map[string]string{}, GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = metallbNS.Name
+
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
+		})
+
+		It("should remove all owned FRRConfiguration objects after deletion", func() {
+			pod := th.GetPod(podName)
+			Expect(pod).To(Not(BeNil()))
+
+			// Delete the BGPConfiguration CR.
+			th.DeleteInstance(bgpcfg)
+
+			// validate that the pod frr cfg is gone
+			frr := &frrk8sv1.FRRConfiguration{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, podFrrName, frr)).Should(Not(Succeed()))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("A pod with NAD gets created but node FRR reference configuration missing", func() {
 		var podFrrName types.NamespacedName
 		var podName types.NamespacedName
