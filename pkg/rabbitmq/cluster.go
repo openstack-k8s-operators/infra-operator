@@ -262,22 +262,27 @@ func ConfigureCluster(
 				map[string]string{networkv1.AnnotationHostnameKey: hostname})
 	}
 
-	if cluster.Spec.Rabbitmq.AdditionalConfig == "" {
-		// This is the same situation as RABBITMQ_UPGRADE_LOG above,
-		// except for the "main" rabbitmq log we can just force it to use the console.
+	// This is the same situation as RABBITMQ_UPGRADE_LOG above,
+	// except for the "main" rabbitmq log we can just force it to use the console.
 
-		// By default the prometheus and management endpoints always bind to ipv4.
-		// We need to set the correct address based on the IP version in use.
-		var settings []string
-		settings = append(settings, "log.console = true")
-		settings = append(settings, "prometheus.tcp.ip = ::")
-		settings = append(settings, "management.tcp.ip = ::")
-		if cluster.Spec.TLS.SecretName != "" {
-			settings = append(settings, "ssl_options.verify = verify_none")
-			settings = append(settings, "prometheus.ssl.ip = ::")
-			// management ssl ip needs to be set in the AdvancedConfig
-		}
-		cluster.Spec.Rabbitmq.AdditionalConfig = strings.Join(settings, "\n")
+	// By default the prometheus and management endpoints always bind to ipv4.
+	// We need to set the correct address based on the IP version in use.
+	var settings = []string{
+		"log.console = true",
+		"prometheus.tcp.ip = ::",
+		"management.tcp.ip = ::",
+	}
+	if cluster.Spec.TLS.SecretName != "" {
+		settings = append(settings, "ssl_options.verify = verify_none", "prometheus.ssl.ip = ::")
+		// management ssl ip needs to be set in the AdvancedConfig
+	}
+	additionalDefaults := strings.Join(settings, "\n")
+
+	// If additionalConfig is empty set let's our defaults, append otherwise.
+	if cluster.Spec.Rabbitmq.AdditionalConfig == "" {
+		cluster.Spec.Rabbitmq.AdditionalConfig = additionalDefaults
+	} else {
+		cluster.Spec.Rabbitmq.AdditionalConfig = additionalDefaults + "\n" + cluster.Spec.Rabbitmq.AdditionalConfig
 	}
 
 	return cluster
