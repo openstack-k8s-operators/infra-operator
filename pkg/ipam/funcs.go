@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
-	"golang.org/x/exp/slices"
 )
 
 // AssignIPDetails -
@@ -49,7 +49,7 @@ func (a *AssignIPDetails) fixedIPExists() (*networkv1.IPAddress, error) {
 	}
 	idx := slices.IndexFunc(a.Reservelist.Items, f)
 	if idx >= 0 && a.Reservelist.Items[idx].Spec.IPSetRef.Name != a.IPSet {
-		return nil, fmt.Errorf(fmt.Sprintf("%s already reserved for %s", fixedIP, a.Reservelist.Items[idx].Spec.IPSetRef.Name))
+		return nil, fmt.Errorf("%s already reserved for %s", fixedIP, a.Reservelist.Items[idx].Spec.IPSetRef.Name)
 	}
 
 	return &networkv1.IPAddress{
@@ -107,5 +107,5 @@ func (a *AssignIPDetails) iterateForAssignment() (*networkv1.IPAddress, error) {
 		}
 	}
 
-	return nil, fmt.Errorf(fmt.Sprintf("no ip address could be created for %s in subnet %s", a.IPSet, a.SubNet.Name))
+	return nil, fmt.Errorf("no ip address could be created for %s in subnet %s", a.IPSet, a.SubNet.Name)
 }
