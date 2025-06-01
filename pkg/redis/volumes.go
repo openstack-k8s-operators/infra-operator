@@ -17,22 +17,22 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 	configDataFiles := []corev1.KeyToPath{
 		{
 			Key:  "sentinel.conf.in",
-			Path: "var/lib/redis/sentinel.conf.in",
+			Path: "var/lib/valkey/sentinel.conf.in",
 		},
 		{
 			Key:  "redis.conf.in",
-			Path: "var/lib/redis/redis.conf.in",
+			Path: "var/lib/valkey/valkey.conf.in",
 		},
 	}
 	if r.Spec.TLS.Enabled() {
 		configDataFiles = append(configDataFiles, []corev1.KeyToPath{
 			{
-				Key:  "redis-tls.conf.in",
-				Path: "var/lib/redis/redis-tls.conf.in",
+				Key:  "valkey-tls.conf.in",
+				Path: "var/lib/valkey/valkey-tls.conf.in",
 			},
 			{
 				Key:  "sentinel-tls.conf.in",
-				Path: "var/lib/redis/sentinel-tls.conf.in",
+				Path: "var/lib/valkey/sentinel-tls.conf.in",
 			},
 		}...)
 	}
@@ -96,20 +96,20 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 					},
 					Items: []corev1.KeyToPath{
 						{
-							Key:  "start_redis_replication.sh",
-							Path: "start_redis_replication.sh",
+							Key:  "start_valkey_replication.sh",
+							Path: "start_valkey_replication.sh",
 						},
 						{
 							Key:  "start_sentinel.sh",
 							Path: "start_sentinel.sh",
 						},
 						{
-							Key:  "redis_probe.sh",
-							Path: "redis_probe.sh",
+							Key:  "valkey_probe.sh",
+							Path: "valkey_probe.sh",
 						},
 						{
-							Key:  "check_redis_endpoints.sh",
-							Path: "check_redis_endpoints.sh",
+							Key:  "check_valkey_endpoints.sh",
+							Path: "check_valkey_endpoints.sh",
 						},
 						{
 							Key:  "common.sh",

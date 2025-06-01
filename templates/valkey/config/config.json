@@ -1,0 +1,33 @@
+{
+  "command": "valkey-server /var/lib/valkey/valkey.conf",
+  "config_files": [
+    {
+      "dest": "/",
+      "merge": true,
+      "preserve_properties": true,
+      "optional": true,
+      "source": "/var/lib/config-data/generated/*"
+    },
+    {
+      "source": "/var/lib/config-data/tls/private/valkey.key",
+      "dest": "/etc/pki/tls/private/valkey.key",
+      "owner": "valkey",
+      "perm": "0600",
+      "optional": true
+    },
+    {
+      "source": "/var/lib/config-data/tls/certs/valkey.crt",
+      "dest": "/etc/pki/tls/certs/valkey.crt",
+      "owner": "valkey",
+      "perm": "0755",
+      "optional": true
+    }
+  ],
+  "permissions": [
+    {
+      "owner": "valkey:valkey",
+      "path": "/var/lib/valkey",
+      "recursive": true
+    }
+  ]
+}
