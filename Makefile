@@ -134,11 +134,12 @@ build: generate fmt vet ## Build manager binary.
 .PHONY: run
 run: export METRICS_PORT?=8080
 run: export HEALTH_PORT?=8081
+run: export PPROF_PORT?=8082
 run: export OPERATOR_TEMPLATES=./templates
 run: export ENABLE_WEBHOOKS?=false
 run: manifests generate fmt vet ## Run a controller from your host.
 	/bin/bash hack/clean_local_webhook.sh
-	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)"
+	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)" -pprof-bind-address ":$(PPROF_PORT)"
 
 # If you wish built the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
@@ -369,6 +370,7 @@ SKIP_CERT ?=false
 .PHONY: run-with-webhook
 run-with-webhook: export METRICS_PORT?=8080
 run-with-webhook: export HEALTH_PORT?=8081
+run-with-webhook: export PPROF_PORT?=8082
 run-with-webhook: manifests generate fmt vet ## Run a controller from your host.
 	/bin/bash hack/run_with_local_webhook.sh
 
