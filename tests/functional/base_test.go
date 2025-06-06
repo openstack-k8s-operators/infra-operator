@@ -39,6 +39,7 @@ import (
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
+	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
@@ -991,4 +992,32 @@ func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 			Namespace: namespace,
 		},
 	}
+}
+
+func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMq",
+		"metadata": map[string]interface{}{
+			"name":      rabbitmq.Name,
+			"namespace": rabbitmq.Namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetDefaultRabbitMQSpec() map[string]interface{} {
+	return map[string]interface{}{
+		"replicas": 1,
+	}
+}
+
+func GetRabbitMQ(name types.NamespacedName) *rabbitmqv1.RabbitMq {
+	instance := &rabbitmqv1.RabbitMq{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
 }

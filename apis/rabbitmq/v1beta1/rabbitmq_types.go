@@ -17,7 +17,9 @@ limitations under the License.
 package v1beta1
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -25,6 +27,7 @@ import (
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const (
@@ -36,7 +39,9 @@ const (
 	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
 	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 	// Int32 is a 10 character + hyphen = 11
-	CrMaxLengthCorrection = 11
+	CrMaxLengthCorrection   = 11
+	errInvalidOverride      = "invalid spec override (%s)"
+	warnOverrideStatefulSet = "%s: is deprecated and will be removed in a future API version"
 )
 
 // RabbitMqSpec defines the desired state of RabbitMq
@@ -170,4 +175,25 @@ func (instance *RabbitMqSpecCore) ValidateTopology(
 		instance.TopologyRef,
 		*basePath.Child("topologyRef"), namespace)...)
 	return allErrs
+}
+
+func (instance *RabbitMqSpecCore) ValidateOverride(
+	basePath *field.Path,
+	namespace string,
+) (admission.Warnings, field.ErrorList) {
+	var allErrs field.ErrorList
+	var allWarn admission.Warnings
+	if instance.Override != nil {
+		var overrideObj rabbitmqv2.RabbitmqClusterOverrideSpec
+		dec := json.NewDecoder(bytes.NewReader(instance.Override.Raw))
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&overrideObj)
+		if err != nil {
+			return nil, append(allErrs, field.Invalid(basePath.Child("override"), "<json>", fmt.Sprintf(errInvalidOverride, err)))
+		}
+		if overrideObj.StatefulSet != nil {
+			allWarn = append(allWarn, fmt.Sprintf(warnOverrideStatefulSet, basePath.Child("override").Child("statefulset").String()))
+		}
+	}
+	return allWarn, nil
 }
