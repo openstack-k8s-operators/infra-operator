@@ -1,6 +1,8 @@
 package rabbitmq
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,7 +23,8 @@ func ConfigureCluster(
 	fipsEnabled bool,
 	topology *topologyv1.Topology,
 	nodeselector *map[string]string,
-) *rabbitmqv2.RabbitmqCluster {
+	override *rabbitmqv2.OverrideTrimmed,
+) error {
 
 	envVars := []corev1.EnvVar{
 		{
@@ -104,17 +107,26 @@ func ConfigureCluster(
 								// OSP17 runs kolla_start here, instead just run rabbitmq-server directly
 								"/usr/lib/rabbitmq/bin/rabbitmq-server",
 							},
+							VolumeMounts: []corev1.VolumeMount{},
 						},
 					},
 					InitContainers: []corev1.Container{
-						{Name: "setup-container", SecurityContext: &corev1.SecurityContext{}}},
+						{Name: "setup-container", SecurityContext: &corev1.SecurityContext{}},
+					},
+					Volumes: []corev1.Volume{},
 				},
 			},
 		},
 	}
 
-	if cluster.Spec.Override.StatefulSet == nil {
-		cluster.Spec.Override.StatefulSet = &defaultStatefulSet
+	cluster.Spec.Override.StatefulSet = &defaultStatefulSet
+	if override != nil && override.StatefulSet != nil {
+		dec := json.NewDecoder(bytes.NewReader(override.StatefulSet.Raw))
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&cluster.Spec.Override.StatefulSet)
+		if err != nil {
+			return err
+		}
 	}
 
 	if cluster.Spec.Override.StatefulSet.Spec.Template.Spec.NodeSelector == nil {
@@ -162,8 +174,6 @@ func ConfigureCluster(
 	}
 	cluster.Spec.Rabbitmq.ErlangInetConfig = erlangInetConfig
 	cluster.Spec.Rabbitmq.AdvancedConfig = ""
-	cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Volumes = []corev1.Volume{}
-	cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{}
 
 	if cluster.Spec.TLS.SecretName != "" {
 		if cluster.Spec.TLS.CaSecretName == "" {
@@ -285,5 +295,5 @@ func ConfigureCluster(
 		cluster.Spec.Rabbitmq.AdditionalConfig = additionalDefaults + "\n" + cluster.Spec.Rabbitmq.AdditionalConfig
 	}
 
-	return cluster
+	return nil
 }

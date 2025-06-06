@@ -75,6 +75,10 @@ func (r *RabbitMqCluster) CreateOrPatch(
 	// update the statefulset object of the statefulset type
 	r.rabbitmqCluster, err = GetRabbitMqClusterWithName(ctx, h, rabbitmq.GetName(), rabbitmq.GetNamespace())
 	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			h.GetLogger().Info(fmt.Sprintf("RabbitmqCluster %s not found, reconcile in %s", rabbitmq.Name, r.timeout))
+			return ctrl.Result{RequeueAfter: r.timeout}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
