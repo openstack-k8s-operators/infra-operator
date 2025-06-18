@@ -76,6 +76,43 @@ func (tc *TestHelper) CreateMemcached(namespace string, memcachedName string, sp
 	return name
 }
 
+// CreateMemcachedMTLS creates a new Memcached instance with the specified namespace in the Kubernetes cluster.
+func (tc *TestHelper) CreateMTLSMemcached(namespace string, memcachedName string, spec memcachedv1.MemcachedSpec) types.NamespacedName {
+	name := types.NamespacedName{
+		Name:      memcachedName,
+		Namespace: namespace,
+	}
+
+	memcachedMTLSSecretName := "cert-memcached-mtls"
+	_ = tc.CreateSecret(
+		types.NamespacedName{Name: memcachedMTLSSecretName, Namespace: namespace},
+		map[string][]byte{
+			"tls-ca.crt": []byte("---BEGIN FAKE CA---"),
+			"tls.crt":    []byte("---BEGIN FAKE CERT---"),
+			"tls.key":    []byte("---BEGIN FAKE KEY---"),
+		},
+	)
+
+	spec.TLS.MTLS.SslVerifyMode = "Request"
+	spec.TLS.MTLS.AuthCertSecret.SecretName = &memcachedMTLSSecretName
+
+	mc := &memcachedv1.Memcached{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "memcached.openstack.org/v1beta1",
+			Kind:       "Memcached",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      memcachedName,
+			Namespace: namespace,
+		},
+		Spec: spec,
+	}
+
+	t.Expect(tc.K8sClient.Create(tc.Ctx, mc)).Should(t.Succeed())
+
+	return name
+}
+
 // DeleteMemcached deletes a Memcached instance from the Kubernetes cluster.
 func (tc *TestHelper) DeleteMemcached(name types.NamespacedName) {
 	t.Eventually(func(g t.Gomega) {
@@ -152,6 +189,33 @@ func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
 	}, tc.Timeout, tc.Interval).Should(t.Succeed())
 
 	tc.Logger.Info("Simulated memcached ready", "on", name)
+}
+
+// SimulateMTLSMemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster which supports TLS and uses MTLS auth
+func (tc *TestHelper) SimulateMTLSMemcachedReady(name types.NamespacedName) {
+	t.Eventually(func(g t.Gomega) {
+		mc := tc.GetMemcached(name)
+		mc.Status.ObservedGeneration = mc.Generation
+		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+		mc.Status.ReadyCount = *mc.Spec.Replicas
+
+		serverList := []string{}
+		serverListWithInet := []string{}
+		for i := 0; i < int(*mc.Spec.Replicas); i++ {
+			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+		}
+		mc.Status.ServerList = serverList
+		mc.Status.ServerListWithInet = serverListWithInet
+		mc.Status.TLSSupport = true
+		mc.Status.MTLSCert = "cert-memcached-mtls"
+
+		// This can return conflict so we have the t.Eventually block to retry
+		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
+
+	}, tc.Timeout, tc.Interval).Should(t.Succeed())
+
+	tc.Logger.Info("Simulated memcached with MTLS ready", "on", name)
 }
 
 // GetDefaultMemcachedSpec returns memcachedv1.MemcachedSpec for test-helpers
