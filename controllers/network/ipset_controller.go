@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -432,8 +433,11 @@ func (r *IPSetReconciler) ensureReservation(
 		}
 
 		if ipsetNet.FixedIP != nil {
-			ipDetails.FixedIP = net.ParseIP(string(*ipsetNet.FixedIP))
-			if ipDetails.FixedIP == nil {
+			ipDetails.FixedIP, err = netip.ParseAddr(string(*ipsetNet.FixedIP))
+			if err != nil {
+				return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
+			}
+			if !ipDetails.FixedIP.IsValid() {
 				return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
 			}
 		}
