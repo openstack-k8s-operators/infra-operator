@@ -91,6 +91,10 @@ func (r *RabbitMq) ValidateCreate() (admission.Warnings, error) {
 	// referenced because is not supported
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 
+	warn, errs := r.Spec.ValidateOverride(basePath, r.Namespace)
+	allWarn = append(allWarn, warn...)
+	allErrs = append(allErrs, errs...)
+
 	allErrs = append(allErrs, common_webhook.ValidateDNS1123Label(
 		field.NewPath("metadata").Child("name"),
 		[]string{r.Name},
@@ -120,6 +124,10 @@ func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) 
 	// referenced because is not supported
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 
+	warn, errs := r.Spec.ValidateOverride(basePath, r.Namespace)
+	allWarn = append(allWarn, warn...)
+	allErrs = append(allErrs, errs...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMq"},
@@ -130,23 +138,32 @@ func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) 
 	return allWarn, nil
 }
 
-func (r *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace string) field.ErrorList {
+func (r *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
+	var allWarn []string
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
 	allErrs = append(allErrs, r.ValidateTopology(basePath, namespace)...)
+	warn, errs := r.ValidateOverride(basePath, namespace)
+	allWarn = append(allWarn, warn...)
+	allErrs = append(allErrs, errs...)
 
-	return allErrs
+	return allWarn, allErrs
 }
 
-func (r *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *field.Path, namespace string) field.ErrorList {
+func (r *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
+	var allWarn []string
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
 	allErrs = append(allErrs, r.ValidateTopology(basePath, namespace)...)
-	return allErrs
+	warn, errs := r.ValidateOverride(basePath, namespace)
+	allWarn = append(allWarn, warn...)
+	allErrs = append(allErrs, errs...)
+
+	return allWarn, allErrs
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
