@@ -1,0 +1,22 @@
+# delete the previous redis resource if it exists
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+delete:
+  - apiVersion: redis.openstack.org/v1beta1
+    kind: Redis
+    name: redis
+---
+apiVersion: redis.openstack.org/v1beta1
+kind: Redis
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256M"
+      cpu: "700m"
+  sentinelResources:
+    requests:
+      memory: "128M"
+      cpu: "500m"

@@ -17,11 +17,12 @@ limitations under the License.
 package v1beta1
 
 import (
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -63,6 +64,12 @@ type RedisSpecCore struct {
 	// TopologyRef to apply the Topology defined by the associated CR referenced
 	// by name
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
+	// +kubebuilder:validation:Optional
+	// Resources QoS configuration for redis servers
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	// +kubebuilder:validation:Optional
+	// Resources QoS configuration for sentinel servers
+	SentinelResources corev1.ResourceRequirements `json:"sentinelResources,omitempty"`
 }
 
 // RedisStatus defines the observed state of Redis
@@ -145,11 +152,11 @@ func SetupDefaults() {
 func (instance Redis) GetLastAppliedTopologyRef() *topologyv1.TopoRef {
 	lastAppliedTopologyName := ""
 	if instance.Status.LastAppliedTopology != nil {
-			lastAppliedTopologyName = instance.Status.LastAppliedTopology.Name
+		lastAppliedTopologyName = instance.Status.LastAppliedTopology.Name
 	}
 	return &topologyv1.TopoRef{
-			Name:	   lastAppliedTopologyName,
-			Namespace: instance.Namespace,
+		Name:      lastAppliedTopologyName,
+		Namespace: instance.Namespace,
 	}
 }
 

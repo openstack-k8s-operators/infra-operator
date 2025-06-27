@@ -102,6 +102,7 @@ func StatefulSet(
 						Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
 						Name:         "redis",
 						Env:          commonEnvVars,
+						Resources:    r.Spec.Resources,
 						VolumeMounts: getRedisVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: 6379,
@@ -130,6 +131,7 @@ func StatefulSet(
 							Name:  "SENTINEL_QUORUM",
 							Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
 						}),
+						Resources:    r.Spec.SentinelResources,
 						VolumeMounts: getSentinelVolumeMounts(r),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: 26379,

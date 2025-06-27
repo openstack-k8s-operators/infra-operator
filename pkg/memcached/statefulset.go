@@ -87,6 +87,7 @@ func StatefulSet(
 							Value: configHash,
 						},
 						},
+						Resources:    m.Spec.Resources,
 						VolumeMounts: getVolumeMounts(m),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: MemcachedPort,
