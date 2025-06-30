@@ -1,0 +1,18 @@
+# delete the previous memcached if it exists
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+delete:
+  - apiVersion: memcached.openstack.org/v1beta1
+    kind: Memcached
+    name: memcached
+---
+apiVersion: memcached.openstack.org/v1beta1
+kind: Memcached
+metadata:
+  name: memcached
+spec:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256M"
+      cpu: "700m"
