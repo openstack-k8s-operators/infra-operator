@@ -55,11 +55,6 @@ func (r *TransportURLReconciler) GetKClient() kubernetes.Interface {
 	return r.Kclient
 }
 
-// GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
-func GetLog(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("TransportURL")
-}
-
 // GetScheme -
 func (r *TransportURLReconciler) GetScheme() *runtime.Scheme {
 	return r.Scheme
