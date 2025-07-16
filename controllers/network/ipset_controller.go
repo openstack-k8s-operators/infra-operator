@@ -57,7 +57,7 @@ type IPSetReconciler struct {
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *IPSetReconciler) GetLogger(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
+	return log.FromContext(ctx).WithName("Controllers").WithName("IPSet")
 }
 
 //+kubebuilder:rbac:groups=network.openstack.org,resources=ipsets,verbs=get;list;watch;create;update;patch;delete
