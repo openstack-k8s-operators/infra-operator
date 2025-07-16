@@ -80,7 +80,7 @@ var (
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *DNSMasqReconciler) GetLogger(ctx context.Context) logr.Logger {
-	return log.FromContext(ctx).WithName("Controllers").WithName("DNSData")
+	return log.FromContext(ctx).WithName("Controllers").WithName("DNSMasq")
 }
 
 // +kubebuilder:rbac:groups=network.openstack.org,resources=dnsmasqs,verbs=get;list;watch;create;update;patch;delete
