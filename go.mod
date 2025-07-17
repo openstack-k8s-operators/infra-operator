@@ -91,8 +91,8 @@ replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
 // must consistent within modules and service operators
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20240830023148-b7d0481c9094 //allow-merging
 
-// custom RabbitmqClusterSpecCore for OpenStackControlplane (v2.6.0_patches_tag)
-replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20241017142550-a3524acedd49 //allow-merging
+// custom RabbitmqClusterSpecCore for OpenStackControlplane (v2.9.0_patches_tag_n)
+replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-operators/rabbitmq-cluster-operator/v2 v2.6.1-0.20250717122149-12f70b7f3d8d //allow-merging
 
 // pin frr-k8s to v0.0.11 because later versions have a req for golang 1.22
 replace github.com/metallb/frr-k8s => github.com/metallb/frr-k8s v0.0.11 //allow-merging
