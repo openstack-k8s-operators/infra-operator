@@ -603,10 +603,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // findObjectsForSrc - returns a reconcile request if the object is referenced by a Memcached CR
-func (r *Reconciler) findObjectsForSrc(_ context.Context, src client.Object) []reconcile.Request {
+func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 
-	l := log.FromContext(context.Background()).WithName("Controllers").WithName("Memcached")
+	Log := r.GetLogger(ctx)
 
 	for _, field := range allWatchFields {
 		crList := &memcachedv1.MemcachedList{}
@@ -616,12 +616,12 @@ func (r *Reconciler) findObjectsForSrc(_ context.Context, src client.Object) []r
 		}
 		err := r.List(context.TODO(), crList, listOps)
 		if err != nil {
-			l.Error(err, fmt.Sprintf("listing %s for field: %s - %s", crList.GroupVersionKind().Kind, field, src.GetNamespace()))
+			Log.Error(err, fmt.Sprintf("listing %s for field: %s - %s", crList.GroupVersionKind().Kind, field, src.GetNamespace()))
 			return requests
 		}
 
 		for _, item := range crList.Items {
-			l.Info(fmt.Sprintf("input source %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
+			Log.Info(fmt.Sprintf("input source %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
 
 			requests = append(requests,
 				reconcile.Request{
