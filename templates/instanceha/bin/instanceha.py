@@ -845,7 +845,7 @@ def main():
 
             # We check if a host is still up but has not been reporting its state for the last DELTA seconds or if it is down.
             # We filter previously disabled hosts or the ones that are forced_down.
-            compute_nodes = [service for service in services if (datetime.fromisoformat(service.updated_at) < target_date and service.state != 'down') or (service.state == 'down') and 'disabled' not in service.status and not service.forced_down]
+            compute_nodes = [service for service in services if ((datetime.fromisoformat(service.updated_at) < target_date and service.state != 'down') or (service.state == 'down')) and 'disabled' not in service.status and not service.forced_down]
 
             # Let's check if there are computes nodes that were already being processed, we want to check them again in case the pod was restarted
             to_resume = [service for service in services if service.forced_down and (service.state == 'down') and 'disabled' in service.status and 'instanceha evacuation' in service.disabled_reason and 'evacuation FAILED' not in service.disabled_reason]
