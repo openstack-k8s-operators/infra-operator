@@ -17,6 +17,7 @@ limitations under the License.
 package functional_test
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ import (
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
+	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
@@ -308,6 +310,11 @@ func SimulateRabbitMQClusterReady(name types.NamespacedName) {
 				"status": "True",
 				"type":   "AllReplicasReady",
 			},
+			{
+				"reason": "ClusterAvailable",
+				"status": "True",
+				"type":   "ClusterAvailable",
+			},
 		}
 
 		// add status.defaultUser which is used to get the
@@ -329,6 +336,7 @@ func SimulateRabbitMQClusterReady(name types.NamespacedName) {
 
 		status["conditions"] = statusCondition
 		status["defaultUser"] = statusDefaultUser
+		status["observedGeneration"] = mq.Generation
 		raw["status"] = status
 
 		un := &unstructured.Unstructured{Object: raw}
@@ -991,4 +999,53 @@ func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 			Namespace: namespace,
 		},
 	}
+}
+
+func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]interface{}) client.Object {
+	raw := map[string]interface{}{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMq",
+		"metadata": map[string]interface{}{
+			"name":      rabbitmq.Name,
+			"namespace": rabbitmq.Namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetDefaultRabbitMQSpec() map[string]interface{} {
+	return map[string]interface{}{
+		"replicas": 1,
+	}
+}
+
+func GetRabbitMQ(name types.NamespacedName) *rabbitmqv1.RabbitMq {
+	instance := &rabbitmqv1.RabbitMq{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func CreateCertSecret(name types.NamespacedName) *corev1.Secret {
+	certBase64 := "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJlekNDQVNLZ0F3SUJBZ0lRTkhER1lzQnM3OThpYkREN3EvbzJsakFLQmdncWhrak9QUVFEQWpBZU1Sd3cKR2dZRFZRUURFeE55YjI5MFkyRXRhM1YwZEd3dGNIVmliR2xqTUI0WERUSTBNREV4TlRFd01UVXpObG9YRFRNMApNREV4TWpFd01UVXpObG93SGpFY01Cb0dBMVVFQXhNVGNtOXZkR05oTFd0MWRIUnNMWEIxWW14cFl6QlpNQk1HCkJ5cUdTTTQ5QWdFR0NDcUdTTTQ5QXdFSEEwSUFCRDc4YXZYcWhyaEM1dzhzOVdrZDRJcGJlRXUwM0NSK1hYVWQKa0R6T1J5eGE5d2NjSWREaXZiR0pqSkZaVFRjVm1ianExQk1Zc2pyMTJVSUU1RVQzVmxxalFqQkFNQTRHQTFVZApEd0VCL3dRRUF3SUNwREFQQmdOVkhSTUJBZjhFQlRBREFRSC9NQjBHQTFVZERnUVdCQlRLSml6V1VKOWVVS2kxCmRzMGxyNmM2c0Q3RUJEQUtCZ2dxaGtqT1BRUURBZ05IQURCRUFpQklad1lxNjFCcU1KYUI2VWNGb1JzeGVjd0gKNXovek1PZHJPeWUwbU5pOEpnSWdRTEI0d0RLcnBmOXRYMmxvTSswdVRvcEFEU1lJbnJjZlZ1NEZCdVlVM0lnPQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg=="
+	keyBase64 := "LS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tCk1IY0NBUUVFSUptbGNLUEl1RitFc3RhYkxnVmowZkNhdzFTK09xNnJPU3M0U3pMQkJGYVFvQW9HQ0NxR1NNNDkKQXdFSG9VUURRZ0FFUHZ4cTllcUd1RUxuRHl6MWFSM2dpbHQ0UzdUY0pINWRkUjJRUE01SExGcjNCeHdoME9LOQpzWW1Na1ZsTk54V1p1T3JVRXhpeU92WFpRZ1RrUlBkV1dnPT0KLS0tLS1FTkQgRUMgUFJJVkFURSBLRVktLS0tLQo=="
+
+	cert, _ := base64.StdEncoding.DecodeString(certBase64)
+	key, _ := base64.StdEncoding.DecodeString(keyBase64)
+
+	s := &corev1.Secret{}
+	Eventually(func(_ Gomega) {
+		s = th.CreateSecret(
+			name,
+			map[string][]byte{
+				"ca.crt":  []byte(cert),
+				"tls.crt": []byte(cert),
+				"tls.key": []byte(key),
+			})
+	}, timeout, interval).Should(Succeed())
+
+	return s
 }

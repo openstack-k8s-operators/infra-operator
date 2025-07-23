@@ -347,7 +347,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.LastAppliedTopology = nil
 	}
 
-	rabbitmqImplCluster := impl.NewRabbitMqCluster(rabbitmq.ConfigureCluster(rabbitmqCluster, IPv6Enabled, fipsEnabled, topology, instance.Spec.NodeSelector), 5)
+	err = rabbitmq.ConfigureCluster(rabbitmqCluster, IPv6Enabled, fipsEnabled, topology, instance.Spec.NodeSelector, instance.Spec.Override)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("error configuring RabbitmqCluster: %w", err)
+	}
+
+	rabbitmqImplCluster := impl.NewRabbitMqCluster(rabbitmqCluster, 5)
 	rmqres, rmqerr := rabbitmqImplCluster.CreateOrPatch(ctx, helper)
 	if rmqerr != nil {
 		return rmqres, rmqerr
