@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,6 +45,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/ocp"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pdb"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
@@ -55,6 +57,7 @@ import (
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
@@ -171,6 +174,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		condition.UnknownCondition(condition.ServiceConfigReadyCondition, condition.InitReason, condition.ServiceConfigReadyInitMessage),
 		// rabbitmq pods ready
 		condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
+		// PDB ready
+		condition.UnknownCondition(condition.PDBReadyCondition, condition.InitReason, condition.PDBReadyInitMessage),
 	)
 
 	instance.Status.Conditions.Init(&cl)
@@ -378,6 +383,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+
+		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
+			// Apply PDB for multi-replica deployments
+			labelMap := map[string]string{
+				labels.K8sAppName:      instance.Name,
+				labels.K8sAppComponent: "rabbitmq",
+				labels.K8sAppPartOf:    "rabbitmq",
+			}
+
+			pdbSpec := pdb.MaxUnavailablePodDisruptionBudget(
+				instance.Name,
+				instance.Namespace,
+				intstr.FromInt(1),
+				labelMap,
+			)
+			pdbInstance := pdb.NewPDB(pdbSpec, 5*time.Second)
+
+			_, err := pdbInstance.CreateOrPatch(ctx, helper)
+			if err != nil {
+				Log.Error(err, "Could not apply PDB")
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.PDBReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.PDBReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
+			}
+		}
+		instance.Status.Conditions.MarkTrue(condition.PDBReadyCondition, condition.PDBReadyMessage)
 
 		// Let's wait DeploymentReadyCondition=True to apply the policy
 		if instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
