@@ -574,7 +574,7 @@ def _host_fence(host, action):
 
     try:
         # Collecting fencing data for the given host
-        fencing_data = [value for key, value in fencing.items() if key in host.split('.', 1)[0]][0]
+        fencing_data = [value for key, value in fencing.items() if host.split('.', 1)[0] in key][0]
 
     except:
         logging.error('No fencing data found for %s' % host)
