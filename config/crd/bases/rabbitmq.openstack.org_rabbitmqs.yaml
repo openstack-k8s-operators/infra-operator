@@ -1360,12 +1360,13 @@ spec:
                     type: string
                 type: object
               queueType:
-                default: Mirrored
-                description: QueueType to eventually apply the ha-all policy to the
-                  cluster
+                default: Quorum
+                description: QueueType to eventually apply the ha-all policy or configure
+                  default queue type for the cluster
                 enum:
                 - None
                 - Mirrored
+                - Quorum
                 type: string
               rabbitmq:
                 description: Configuration options for RabbitMQ Pods created in the

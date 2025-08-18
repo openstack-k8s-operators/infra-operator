@@ -405,6 +405,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				return ctrl.Result{}, err
 			}
 		}
+
+		// Update status for Quorum queue type
+		if instance.Spec.QueueType == "Quorum" && instance.Status.QueueType != "Quorum" {
+			Log.Info("Setting queue type status to quorum")
+		} else if instance.Spec.QueueType != "Quorum" && instance.Status.QueueType == "Quorum" {
+			Log.Info("Removing quorum queue type status")
+		}
+
 		instance.Status.QueueType = instance.Spec.QueueType
 	}
 
