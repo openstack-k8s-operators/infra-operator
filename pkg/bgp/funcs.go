@@ -1,6 +1,8 @@
 package bgp
 
 import (
+	"net"
+
 	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
@@ -15,7 +17,7 @@ type PodDetail struct {
 }
 
 // GetFRRPodPrefixes - returns the FRRConfiguration prefix entries for a pod
-// secondary network interfaces in the format "10.10.10.10/32"
+// secondary network interfaces in the format "10.10.10.10/32" for IPv4 or "::1/128" for IPv6
 func GetFRRPodPrefixes(networkStatus []k8s_networkv1.NetworkStatus) []string {
 	podPrefixes := []string{}
 	for _, podNetStat := range networkStatus {
@@ -24,7 +26,11 @@ func GetFRRPodPrefixes(networkStatus []k8s_networkv1.NetworkStatus) []string {
 		}
 
 		for _, ip := range podNetStat.IPs {
-			ip = ip + "/32"
+			subnet := "/32"
+			if net.ParseIP(ip).To4() == nil {
+				subnet = "/128"
+			}
+			ip = ip + subnet
 			if !util.StringInSlice(ip, podPrefixes) {
 				podPrefixes = append(podPrefixes, ip)
 			}
