@@ -184,6 +184,53 @@ func TestGetFRRPodPrefixes(t *testing.T) {
 			},
 			want: []string{"172.17.0.40/32", "172.18.0.40/32"},
 		},
+		{
+			name: "IPv6 address",
+			netStatus: []k8s_networkv1.NetworkStatus{
+				{
+					Name:      "ovn-kubernetes",
+					Interface: "eth0",
+					IPs:       []string{"fd12:3456:789a:1::1"},
+					Mac:       "0a:58:c0:a8:38:3b",
+					Default:   true,
+				},
+				{
+					Name:      "foo/bar",
+					Interface: "bar",
+					IPs:       []string{"2001:db8::1"},
+					Mac:       "de:39:07:a1:b5:6b",
+					Default:   false,
+				},
+			},
+			want: []string{"2001:db8::1/128"},
+		},
+		{
+			name: "mixed IPv4 and IPv6",
+			netStatus: []k8s_networkv1.NetworkStatus{
+				{
+					Name:      "ovn-kubernetes",
+					Interface: "eth0",
+					IPs:       []string{"192.168.56.59"},
+					Mac:       "0a:58:c0:a8:38:3b",
+					Default:   true,
+				},
+				{
+					Name:      "foo/bar",
+					Interface: "bar",
+					IPs:       []string{"172.17.0.40"},
+					Mac:       "de:39:07:a1:b5:6b",
+					Default:   false,
+				},
+				{
+					Name:      "foo/baz",
+					Interface: "baz",
+					IPs:       []string{"2001:db8::1"},
+					Mac:       "de:39:07:a1:b5:6d",
+					Default:   false,
+				},
+			},
+			want: []string{"172.17.0.40/32", "2001:db8::1/128"},
+		},
 	}
 
 	for _, tt := range tests {
