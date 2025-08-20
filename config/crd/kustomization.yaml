@@ -16,37 +16,37 @@ resources:
 - bases/rabbitmq.openstack.org_rabbitmqs.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
-patchesStrategicMerge:
+patches:
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix.
 # patches here are for enabling the conversion webhook for each CRD
-#- patches/webhook_in_rabbitmq_transporturls.yaml
-#- patches/webhook_in_memcached_memcacheds.yaml
-#- patches/webhook_in_instanceha_instancehas.yaml
-#- patches/webhook_in_redis_redises.yaml
-#- patches/webhook_in_network_dnsmasqs.yaml
-#- patches/webhook_in_network_dnsdata.yaml
-#- patches/webhook_in_network_netconfigs.yaml
-#- patches/webhook_in_network_reservations.yaml
-#- patches/webhook_in_network_ipsets.yaml
-#- patches/webhook_in_network_bgpconfigurations.yaml
-#- patches/webhook_in_topology_topologies.yaml
-#- patches/webhook_in_rabbitmq_rabbitmqs.yaml
+#- path: patches/webhook_in_rabbitmq_transporturls.yaml
+#- path: patches/webhook_in_memcached_memcacheds.yaml
+#- path: patches/webhook_in_instanceha_instancehas.yaml
+#- path: patches/webhook_in_redis_redises.yaml
+#- path: patches/webhook_in_network_dnsmasqs.yaml
+#- path: patches/webhook_in_network_dnsdata.yaml
+#- path: patches/webhook_in_network_netconfigs.yaml
+#- path: patches/webhook_in_network_reservations.yaml
+#- path: patches/webhook_in_network_ipsets.yaml
+#- path: patches/webhook_in_network_bgpconfigurations.yaml
+#- path: patches/webhook_in_topology_topologies.yaml
+#- path: patches/webhook_in_rabbitmq_rabbitmqs.yaml
 #+kubebuilder:scaffold:crdkustomizewebhookpatch
 
 # [CERTMANAGER] To enable cert-manager, uncomment all the sections with [CERTMANAGER] prefix.
 # patches here are for enabling the CA injection for each CRD
-#- patches/cainjection_in_rabbitmq_transporturls.yaml
-#- patches/cainjection_in_memcached_memcacheds.yaml
-#- patches/cainjection_in_instanceha_instancehas.yaml
-#- patches/cainjection_in_redis_redises.yaml
-#- patches/cainjection_in_network_dnsmasqs.yaml
-#- patches/cainjection_in_network_dnsdata.yaml
-#- patches/cainjection_in_network_netconfigs.yaml
-#- patches/cainjection_in_network_reservations.yaml
-#- patches/cainjection_in_network_ipsets.yaml
-#- patches/cainjection_in_network_bgpconfigurations.yaml
-#- patches/cainjection_in_topology_topologies.yaml
-#- patches/cainjection_in_rabbitmq_rabbitmqs.yaml
+#- path: patches/cainjection_in_rabbitmq_transporturls.yaml
+#- path: patches/cainjection_in_memcached_memcacheds.yaml
+#- path: patches/cainjection_in_instanceha_instancehas.yaml
+#- path: patches/cainjection_in_redis_redises.yaml
+#- path: patches/cainjection_in_network_dnsmasqs.yaml
+#- path: patches/cainjection_in_network_dnsdata.yaml
+#- path: patches/cainjection_in_network_netconfigs.yaml
+#- path: patches/cainjection_in_network_reservations.yaml
+#- path: patches/cainjection_in_network_ipsets.yaml
+#- path: patches/cainjection_in_network_bgpconfigurations.yaml
+#- path: patches/cainjection_in_topology_topologies.yaml
+#- path: patches/cainjection_in_rabbitmq_rabbitmqs.yaml
 #+kubebuilder:scaffold:crdkustomizecainjectionpatch
 
 # the following config is for teaching kustomize how to do kustomization for CRDs.
