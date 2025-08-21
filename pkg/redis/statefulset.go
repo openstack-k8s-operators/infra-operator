@@ -99,7 +99,7 @@ func StatefulSet(
 					ServiceAccountName: r.RbacResourceName(),
 					Containers: []corev1.Container{{
 						Image:        r.Spec.ContainerImage,
-						Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
+						Command:      []string{"/var/lib/operator-scripts/start_valkey_replication.sh"},
 						Name:         "redis",
 						Env:          commonEnvVars,
 						Resources:    r.Spec.Resources,
@@ -111,14 +111,14 @@ func StatefulSet(
 						LivenessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								Exec: &corev1.ExecAction{
-									Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+									Command: []string{"/var/lib/operator-scripts/valkey_probe.sh", "liveness"},
 								},
 							},
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								Exec: &corev1.ExecAction{
-									Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
+									Command: []string{"/var/lib/operator-scripts/valkey_probe.sh", "readiness"},
 								},
 							},
 						},
