@@ -54,7 +54,6 @@ type RabbitMqSpec struct {
 
 // RabbitMqSpecCore - this version is used by the OpenStackControlplane CR (no container images)
 type RabbitMqSpecCore struct {
-	// +kubebuilder:validation:Required
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// Overrides to use when creating the Rabbitmq clusters
 	rabbitmqv2.RabbitmqClusterSpecCore `json:",inline"`
