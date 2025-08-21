@@ -75,6 +75,8 @@ func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls/finalizers,verbs=update
+//+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete;
 
@@ -267,8 +269,36 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	}
 	Log.Info(fmt.Sprintf("rabbitmq cluster %s has TLS enabled: %t", rabbit.Name, tlsEnabled))
 
+	// Get RabbitMq CR for both secret generation and status update
+	rabbitmqCR := &rabbitmqv1.RabbitMq{}
+	err = r.Client.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitmqCR)
+
+	// Determine quorum setting for secret generation
+	quorum := false
+	if err != nil {
+		Log.Info(fmt.Sprintf("Could not fetch RabbitMQ CR: %v", err))
+		// Default to false for quorum if we can't fetch the CR
+	} else {
+		Log.Info(fmt.Sprintf("Found RabbitMQ CR: %s", rabbitmqCR.Name))
+
+		quorum = rabbitmqCR.Status.QueueType == "Quorum"
+		Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType", quorum))
+
+		// Update QueueType and add annotation to signal change
+		if rabbitmqCR.Status.QueueType != instance.Status.QueueType {
+			Log.Info(fmt.Sprintf("Updating transportURL Status.QueueType from %s to %s", instance.Status.QueueType, rabbitmqCR.Status.QueueType))
+			instance.Status.QueueType = rabbitmqCR.Status.QueueType
+
+			// Signal change to dependent controllers via annotation
+			if instance.Annotations == nil {
+				instance.Annotations = make(map[string]string)
+			}
+			instance.Annotations["rabbitmq.openstack.org/queuetype-hash"] = fmt.Sprintf("%s-%d", rabbitmqCR.Status.QueueType, time.Now().Unix())
+		}
+	}
+
 	// Create a new secret with the transport URL for this CR
-	secret := r.createTransportURLSecret(instance, string(username), string(password), string(host), string(port), tlsEnabled)
+	secret := r.createTransportURLSecret(instance, string(username), string(password), string(host), string(port), tlsEnabled, quorum)
 	_, op, err := oko_secret.CreateOrPatchSecret(ctx, helper, instance, secret)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -311,6 +341,7 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	host string,
 	port string,
 	tlsEnabled bool,
+	quorum bool,
 ) *corev1.Secret {
 	query := ""
 	if tlsEnabled {
@@ -320,14 +351,19 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	}
 
 	// Create a new secret with the transport URL for this CR
+	data := map[string][]byte{
+		"transport_url": []byte(fmt.Sprintf("rabbit://%s:%s@%s:%s/%s", username, password, host, port, query)),
+	}
+	if quorum {
+		data["quorumqueues"] = []byte("true")
+	}
+
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "rabbitmq-transport-url-" + instance.Name,
 			Namespace: instance.Namespace,
 		},
-		Data: map[string][]byte{
-			"transport_url": []byte(fmt.Sprintf("rabbit://%s:%s@%s:%s/%s", username, password, host, port, query)),
-		},
+		Data: data,
 	}
 }
 
@@ -359,6 +395,11 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Watches(
 			&rabbitmqclusterv2.RabbitmqCluster{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
+		Watches(
+			&rabbitmqv1.RabbitMq{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).

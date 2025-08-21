@@ -14,10 +14,14 @@ limitations under the License.
 package helpers
 
 import (
+	"fmt"
+
 	"github.com/onsi/gomega"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // GetTransportURL retrieves a TransportURL resource with the specified name.
@@ -58,4 +62,22 @@ func (tc *TestHelper) AssertTransportURLDoesNotExist(name types.NamespacedName) 
 		err := tc.K8sClient.Get(tc.Ctx, name, instance)
 		g.Expect(k8s_errors.IsNotFound(err)).To(gomega.BeTrue())
 	}, tc.Timeout, tc.Interval).Should(gomega.Succeed())
+}
+
+// CreateTransportURLSecret function creats a transporturl secret, eventually with quorumqueues=true
+func (tc *TestHelper) CreateTransportURLSecret(namespace string, name string, quorum bool) *corev1.Secret {
+	tc.Logger.Info("Secret created with quorum queues", "name", name)
+
+	secretData := map[string][]byte{
+		"transport_url": []byte(fmt.Sprintf("rabbit://%s/fake", name)),
+	}
+
+	if quorum {
+		secretData["quorumqueues"] = []byte("true")
+	}
+
+	return tc.CreateSecret(
+		types.NamespacedName{Namespace: namespace, Name: name},
+		secretData,
+	)
 }
