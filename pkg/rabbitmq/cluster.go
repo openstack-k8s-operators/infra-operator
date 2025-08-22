@@ -1,3 +1,4 @@
+// Package rabbitmq provides utilities for configuring and managing RabbitMQ clusters
 package rabbitmq
 
 import (
@@ -17,6 +18,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// ConfigureCluster configures a RabbitMQ cluster with the specified parameters
 func ConfigureCluster(
 	cluster *rabbitmqv2.RabbitmqCluster,
 	IPv6Enabled bool,
@@ -25,7 +27,6 @@ func ConfigureCluster(
 	nodeselector *map[string]string,
 	override *rabbitmqv2.OverrideTrimmed,
 ) error {
-
 	envVars := []corev1.EnvVar{
 		{
 			// The upstream rabbitmq image has /var/log/rabbitmq mode 777, so when
@@ -267,9 +268,8 @@ func ConfigureCluster(
 
 		// add annotation to register service name in dnsmasq
 		hostname := fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace)
-		cluster.Spec.Override.Service.Annotations =
-			util.MergeStringMaps(cluster.Spec.Override.Service.Annotations,
-				map[string]string{networkv1.AnnotationHostnameKey: hostname})
+		cluster.Spec.Override.Service.Annotations = util.MergeStringMaps(cluster.Spec.Override.Service.Annotations,
+			map[string]string{networkv1.AnnotationHostnameKey: hostname})
 	}
 
 	// This is the same situation as RABBITMQ_UPGRADE_LOG above,
@@ -277,7 +277,7 @@ func ConfigureCluster(
 
 	// By default the prometheus and management endpoints always bind to ipv4.
 	// We need to set the correct address based on the IP version in use.
-	var settings = []string{
+	settings := []string{
 		"log.console = true",
 		"prometheus.tcp.ip = ::",
 		"management.tcp.ip = ::",
