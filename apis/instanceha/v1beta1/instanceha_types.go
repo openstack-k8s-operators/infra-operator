@@ -36,7 +36,7 @@ const (
 // InstanceHaSpec defines the desired state of InstanceHa
 type InstanceHaSpec struct {
 	// +kubebuilder:validation:Optional
-	// ContainerImage for the the InstanceHa container (will be set to environmental default if empty)
+	// ContainerImage for the InstanceHa container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
 	// +kubebuilder:validation:Required

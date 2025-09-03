@@ -590,7 +590,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	}
 
 	// Mark the Deployment as Ready only if the number of Replicas is equals
-	// to the Deployed instances (ReadyCount), and the the Status.Replicas
+	// to the Deployed instances (ReadyCount), and the Status.Replicas
 	// match Status.ReadyReplicas. If a deployment update is in progress,
 	// Replicas > ReadyReplicas.
 	// In addition, make sure the controller sees the last Generation
@@ -618,7 +618,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	return ctrl.Result{}, nil
 }
 
-// generateServiceConfigMaps - create create configmaps which hold service configuration
+// generateServiceConfigMaps - create configmaps which hold service configuration
 func (r *DNSMasqReconciler) generateServiceConfigMaps(
 	ctx context.Context,
 	h *helper.Helper,
