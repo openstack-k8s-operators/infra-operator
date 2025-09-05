@@ -15,9 +15,10 @@ TMPDIR=${TMPDIR:-"/tmp/k8s-webhook-server/serving-certs"}
 SKIP_CERT=${SKIP_CERT:-false}
 CRC_IP=${CRC_IP:-$(/sbin/ip -o -4 addr list crc | awk '{print $4}' | cut -d/ -f1)}
 FIREWALL_ZONE=${FIREWALL_ZONE:-"libvirt"}
+WEBHOOK_PORT=${WEBHOOK_PORT:-${WEBHOOK_PORT}}
 
-#Open 9443
-sudo firewall-cmd --zone=${FIREWALL_ZONE} --add-port=9443/tcp
+#Open ${WEBHOOK_PORT}
+sudo firewall-cmd --zone=${FIREWALL_ZONE} --add-port=${WEBHOOK_PORT}/tcp
 sudo firewall-cmd --runtime-to-permanent
 
 # Generate the certs and the ca bundle
@@ -48,7 +49,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-memcached-openstack-org-v1beta1-memcached
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-memcached-openstack-org-v1beta1-memcached
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vmemcached.kb.io
@@ -76,7 +77,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-memcached-openstack-org-v1beta1-memcached
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-memcached-openstack-org-v1beta1-memcached
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mmemcached.kb.io
@@ -104,7 +105,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-network-openstack-org-v1beta1-dnsmasq
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-network-openstack-org-v1beta1-dnsmasq
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vdnsmasq.kb.io
@@ -132,7 +133,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-network-openstack-org-v1beta1-dnsmasq
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-network-openstack-org-v1beta1-dnsmasq
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mdnsmasq.kb.io
@@ -160,7 +161,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-redis-openstack-org-v1beta1-redis
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vredis.kb.io
@@ -188,7 +189,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-redis-openstack-org-v1beta1-redis
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mredis.kb.io
@@ -216,7 +217,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-network-openstack-org-v1beta1-netconfig
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-network-openstack-org-v1beta1-netconfig
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vnetconfig.kb.io
@@ -244,7 +245,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-network-openstack-org-v1beta1-netconfig
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-network-openstack-org-v1beta1-netconfig
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mnetconfig.kb.io
@@ -272,7 +273,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-network-openstack-org-v1beta1-reservation
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-network-openstack-org-v1beta1-reservation
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vreservation.kb.io
@@ -300,7 +301,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-network-openstack-org-v1beta1-reservation
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-network-openstack-org-v1beta1-reservation
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mreservation.kb.io
@@ -328,7 +329,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-network-openstack-org-v1beta1-ipset
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-network-openstack-org-v1beta1-ipset
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vipset.kb.io
@@ -356,7 +357,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-network-openstack-org-v1beta1-ipset
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-network-openstack-org-v1beta1-ipset
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: mipset.kb.io
@@ -384,7 +385,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/validate-instanceha-openstack-org-v1beta1-instanceha
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/validate-instanceha-openstack-org-v1beta1-instanceha
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: vinstanceha.kb.io
@@ -412,7 +413,7 @@ webhooks:
   - v1
   clientConfig:
     caBundle: ${CA_BUNDLE}
-    url: https://${CRC_IP}:9443/mutate-instanceha-openstack-org-v1beta1-instanceha
+    url: https://${CRC_IP}:${WEBHOOK_PORT}/mutate-instanceha-openstack-org-v1beta1-instanceha
   failurePolicy: Fail
   matchPolicy: Equivalent
   name: minstanceha.kb.io
@@ -468,4 +469,4 @@ else
     oc scale --replicas=0 -n openstack-operators deploy/infra-operator-controller-manager
 fi
 
-go run ./main.go -metrics-bind-address ":${METRICS_PORT}" -health-probe-bind-address ":${HEALTH_PORT}" -pprof-bind-address ":${PPROF_PORT}"
+go run ./main.go -metrics-bind-address ":${METRICS_PORT}" -health-probe-bind-address ":${HEALTH_PORT}" -pprof-bind-address ":${PPROF_PORT}" -webhook-bind-address "${WEBHOOK_PORT}"
