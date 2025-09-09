@@ -37,6 +37,9 @@ type TransportURLStatus struct {
 	// SecretName - name of the secret containing the rabbitmq transport URL
 	SecretName string `json:"secretName,omitempty"`
 
+	// QueueType - the queue type from the associated RabbitMq instance
+	QueueType string `json:"queueType,omitempty"`
+
 	// ObservedGeneration - the most recent generation observed for this
 	// service. If the observed generation is less than the spec generation,
 	// then the controller has not processed the latest changes injected by
