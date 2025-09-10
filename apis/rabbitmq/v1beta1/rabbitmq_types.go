@@ -67,7 +67,7 @@ type RabbitMqSpecCore struct {
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Enum=None;Mirrored;Quorum
-	// +kubebuilder:default=Mirrored
+	// +kubebuilder:default=Quorum
 	// QueueType to eventually apply the ha-all policy or configure default queue type for the cluster
 	QueueType string `json:"queueType"`
 }
