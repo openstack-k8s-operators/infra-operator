@@ -392,6 +392,110 @@ var _ = Describe("IPSet controller", func() {
 		})
 	})
 
+	When("IP assignments are preserved during reconciliation", func() {
+		var netCfgName types.NamespacedName
+		var ipSetAName types.NamespacedName
+		var ipSetBName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create NetConfig with allocation range that allows multiple IPs
+			netCfg := CreateNetConfig(namespace, GetDefaultNetConfigSpec())
+			netCfgName.Name = netCfg.GetName()
+			netCfgName.Namespace = netCfg.GetNamespace()
+
+			Eventually(func(g Gomega) {
+				res := GetNetConfig(netCfgName)
+				g.Expect(res).ToNot(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			// Create IPSet A - will get first available IP (172.17.0.100)
+			ipsetA := CreateIPSet(namespace, GetDefaultIPSetSpec())
+			ipSetAName = types.NamespacedName{
+				Name:      ipsetA.GetName(),
+				Namespace: namespace,
+			}
+
+			// Create IPSet B - will get second available IP (172.17.0.101)
+			ipsetB := CreateIPSet(namespace, GetDefaultIPSetSpec())
+			ipSetBName = types.NamespacedName{
+				Name:      ipsetB.GetName(),
+				Namespace: namespace,
+			}
+
+			// Wait for both IPSets to be ready
+			th.ExpectCondition(
+				ipSetAName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+
+			th.ExpectCondition(
+				ipSetBName,
+				ConditionGetterFunc(IPSetConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+
+			DeferCleanup(func(_ SpecContext) {
+				th.DeleteInstance(ipsetA)
+				th.DeleteInstance(ipsetB)
+				th.DeleteInstance(netCfg)
+			}, NodeTimeout(timeout))
+		})
+
+		It("should preserve existing IP assignments when other IPSets are deleted", func() {
+			// Get the initial IP assignments
+			resA := GetReservationFromNet(ipSetAName, "net-1")
+			resB := GetReservationFromNet(ipSetBName, "net-1")
+
+			// Verify they got different IPs
+			Expect(resA.Address).ToNot(Equal(resB.Address))
+			Expect(resA.Address).ToNot(BeEmpty())
+			Expect(resB.Address).ToNot(BeEmpty())
+
+			originalIPSetA := resA.Address
+
+			// Delete IPSet B - this should free up its IP address
+			ipsetB := GetIPSet(ipSetBName)
+			th.DeleteInstance(ipsetB)
+
+			// Wait for IPSet B to be deleted
+			Eventually(func() error {
+				instance := &networkv1.IPSet{}
+				return k8sClient.Get(ctx, ipSetBName, instance)
+			}, timeout, interval).Should(MatchError(ContainSubstring("not found")))
+
+			// Force reconciliation of IPSet A by updating a field
+			Eventually(func(g Gomega) {
+				instance := GetIPSet(ipSetAName)
+				// Add an annotation to trigger reconciliation
+				if instance.Annotations == nil {
+					instance.Annotations = make(map[string]string)
+				}
+				instance.Annotations["test.force.reconcile"] = "true"
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Give the controller time to reconcile
+			Eventually(func(g Gomega) {
+				instance := GetIPSet(ipSetAName)
+				g.Expect(instance.Annotations["test.force.reconcile"]).To(Equal("true"))
+				th.ExpectCondition(
+					ipSetAName,
+					ConditionGetterFunc(IPSetConditionGetter),
+					condition.ReadyCondition,
+					corev1.ConditionTrue,
+				)
+			}, timeout, interval).Should(Succeed())
+
+			// Verify IPSet A still has its original IP (not the freed IP from B)
+			resAAfterReconcile := GetReservationFromNet(ipSetAName, "net-1")
+			Expect(resAAfterReconcile.Address).To(Equal(originalIPSetA))
+			Expect(resAAfterReconcile.Address).ToNot(Equal(resB.Address))
+		})
+	})
+
 	When("an IPSet with Immutable flag gets created", func() {
 		BeforeEach(func() {
 			net1Spec := GetNetSpec(net1, GetSubnet1(subnet1))
