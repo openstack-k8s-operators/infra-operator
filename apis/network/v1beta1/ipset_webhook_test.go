@@ -289,7 +289,7 @@ func TestIPSetValiateIPSetNetwork(t *testing.T) {
 			basePath := field.NewPath("spec")
 
 			var err error
-			allErrs := valiateIPSetNetwork(tt.c.Spec.Networks, basePath, &tt.n)
+			allErrs := validateIPSetNetwork(tt.c.Spec.Networks, basePath, &tt.n)
 			if len(allErrs) > 0 {
 				err = apierrors.NewInvalid(GroupVersion.WithKind("NetConfig").GroupKind(), tt.c.Name, allErrs)
 			}
@@ -477,12 +477,12 @@ func TestIPSetUpdateValidation(t *testing.T) {
 
 			var err error
 
-			allErrs := valiateIPSetNetwork(tt.newSpec.Networks, basePath, &tt.n)
+			allErrs := validateIPSetNetwork(tt.newSpec.Networks, basePath, &tt.n)
 			if len(allErrs) > 0 {
 				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), newCfg.Name, allErrs)
 			}
 
-			allErrs = valiateIPSetChanged(tt.newSpec.Networks, tt.oldSpec.Networks, basePath)
+			allErrs = validateIPSetChanged(tt.newSpec.Networks, tt.oldSpec.Networks, basePath)
 			if len(allErrs) > 0 {
 				err = apierrors.NewInvalid(GroupVersion.WithKind("IPSet").GroupKind(), newCfg.Name, allErrs)
 			}

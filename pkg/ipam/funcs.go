@@ -16,7 +16,7 @@ type AssignIPDetails struct {
 	FixedIP     netip.Addr
 	// internal use only
 	excluded map[netip.Addr]bool
-	reserved map[netip.Addr]string
+	reserved map[netip.Addr]bool
 }
 
 func (a *AssignIPDetails) buildExcluded() error {
@@ -38,11 +38,11 @@ func (a *AssignIPDetails) buildReserved() error {
 	if a.reserved != nil {
 		return nil
 	}
-	a.reserved = make(map[netip.Addr]string, len(a.Reservelist.Items))
+	a.reserved = make(map[netip.Addr]bool, len(a.Reservelist.Items))
 	for _, r := range a.Reservelist.Items {
 		if res, ok := r.Spec.Reservation[a.NetName]; ok {
 			if ip, err := netip.ParseAddr(res.Address); err == nil {
-				a.reserved[ip] = r.Spec.IPSetRef.Name
+				a.reserved[ip] = true
 			} else {
 				return fmt.Errorf("failed to parse reservation ip %s: %w", res.Address, err)
 			}
@@ -87,8 +87,8 @@ func (a *AssignIPDetails) fixedIPExists() (*networkv1.IPAddress, error) {
 		return nil, fmt.Errorf("FixedIP %s is in ExcludeAddresses", a.FixedIP.String())
 	}
 
-	if reservedIPSet, ok := a.reserved[a.FixedIP]; ok && reservedIPSet != a.IPSet {
-		return nil, fmt.Errorf("%s already reserved for %s", a.FixedIP.String(), reservedIPSet)
+	if _, ok := a.reserved[a.FixedIP]; ok {
+		return nil, fmt.Errorf("%s already reserved", a.FixedIP.String())
 	}
 
 	return &networkv1.IPAddress{
@@ -132,7 +132,7 @@ func (a *AssignIPDetails) iterateForAssignment() (*networkv1.IPAddress, error) {
 			if _, ok := a.excluded[ip]; ok {
 				continue
 			}
-			if reservedIPSet, ok := a.reserved[ip]; ok && reservedIPSet != a.IPSet {
+			if _, ok := a.reserved[ip]; ok {
 				continue
 			}
 

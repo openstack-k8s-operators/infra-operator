@@ -24,7 +24,6 @@ import (
 	"sort"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -383,13 +382,15 @@ func (r *IPSetReconciler) ensureReservation(
 		Namespace: ipset.Namespace,
 		Name:      ipset.Name,
 	}
-	reservationSpec := networkv1.ReservationSpec{
-		IPSetRef: corev1.ObjectReference{
-			Namespace: ipset.Namespace,
-			Name:      ipset.Name,
-			UID:       ipset.GetUID(),
-		},
-		Reservation: map[string]networkv1.IPAddress{},
+	// Get existing reservation to preserve IP assignments
+	reservation, err := r.getReservation(ctx, ipset)
+	var reservationSpec = reservation.Spec
+
+	if err != nil {
+		if !k8s_errors.IsNotFound(err) {
+			return nil, err
+		}
+		reservationSpec.Reservation = map[string]networkv1.IPAddress{}
 	}
 	reservationLabels := map[string]string{}
 
@@ -425,30 +426,39 @@ func (r *IPSetReconciler) ensureReservation(
 				fmt.Sprintf("%s/%s", ipam.IPAMLabelKey, string(netDef.Name)): string(subnetDef.Name),
 			})
 
-		ipDetails := ipam.AssignIPDetails{
-			IPSet:       ipset.Name,
-			NetName:     string(netDef.Name),
-			SubNet:      subnetDef,
-			Reservelist: reservations,
-		}
+		var ip *networkv1.IPAddress
 
-		if ipsetNet.FixedIP != nil {
-			ipDetails.FixedIP, err = netip.ParseAddr(string(*ipsetNet.FixedIP))
+		// Check if we already have an IP for this network
+		if existingIP, exists := reservationSpec.Reservation[string(netDef.Name)]; exists {
+			// Use existing IP assignment
+			ip = &existingIP
+		} else {
+			// Need to assign a new IP
+			ipDetails := ipam.AssignIPDetails{
+				IPSet:       ipset.Name,
+				NetName:     string(netDef.Name),
+				SubNet:      subnetDef,
+				Reservelist: reservations,
+			}
+
+			if ipsetNet.FixedIP != nil {
+				ipDetails.FixedIP, err = netip.ParseAddr(string(*ipsetNet.FixedIP))
+				if err != nil {
+					return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
+				}
+				if !ipDetails.FixedIP.IsValid() {
+					return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
+				}
+			}
+
+			ip, err = ipDetails.AssignIP()
 			if err != nil {
-				return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
+				return nil, fmt.Errorf("failed to do ip reservation: %w", err)
 			}
-			if !ipDetails.FixedIP.IsValid() {
-				return nil, fmt.Errorf("failed parse FixedIP %s", string(*ipsetNet.FixedIP))
-			}
-		}
 
-		ip, err := ipDetails.AssignIP()
-		if err != nil {
-			return nil, fmt.Errorf("failed to do ip reservation: %w", err)
+			// Add the new IP to the reservation
+			reservationSpec.Reservation[string(netDef.Name)] = *ip
 		}
-
-		// add IP to the reservation and IPSet status reservations
-		reservationSpec.Reservation[string(netDef.Name)] = *ip
 		ipsetRes := networkv1.IPSetReservation{
 			Network:        netDef.Name,
 			Subnet:         subnetDef.Name,

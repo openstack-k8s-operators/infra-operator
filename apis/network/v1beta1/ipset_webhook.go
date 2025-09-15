@@ -82,7 +82,7 @@ func (r *IPSet) ValidateCreate() (admission.Warnings, error) {
 	basePath := field.NewPath("spec")
 
 	// validate requested networks exist in netcfg
-	allErrs = append(allErrs, valiateIPSetNetwork(r.Spec.Networks, basePath, &netcfg.Spec)...)
+	allErrs = append(allErrs, validateIPSetNetwork(r.Spec.Networks, basePath, &netcfg.Spec)...)
 
 	if len(allErrs) == 0 {
 		return nil, nil
@@ -132,10 +132,10 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 		basePath := field.NewPath("spec")
 
 		// validate requested networks exist in
-		allErrs = append(allErrs, valiateIPSetNetwork(r.Spec.Networks, basePath, &netcfg.Spec)...)
+		allErrs = append(allErrs, validateIPSetNetwork(r.Spec.Networks, basePath, &netcfg.Spec)...)
 
 		// validate against the previous object only
-		allErrs = append(allErrs, valiateIPSetChanged(r.Spec.Networks, oldIPSet.Spec.Networks, basePath)...)
+		allErrs = append(allErrs, validateIPSetChanged(r.Spec.Networks, oldIPSet.Spec.Networks, basePath)...)
 	}
 
 	if len(allErrs) == 0 {
@@ -153,14 +153,14 @@ func (r *IPSet) ValidateDelete() (admission.Warnings, error) {
 	return nil, nil
 }
 
-// valiateIPSetNetwork
+// validateIPSetNetwork
 // - networks are uniq in the list
 // - networks and subnets exist in netcfg
 // - FixedIP is a valid IP address
 // - FixedIP has correct IP version of subnet
 // - FixedIP is in the subnet cidr
 // - Route is only specified on a single network per IPFamily
-func valiateIPSetNetwork(
+func validateIPSetNetwork(
 	networks []IPSetNetwork,
 	path *field.Path,
 	netCfgSpec *NetConfigSpec,
@@ -246,12 +246,12 @@ func valiateIPSetNetwork(
 	return allErrs
 }
 
-// valiateIPSetChanged
+// validateIPSetChanged
 // - if a previous requested network is still in the list
 // - if subnet changed within a network
 // - if fixedIP changed
 // - if defaultRoute changed
-func valiateIPSetChanged(
+func validateIPSetChanged(
 	networks []IPSetNetwork,
 	oldNetworks []IPSetNetwork,
 	path *field.Path,
