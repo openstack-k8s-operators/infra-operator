@@ -79,7 +79,7 @@ require (
 	k8s.io/apiextensions-apiserver v0.31.12 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240322212309-b815d8309940 // indirect
-	k8s.io/kubectl v0.29.15 // indirect
+	k8s.io/kubectl v0.31.12 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
@@ -96,3 +96,7 @@ replace github.com/rabbitmq/cluster-operator/v2 => github.com/openstack-k8s-oper
 
 // pin frr-k8s to v0.0.11 because later versions have a req for golang 1.22
 replace github.com/metallb/frr-k8s => github.com/metallb/frr-k8s v0.0.11 //allow-merging
+
+replace github.com/openstack-k8s-operators/lib-common/modules/common => github.com/stuggi/lib-common/modules/common v0.0.0-20250916145703-2224c464ad15
+
+replace github.com/openstack-k8s-operators/lib-common/modules/test => github.com/stuggi/lib-common/modules/test v0.0.0-20250916145703-2224c464ad15
