@@ -1,3 +1,4 @@
+// Package bgp provides BGP configuration utilities for network management
 package bgp
 
 import (

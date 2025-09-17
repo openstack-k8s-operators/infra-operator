@@ -109,7 +109,7 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	// Fetch the DNSMasq instance
 	instance := &networkv1.DNSMasq{}
-	err := r.Client.Get(ctx, req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -237,7 +237,7 @@ func (r *DNSMasqReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 		listOpts := []client.ListOption{
 			client.InNamespace(o.GetNamespace()),
 		}
-		if err := r.Client.List(ctx, dnsmasqs, listOpts...); err != nil {
+		if err := r.List(ctx, dnsmasqs, listOpts...); err != nil {
 			Log.Error(err, "Unable to retrieve DNSMasqList")
 			return nil
 		}
