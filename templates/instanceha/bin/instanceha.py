@@ -645,7 +645,7 @@ def _host_fence(host, action):
         if action == 'off':
             r = _redfish_reset(url, user, passwd, timeout, "ForceOff")
 
-            if r.status_code == 204:
+            if r.status_code in [200, 204]:
                 logging.info('Power off of %s ok' % host)
                 return True
             else:
@@ -653,7 +653,7 @@ def _host_fence(host, action):
                 return False
         else:
             r = _redfish_reset(url, user, passwd, timeout, "On")
-            if r.status_code == 204:
+            if r.status_code in [200, 204]:
                 logging.info('Power on of %s ok' % host)
             else:
                 logging.warning('Could not power on %s' % host)
