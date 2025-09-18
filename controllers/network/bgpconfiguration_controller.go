@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"golang.org/x/exp/slices"
@@ -48,6 +49,7 @@ import (
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	bgp "github.com/openstack-k8s-operators/infra-operator/pkg/bgp"
 )
@@ -68,6 +70,7 @@ func (r *BGPConfigurationReconciler) GetLogger(ctx context.Context) logr.Logger 
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=frrk8s.metallb.io,resources=frrconfigurations,verbs=get;list;watch;create;update;patch;delete;deletecollection
 //+kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 
@@ -312,6 +315,55 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		},
 	}
 
+	configMapFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+		result := []reconcile.Request{}
+
+		// Only trigger reconcile for octavia-hmport-map ConfigMap
+		if o.GetName() != "octavia-hmport-map" {
+			return nil
+		}
+
+		// For octavia-hmport-map ConfigMap events get the list of all
+		// BGPConfiguration in the same namespace to trigger reconcile
+		bgpConfigurationList := &networkv1.BGPConfigurationList{}
+
+		listOpts := []client.ListOption{
+			client.InNamespace(o.GetNamespace()),
+		}
+		if err := r.Client.List(ctx, bgpConfigurationList, listOpts...); err != nil {
+			Log.Error(err, "Unable to retrieve BGPConfigurationList in namespace %s", o.GetNamespace())
+			return nil
+		}
+
+		// For each BGPConfiguration instance create a reconcile request
+		for _, i := range bgpConfigurationList.Items {
+			name := client.ObjectKey{
+				Namespace: o.GetNamespace(),
+				Name:      i.Name,
+			}
+			result = append(result, reconcile.Request{NamespacedName: name})
+		}
+		if len(result) > 0 {
+			Log.Info("Reconcile request for octavia ConfigMap change:", "result", result)
+			return result
+		}
+		return nil
+	})
+
+	// Predicate to filter only octavia-hmport-map ConfigMap events
+	pConfigMap := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectNew.GetName() == "octavia-hmport-map" &&
+				e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return e.Object.GetName() == "octavia-hmport-map"
+		},
+		CreateFunc: func(e event.CreateEvent) bool {
+			return e.Object.GetName() == "octavia-hmport-map"
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1.BGPConfiguration{}).
 		// Watch pods which have additional networks configured with k8s_networkv1.NetworkAttachmentAnnot annotation in the same namespace
@@ -322,6 +374,10 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		Watches(&frrk8sv1.FRRConfiguration{},
 			frrFN,
 			builder.WithPredicates(pFRR)).
+		// Watch octavia-hmport-map ConfigMap to handle octavia worker IP changes
+		Watches(&corev1.ConfigMap{},
+			configMapFN,
+			builder.WithPredicates(pConfigMap)).
 		Complete(r)
 }
 
@@ -444,6 +500,37 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 		}
 	}
 
+	// Process octavia-hmport-map ConfigMap for Octavia worker IPs
+	workerMappings, err := getOctaviaWorkerIPMappings(ctx, r.Client, instance.Namespace)
+	if err != nil {
+		Log.Info("Warning: Failed to process octavia-hmport-map ConfigMap", "error", err.Error())
+		// Continue processing even if ConfigMap is not available
+	} else {
+		// Create FRRConfigurations for each worker with octavia IPs
+		// Only process workers that have pods with NAD annotations (exist in frrNodeConfigs)
+		for _, workerMapping := range workerMappings {
+			if _, exists := frrNodeConfigs[workerMapping.WorkerName]; !exists {
+				Log.Info("Skipping octavia worker - no pods with NAD annotations found", "worker", workerMapping.WorkerName)
+				continue
+			}
+
+			err = r.createOrPatchFRRConfigurationForWorker(
+				ctx,
+				instance,
+				workerMapping,
+				frrNodeConfigs,
+				labels.GetLabels(instance,
+					groupLabel,
+					map[string]string{
+						groupLabel + "/octavia-worker": workerMapping.WorkerName,
+					}),
+			)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	// delete our managed FRRConfigurations where there is no longer a pod in podNetworkDetailList
 	// because the pod was deleted/completed/failed/unknown
 	if err := r.deleteStaleFRRConfigurations(ctx, instance, podNetworkDetailList, frrConfigList, groupLabel); err != nil {
@@ -455,9 +542,17 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 }
 
 func (r *BGPConfigurationReconciler) deleteStaleFRRConfigurations(ctx context.Context, instance *networkv1.BGPConfiguration, podNetworkDetailList []bgp.PodDetail, frrConfigList *frrk8sv1.FRRConfigurationList, groupLabel string) error {
+	// Get current worker mappings to check which octavia FRRConfigurations should exist
+	currentWorkerMappings, err := getOctaviaWorkerIPMappings(ctx, r.Client, instance.Namespace)
+	if err != nil {
+		r.GetLogger(ctx).Info("Warning: Failed to get worker mappings during stale deletion check", "error", err.Error())
+		currentWorkerMappings = []WorkerIPMapping{} // Continue with empty list
+	}
+
 	for _, cfg := range frrConfigList.Items {
 		frrLabels := cfg.GetLabels()
 		if _, ok := frrLabels[labels.GetOwnerNameLabelSelector(labels.GetGroupLabel("bgpconfiguration"))]; ok {
+			// Check pod-based FRRConfigurations
 			if podName, ok := frrLabels[groupLabel+"/pod-name"]; ok {
 				f := func(p bgp.PodDetail) bool {
 					return p.Name == podName && p.Namespace == instance.Namespace
@@ -469,6 +564,21 @@ func (r *BGPConfigurationReconciler) deleteStaleFRRConfigurations(ctx context.Co
 						return fmt.Errorf("unable to delete FRRConfiguration %w", err)
 					}
 					r.GetLogger(ctx).Info(fmt.Sprintf("pod with name: %s either in state deleted, completed, failed or unknown, deleted FRRConfiguration %s", podName, cfg.Name))
+				}
+			}
+
+			// Check octavia worker-based FRRConfigurations
+			if workerName, ok := frrLabels[groupLabel+"/octavia-worker"]; ok {
+				f := func(w WorkerIPMapping) bool {
+					return w.WorkerName == workerName
+				}
+				idx := slices.IndexFunc(currentWorkerMappings, f)
+				if idx < 0 {
+					// There is no worker mapping corresponding to the FRRConfiguration, delete it
+					if err := r.Client.Delete(ctx, &cfg); err != nil && !k8s_errors.IsNotFound(err) {
+						return fmt.Errorf("unable to delete octavia FRRConfiguration %w", err)
+					}
+					r.GetLogger(ctx).Info(fmt.Sprintf("octavia worker %s no longer exists in ConfigMap, deleted FRRConfiguration %s", workerName, cfg.Name))
 				}
 			}
 		}
@@ -579,6 +689,127 @@ func getPodNetworkDetails(
 
 func removeIndex(s []k8s_networkv1.NetworkStatus, index int) []k8s_networkv1.NetworkStatus {
 	return append(s[:index], s[index+1:]...)
+}
+
+// WorkerIPMapping - represents IP mapping for a worker node
+type WorkerIPMapping struct {
+	WorkerName string
+	HMIP       string
+	RsyslogIP  string
+}
+
+// getOctaviaWorkerIPMappings - parses octavia-hmport-map ConfigMap and returns worker IP mappings
+func getOctaviaWorkerIPMappings(
+	ctx context.Context,
+	client client.Client,
+	namespace string,
+) ([]WorkerIPMapping, error) {
+	configMap := &corev1.ConfigMap{}
+	err := client.Get(ctx, types.NamespacedName{
+		Name:      "octavia-hmport-map",
+		Namespace: namespace,
+	}, configMap)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			// ConfigMap not found, return empty list
+			return []WorkerIPMapping{}, nil
+		}
+		return nil, fmt.Errorf("failed to get octavia-hmport-map ConfigMap: %w", err)
+	}
+
+	// Parse worker mappings from ConfigMap data
+	workerMappings := map[string]*WorkerIPMapping{}
+
+	// Regex patterns to extract worker names
+	hmPattern := regexp.MustCompile(`^hm_worker-(.+)$`)
+	rsyslogPattern := regexp.MustCompile(`^rsyslog_worker-(.+)$`)
+
+	for key, ip := range configMap.Data {
+		if matches := hmPattern.FindStringSubmatch(key); len(matches) > 1 {
+			workerName := "worker-" + matches[1]
+			if _, exists := workerMappings[workerName]; !exists {
+				workerMappings[workerName] = &WorkerIPMapping{WorkerName: workerName}
+			}
+			workerMappings[workerName].HMIP = ip
+		} else if matches := rsyslogPattern.FindStringSubmatch(key); len(matches) > 1 {
+			workerName := "worker-" + matches[1]
+			if _, exists := workerMappings[workerName]; !exists {
+				workerMappings[workerName] = &WorkerIPMapping{WorkerName: workerName}
+			}
+			workerMappings[workerName].RsyslogIP = ip
+		}
+	}
+
+	// Convert map to slice and filter complete mappings
+	var result []WorkerIPMapping
+	for _, mapping := range workerMappings {
+		if mapping.HMIP != "" && mapping.RsyslogIP != "" {
+			result = append(result, *mapping)
+		}
+	}
+
+	return result, nil
+}
+
+// createOrPatchFRRConfigurationForWorker - creates FRRConfiguration for a worker with octavia IPs
+func (r *BGPConfigurationReconciler) createOrPatchFRRConfigurationForWorker(
+	ctx context.Context,
+	instance *networkv1.BGPConfiguration,
+	workerMapping WorkerIPMapping,
+	nodeFRRCfgs map[string]frrk8sv1.FRRConfiguration,
+	frrLabels map[string]string,
+) error {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling createOrPatchFRRConfigurationForWorker", "worker", workerMapping.WorkerName)
+
+	// Create prefixes for both IPs (hm and rsyslog)
+	prefixes := []string{
+		workerMapping.HMIP + "/32",
+		workerMapping.RsyslogIP + "/32",
+	}
+
+	// Get the node FRR configuration for this worker
+	nodeFRRCfg, exists := nodeFRRCfgs[workerMapping.WorkerName]
+	if !exists {
+		return fmt.Errorf("no FRRConfiguration found for worker %s", workerMapping.WorkerName)
+	}
+
+	frrConfig := &frrk8sv1.FRRConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Namespace + "-octavia-" + workerMapping.WorkerName,
+			Namespace: instance.Spec.FRRConfigurationNamespace,
+		},
+	}
+
+	frrConfigSpec := &frrk8sv1.FRRConfigurationSpec{}
+	var routers []frrk8sv1.Router
+	for _, r := range nodeFRRCfg.Spec.BGP.Routers {
+		routers = append(routers, frrk8sv1.Router{
+			ASN:       r.ASN,
+			Neighbors: bgp.GetFRRNeighbors(r.Neighbors, prefixes),
+			Prefixes:  prefixes,
+		})
+	}
+	frrConfigSpec.BGP.Routers = routers
+	frrConfigSpec.NodeSelector = nodeFRRCfg.Spec.NodeSelector
+
+	// create or update the FRRConfiguration
+	op, err := controllerutil.CreateOrPatch(ctx, r.Client, frrConfig, func() error {
+		frrConfig.Labels = util.MergeMaps(frrConfig.Labels, frrLabels)
+		frrConfigSpec.DeepCopyInto(&frrConfig.Spec)
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("error create/updating octavia FRRConfiguration for worker %s: %w", workerMapping.WorkerName, err)
+	}
+
+	if op != controllerutil.OperationResultNone {
+		Log.Info("operation:", "FRRConfiguration name", frrConfig.Name, "Operation", string(op))
+	}
+
+	Log.Info("Reconciled createOrPatchFRRConfigurationForWorker successfully", "worker", workerMapping.WorkerName)
+	return nil
 }
 
 // createOrPatchFRRConfiguration -
