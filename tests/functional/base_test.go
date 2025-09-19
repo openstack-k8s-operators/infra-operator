@@ -801,6 +801,15 @@ func CreateFRRConfiguration(name types.NamespacedName, spec map[string]interface
 	return th.CreateUnstructured(raw)
 }
 
+func GetOctaviaConfigMapData() map[string]interface{} {
+	return map[string]interface{}{
+		"hm_worker-0":      "172.23.0.103",
+		"hm_worker-1":      "172.23.0.105",
+		"rsyslog_worker-0": "172.23.0.104",
+		"rsyslog_worker-1": "172.23.0.106",
+	}
+}
+
 func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
 	return map[string]interface{}{
 		"bgp": map[string]interface{}{
