@@ -99,7 +99,7 @@ func ConfigureCluster(
 					Containers: []corev1.Container{
 						{
 							// NOTE(gibi): if this is set according to the
-							// RabbitMQCluster name the the Pod will crash
+							// RabbitMQCluster name the Pod will crash
 							Name:  "rabbitmq",
 							Image: cluster.Spec.Image,
 							Env:   envVars,
