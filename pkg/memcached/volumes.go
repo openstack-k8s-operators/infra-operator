@@ -9,6 +9,7 @@ import (
 )
 
 const (
+	// MemcachedCertPrefix defines the prefix for memcached TLS certificates
 	MemcachedCertPrefix = "memcached"
 )
 
@@ -50,14 +51,14 @@ func getVolumes(m *memcachedv1.Memcached) []corev1.Volume {
 
 	if m.Spec.TLS.Enabled() {
 		svc := tls.Service{
-			SecretName: *m.Spec.TLS.GenericService.SecretName,
+			SecretName: *m.Spec.TLS.SecretName,
 			CertMount:  nil,
 			KeyMount:   nil,
 			CaMount:    nil,
 		}
 		vols = append(vols, svc.CreateVolume(MemcachedCertPrefix))
-		if m.Spec.TLS.Ca.CaBundleSecretName != "" {
-			vols = append(vols, m.Spec.TLS.Ca.CreateVolume())
+		if m.Spec.TLS.CaBundleSecretName != "" {
+			vols = append(vols, m.Spec.TLS.CreateVolume())
 		}
 	}
 
@@ -77,14 +78,14 @@ func getVolumeMounts(m *memcachedv1.Memcached) []corev1.VolumeMount {
 
 	if m.Spec.TLS.Enabled() {
 		svc := tls.Service{
-			SecretName: *m.Spec.TLS.GenericService.SecretName,
+			SecretName: *m.Spec.TLS.SecretName,
 			CertMount:  nil,
 			KeyMount:   nil,
 			CaMount:    nil,
 		}
 		vm = append(vm, svc.CreateVolumeMounts(MemcachedCertPrefix)...)
-		if m.Spec.TLS.Ca.CaBundleSecretName != "" {
-			vm = append(vm, m.Spec.TLS.Ca.CreateVolumeMounts(nil)...)
+		if m.Spec.TLS.CaBundleSecretName != "" {
+			vm = append(vm, m.Spec.TLS.CreateVolumeMounts(nil)...)
 		}
 	}
 
