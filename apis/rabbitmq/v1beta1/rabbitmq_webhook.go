@@ -72,7 +72,11 @@ func (spec *RabbitMqSpec) Default() {
 
 // Default - common validations go here (for the OpenStackControlplane which uses this one)
 func (spec *RabbitMqSpecCore) Default() {
-	//nothing to validate yet
+	// Set Quorum as default for new RabbitMQ resources
+	// Check for both empty string and CRD default "Mirrored"
+	if spec.QueueType == "" || spec.QueueType == "Mirrored" {
+		spec.QueueType = "Quorum"
+	}
 }
 
 // TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
