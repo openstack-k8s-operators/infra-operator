@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// Deployment returns a Deployment resource for the Redis CR
+// StatefulSet returns a StatefulSet resource for the Redis CR
 func StatefulSet(
 	r *redisv1.Redis,
 	configHash string,
@@ -97,49 +97,50 @@ func StatefulSet(
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: r.RbacResourceName(),
-					Containers: []corev1.Container{{
-						Image:        r.Spec.ContainerImage,
-						Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
-						Name:         "redis",
-						Env:          commonEnvVars,
-						Resources:    r.Spec.Resources,
-						VolumeMounts: getRedisVolumeMounts(r),
-						Ports: []corev1.ContainerPort{{
-							ContainerPort: 6379,
-							Name:          "redis",
-						}},
-						LivenessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								Exec: &corev1.ExecAction{
-									Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+					Containers: []corev1.Container{
+						{
+							Image:        r.Spec.ContainerImage,
+							Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
+							Name:         "redis",
+							Env:          commonEnvVars,
+							Resources:    r.Spec.Resources,
+							VolumeMounts: getRedisVolumeMounts(r),
+							Ports: []corev1.ContainerPort{{
+								ContainerPort: 6379,
+								Name:          "redis",
+							}},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+									},
 								},
 							},
-						},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								Exec: &corev1.ExecAction{
-									Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
+									},
 								},
 							},
-						},
-					}, {
-						Image:   r.Spec.ContainerImage,
-						Command: []string{"/var/lib/operator-scripts/start_sentinel.sh"},
+						}, {
+							Image:   r.Spec.ContainerImage,
+							Command: []string{"/var/lib/operator-scripts/start_sentinel.sh"},
 
-						Name: "sentinel",
-						Env: append(commonEnvVars, corev1.EnvVar{
-							Name:  "SENTINEL_QUORUM",
-							Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
-						}),
-						Resources:    r.Spec.SentinelResources,
-						VolumeMounts: getSentinelVolumeMounts(r),
-						Ports: []corev1.ContainerPort{{
-							ContainerPort: 26379,
-							Name:          "sentinel",
-						}},
-						ReadinessProbe: sentinelReadinessProbe,
-						LivenessProbe:  sentinelLivenessProbe,
-					},
+							Name: "sentinel",
+							Env: append(commonEnvVars, corev1.EnvVar{
+								Name:  "SENTINEL_QUORUM",
+								Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
+							}),
+							Resources:    r.Spec.SentinelResources,
+							VolumeMounts: getSentinelVolumeMounts(r),
+							Ports: []corev1.ContainerPort{{
+								ContainerPort: 26379,
+								Name:          "sentinel",
+							}},
+							ReadinessProbe: sentinelReadinessProbe,
+							LivenessProbe:  sentinelLivenessProbe,
+						},
 					},
 					Volumes: getVolumes(r),
 				},

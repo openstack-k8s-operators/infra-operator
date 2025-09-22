@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 
-	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -73,7 +73,7 @@ func (r *NetConfig) ValidateCreate() (admission.Warnings, error) {
 	}
 	// stop if there is already a NetConfig in the namespace.
 	if netcfg != nil {
-		return nil, fmt.Errorf(fmt.Sprintf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace()))
+		return nil, fmt.Errorf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace())
 	}
 
 	allErrs := field.ErrorList{}

@@ -19,9 +19,9 @@ package v1beta1
 import (
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -75,7 +75,7 @@ func (r *IPSet) ValidateCreate() (admission.Warnings, error) {
 	}
 	// stop if there is no NetConfig in the namespace.
 	if netcfg == nil {
-		return nil, fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
+		return nil, fmt.Errorf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace())
 	}
 
 	allErrs := field.ErrorList{}
@@ -126,7 +126,7 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 		}
 		// stop if there is no NetConfig in the namespace.
 		if netcfg == nil {
-			return nil, fmt.Errorf(fmt.Sprintf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace()))
+			return nil, fmt.Errorf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace())
 		}
 
 		basePath := field.NewPath("spec")
