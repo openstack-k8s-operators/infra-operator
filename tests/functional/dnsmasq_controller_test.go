@@ -162,7 +162,8 @@ var _ = Describe("DNSMasq controller", func() {
 
 			svc := th.GetService(types.NamespacedName{
 				Namespace: namespace,
-				Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name)})
+				Name:      fmt.Sprintf("dnsmasq-%s", dnsMasqName.Name),
+			})
 			Expect(svc.Labels["service"]).To(Equal("dnsmasq"))
 		})
 
@@ -190,8 +191,10 @@ var _ = Describe("DNSMasq controller", func() {
 				g.Expect(container.VolumeMounts).To(HaveLen(3))
 				g.Expect(container.Image).To(Equal(containerImage))
 
-				g.Expect(container.LivenessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
-				g.Expect(container.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
+				g.Expect(container.LivenessProbe.Exec).ToNot(BeNil())
+				g.Expect(container.LivenessProbe.Exec.Command).To(ContainElement(ContainSubstring("pgrep -f dnsmasq")))
+				g.Expect(container.ReadinessProbe.Exec).ToNot(BeNil())
+				g.Expect(container.ReadinessProbe.Exec.Command).To(ContainElement(ContainSubstring("pgrep -f dnsmasq")))
 			}, timeout, interval).Should(Succeed())
 		})
 

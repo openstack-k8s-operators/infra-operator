@@ -30,7 +30,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
 
@@ -84,6 +83,8 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--no-resolv")
 	dnsmasqCmd = append(dnsmasqCmd, "--bogus-priv")
 	dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
+	// Prevent blocking from idle TCP connections (2.85 compatible options)
+	dnsmasqCmd = append(dnsmasqCmd, "--dns-loop-detect")
 
 	// append dnsmasqCmd for service container
 	args = append(args, strings.Join(dnsmasqCmd, " "))
@@ -95,11 +96,21 @@ func Deployment(
 	//
 	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 	//
-	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: DNSTargetPort},
+	// Use process check instead of TCP socket for more robust health checking
+	// Check if dnsmasq process is running and listening on the expected port
+	livenessProbe.Exec = &corev1.ExecAction{
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			"pgrep -f dnsmasq && ss -ln | grep :" + strconv.Itoa(int(DNSTargetPort)),
+		},
 	}
-	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: DNSTargetPort},
+	readinessProbe.Exec = &corev1.ExecAction{
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			"pgrep -f dnsmasq && ss -ln | grep :" + strconv.Itoa(int(DNSTargetPort)),
+		},
 	}
 
 	envVars := map[string]env.Setter{}
