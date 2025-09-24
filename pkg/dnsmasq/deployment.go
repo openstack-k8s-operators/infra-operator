@@ -71,7 +71,6 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
 	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
 	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
-	dnsmasqCmd = append(dnsmasqCmd, "--no-daemon")
 	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
 	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
 	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
