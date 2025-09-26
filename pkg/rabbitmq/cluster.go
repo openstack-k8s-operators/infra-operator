@@ -182,12 +182,21 @@ func ConfigureCluster(
 		}
 		// disable non tls listeners
 		cluster.Spec.TLS.DisableNonTLSListeners = true
+		// NOTE(dciabrin) OSPRH-20331 reported RabbitMQ partitionning during
+		// key update events, so until this can be resolved, revert to the
+		// same configuration scheme as OSP17 (see OSPRH-13633)
+		var tlsVersions string
+		if fipsEnabled {
+			tlsVersions = "['tlsv1.2','tlsv1.3']"
+		} else {
+			tlsVersions = "['tlsv1.2']"
+		}
 		// NOTE(dciabrin) RabbitMQ/Erlang needs a specific TLS configuration ordering
 		// in ssl_options.versions for TLS to work with FIPS. We cannot enforce the right
 		// ordering with AdditionalConfig, we have to pass a specific Erlang value via
 		// the AdvancedConfig field. We also add configuration flags which were known to
 		// work with FIPS in previous version of Openstack.
-		cluster.Spec.Rabbitmq.AdvancedConfig = `[
+		cluster.Spec.Rabbitmq.AdvancedConfig = fmt.Sprintf(`[
 {rabbit, [
 {ssl_options, [
   {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
@@ -200,7 +209,7 @@ func ConfigureCluster(
   {honor_ecc_order,false},
   {verify,verify_none},
   {fail_if_no_peer_cert,false},
-  {versions, ['tlsv1.2','tlsv1.3']}
+  {versions, %s}
 ]}
 ]},
 {rabbitmq_management, [
@@ -216,17 +225,17 @@ func ConfigureCluster(
   {honor_ecc_order,false},
   {verify,verify_none},
   {fail_if_no_peer_cert,false},
-  {versions, ['tlsv1.2','tlsv1.3']}
+  {versions, %s}
 ]}
 ]},
 {client, [
 {cacertfile, "/etc/rabbitmq-tls/ca.crt"},
 {verify,verify_peer},
 {secure_renegotiate,true},
-{versions, ['tlsv1.2','tlsv1.3']}
+{versions, %s}
 ]}
 ].
-`
+`, tlsVersions, tlsVersions, tlsVersions)
 
 		cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Volumes = append(
 			cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Volumes,
