@@ -46,7 +46,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 		clusterCm := types.NamespacedName{Name: "cluster-config-v1", Namespace: "kube-system"}
 		th.CreateConfigMap(
 			clusterCm,
-			map[string]interface{}{
+			map[string]any{
 				"install-config": "fips: false",
 			},
 		)
@@ -89,7 +89,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 			certSecret = CreateCertSecret(rabbitmqName)
 			DeferCleanup(th.DeleteSecret, types.NamespacedName{Name: certSecret.Name, Namespace: namespace})
 			spec := GetDefaultRabbitMQSpec()
-			spec["tls"] = map[string]interface{}{
+			spec["tls"] = map[string]any{
 				"secretName": certSecret.Name,
 			}
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
@@ -134,7 +134,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 			certSecret = CreateCertSecret(rabbitmqName)
 			DeferCleanup(th.DeleteSecret, types.NamespacedName{Name: certSecret.Name, Namespace: namespace})
 			spec := GetDefaultRabbitMQSpec()
-			spec["tls"] = map[string]interface{}{
+			spec["tls"] = map[string]any{
 				"secretName": certSecret.Name,
 			}
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
@@ -172,14 +172,14 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("RabbitMQ gets created with a complete statefulset override", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
-			spec["override"] = map[string]interface{}{
-				"statefulSet": map[string]interface{}{
-					"spec": map[string]interface{}{
+			spec["override"] = map[string]any{
+				"statefulSet": map[string]any{
+					"spec": map[string]any{
 						"replicas": 3,
-						"template": map[string]interface{}{
-							"spec": map[string]interface{}{
-								"containers": []interface{}{
-									map[string]interface{}{
+						"template": map[string]any{
+							"spec": map[string]any{
+								"containers": []any{
+									map[string]any{
 										"name": "foobar",
 									},
 								},
@@ -207,9 +207,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("RabbitMQ gets created with a partial statefulset override", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
-			spec["override"] = map[string]interface{}{
-				"statefulSet": map[string]interface{}{
-					"spec": map[string]interface{}{
+			spec["override"] = map[string]any{
+				"statefulSet": map[string]any{
+					"spec": map[string]any{
 						"replicas": 3,
 					},
 				},
@@ -233,9 +233,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("RabbitMQ gets updated with an invalid statefulset override", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
-			spec["override"] = map[string]interface{}{
-				"statefulSet": map[string]interface{}{
-					"spec": map[string]interface{}{
+			spec["override"] = map[string]any{
+				"statefulSet": map[string]any{
+					"spec": map[string]any{
 						"replicas": 3,
 					},
 				},
@@ -249,7 +249,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
-				data, _ := json.Marshal(map[string]interface{}{
+				data, _ := json.Marshal(map[string]any{
 					"wrong": "type",
 				})
 				instance.Spec.Override.StatefulSet.Raw = data
@@ -262,15 +262,15 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("RabbitMQ gets created with a service override", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
-			spec["override"] = map[string]interface{}{
-				"service": map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"annotations": map[string]interface{}{
+			spec["override"] = map[string]any{
+				"service": map[string]any{
+					"metadata": map[string]any{
+						"annotations": map[string]any{
 							"metallb.universe.tf/address-pool":    "internalapi",
 							"metallb.universe.tf/loadBalancerIPs": "192.0.2.1",
 						},
 					},
-					"spec": map[string]interface{}{
+					"spec": map[string]any{
 						"type": "LoadBalancer",
 					},
 				},

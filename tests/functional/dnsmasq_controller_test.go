@@ -75,7 +75,7 @@ var _ = Describe("DNSMasq controller", func() {
 				Name:      "some-dnsdata",
 			}
 
-			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+			th.CreateConfigMap(dnsDataCM, map[string]any{
 				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
 			})
 			cm := th.GetConfigMap(dnsDataCM)
@@ -302,7 +302,7 @@ var _ = Describe("DNSMasq controller", func() {
 				Name:      "some-dnsdata",
 			}
 
-			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+			th.CreateConfigMap(dnsDataCM, map[string]any{
 				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
 			})
 			cm := th.GetConfigMap(dnsDataCM)
@@ -390,7 +390,7 @@ var _ = Describe("DNSMasq controller", func() {
 	When("A DNSMasq is created with nodeSelector", func() {
 		BeforeEach(func() {
 			spec := GetDefaultDNSMasqSpec()
-			spec["nodeSelector"] = map[string]interface{}{
+			spec["nodeSelector"] = map[string]any{
 				"foo": "bar",
 			}
 			instance := CreateDNSMasq(namespace, spec)
@@ -420,7 +420,7 @@ var _ = Describe("DNSMasq controller", func() {
 				Name:      "some-dnsdata",
 			}
 
-			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+			th.CreateConfigMap(dnsDataCM, map[string]any{
 				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
 			})
 			cm := th.GetConfigMap(dnsDataCM)
@@ -513,7 +513,7 @@ var _ = Describe("DNSMasq controller", func() {
 			}
 
 			spec := GetDefaultDNSMasqSpec()
-			spec["topologyRef"] = map[string]interface{}{
+			spec["topologyRef"] = map[string]any{
 				"name": topologyRef.Name,
 			}
 			instance := CreateDNSMasqWithName(dnsMasqDefaultName, namespace, spec)
@@ -543,7 +543,7 @@ var _ = Describe("DNSMasq controller", func() {
 				Name:      "some-dnsdata",
 			}
 
-			th.CreateConfigMap(dnsDataCM, map[string]interface{}{
+			th.CreateConfigMap(dnsDataCM, map[string]any{
 				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
 			})
 			cm := th.GetConfigMap(dnsDataCM)

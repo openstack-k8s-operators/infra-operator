@@ -42,10 +42,10 @@ var _ = Describe("IPSet controller", func() {
 	When("an IPSet gets created with no NetConfig available", func() {
 		It("it gets blocked by the webhook and fail", func() {
 
-			raw := map[string]interface{}{
+			raw := map[string]any{
 				"apiVersion": "network.openstack.org/v1beta1",
 				"kind":       "IPSet",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "foo",
 					"namespace": namespace,
 				},

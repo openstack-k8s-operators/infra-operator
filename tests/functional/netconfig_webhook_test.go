@@ -47,10 +47,10 @@ var _ = Describe("NetConfig webhook", func() {
 		When("a second NetConfig gets created in the same namespace", func() {
 			It("gets blocked by the webhook and fail", func() {
 
-				raw := map[string]interface{}{
+				raw := map[string]any{
 					"apiVersion": "network.openstack.org/v1beta1",
 					"kind":       "NetConfig",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name":      "foo",
 						"namespace": namespace,
 					},

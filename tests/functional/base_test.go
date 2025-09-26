@@ -60,13 +60,13 @@ const (
 	host1    = "host1"
 )
 
-func CreateDNSMasq(namespace string, spec map[string]interface{}) client.Object {
+func CreateDNSMasq(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "DNSMasq",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -76,12 +76,12 @@ func CreateDNSMasq(namespace string, spec map[string]interface{}) client.Object 
 	return th.CreateUnstructured(raw)
 }
 
-func CreateDNSMasqWithName(name string, namespace string, spec map[string]interface{}) client.Object {
+func CreateDNSMasqWithName(name string, namespace string, spec map[string]any) client.Object {
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "DNSMasq",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -90,11 +90,11 @@ func CreateDNSMasqWithName(name string, namespace string, spec map[string]interf
 
 	return th.CreateUnstructured(raw)
 }
-func GetDefaultDNSMasqSpec() map[string]interface{} {
-	spec := make(map[string]interface{})
+func GetDefaultDNSMasqSpec() map[string]any {
+	spec := make(map[string]any)
 	spec["containerImage"] = "test-dnsmasq-container-image"
 	spec["dnsDataLabelSelectorValue"] = "dnsdata"
-	spec["options"] = interface{}([]networkv1.DNSMasqOption{
+	spec["options"] = any([]networkv1.DNSMasqOption{
 		{
 			Key:    "server",
 			Values: []string{"1.1.1.1"},
@@ -105,7 +105,7 @@ func GetDefaultDNSMasqSpec() map[string]interface{} {
 		},
 	})
 
-	serviceOverride := interface{}(map[string]interface{}{
+	serviceOverride := any(map[string]any{
 		"metadata": map[string]map[string]string{
 			"annotations": {
 				"metallb.universe.tf/address-pool":    "ctlplane",
@@ -117,25 +117,25 @@ func GetDefaultDNSMasqSpec() map[string]interface{} {
 				"service": "dnsmasq",
 			},
 		},
-		"spec": map[string]interface{}{
+		"spec": map[string]any{
 			"type": "LoadBalancer",
 		},
 	})
 
-	spec["override"] = map[string]interface{}{
+	spec["override"] = map[string]any{
 		"service": serviceOverride,
 	}
 
 	return spec
 }
 
-func CreateDNSData(namespace string, spec map[string]interface{}) client.Object {
+func CreateDNSData(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "DNSData",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -145,10 +145,10 @@ func CreateDNSData(namespace string, spec map[string]interface{}) client.Object 
 	return th.CreateUnstructured(raw)
 }
 
-func GetDefaultDNSDataSpec() map[string]interface{} {
-	spec := make(map[string]interface{})
+func GetDefaultDNSDataSpec() map[string]any {
+	spec := make(map[string]any)
 	spec["dnsDataLabelSelectorValue"] = "someselector"
-	spec["hosts"] = interface{}([]networkv1.DNSHost{
+	spec["hosts"] = any([]networkv1.DNSHost{
 		{
 			Hostnames: []string{host1},
 			IP:        "host-ip-1",
@@ -165,11 +165,11 @@ func GetDefaultDNSDataSpec() map[string]interface{} {
 	return spec
 }
 
-func CreateTransportURL(name types.NamespacedName, spec map[string]interface{}) client.Object {
-	raw := map[string]interface{}{
+func CreateTransportURL(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
 		"apiVersion": "rabbitmq.openstack.org/v1beta1",
 		"kind":       "TransportURL",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name.Name,
 			"namespace": name.Namespace,
 		},
@@ -179,11 +179,11 @@ func CreateTransportURL(name types.NamespacedName, spec map[string]interface{}) 
 	return th.CreateUnstructured(raw)
 }
 
-func CreateRabbitMQCluster(name types.NamespacedName, spec map[string]interface{}) client.Object {
-	raw := map[string]interface{}{
+func CreateRabbitMQCluster(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
 		"apiVersion": "rabbitmq.com/v1beta1",
 		"kind":       "RabbitmqCluster",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name.Name,
 			"namespace": name.Namespace,
 		},
@@ -211,12 +211,12 @@ func UpdateRabbitMQClusterToTLS(name types.NamespacedName) {
 	}, th.Timeout, th.Interval).Should(Succeed())
 }
 
-func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]interface{} {
-	spec := make(map[string]interface{})
+func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]any {
+	spec := make(map[string]any)
 	spec["delayStartSeconds"] = 30
 	spec["image"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
 	if tlsEnabled {
-		spec["tls"] = map[string]interface{}{
+		spec["tls"] = map[string]any{
 			"caSecretName":           "rootca-internal",
 			"disableNonTLSListeners": true,
 			"secretName":             "cert-rabbitmq-svc",
@@ -255,7 +255,7 @@ func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmq
 
 		// create rabbitmq-secret secret
 		secretData := map[string][]byte{
-			"host":     []byte(fmt.Sprintf("host.%s.svc", namespace)),
+			"host":     fmt.Appendf(nil, "host.%s.svc", namespace),
 			"password": []byte("12345678"),
 			"username": []byte("user"),
 			"port":     []byte("5672"),
@@ -292,19 +292,19 @@ func SimulateRabbitMQClusterReady(name types.NamespacedName) {
 		// create/update rabbitmq secret
 		CreateOrUpdateRabbitMQClusterSecret(secretName, mq)
 
-		raw := map[string]interface{}{
+		raw := map[string]any{
 			"apiVersion": "rabbitmq.com/v1beta1",
 			"kind":       "RabbitmqCluster",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      name.Name,
 				"namespace": name.Namespace,
 			},
 		}
 
-		status := make(map[string]interface{})
+		status := make(map[string]any)
 
 		// add AllReplicasReady condition
-		statusCondition := []map[string]interface{}{
+		statusCondition := []map[string]any{
 			{
 				"reason": "AllPodsAreReady",
 				"status": "True",
@@ -319,16 +319,16 @@ func SimulateRabbitMQClusterReady(name types.NamespacedName) {
 
 		// add status.defaultUser which is used to get the
 		// secret holding username/password/host
-		statusDefaultUser := map[string]interface{}{
-			"secretReference": map[string]interface{}{
-				"keys": map[string]interface{}{
+		statusDefaultUser := map[string]any{
+			"secretReference": map[string]any{
+				"keys": map[string]any{
 					"password": "password",
 					"username": "username",
 				},
 				"name":      secretName.Name,
 				"namespace": name.Namespace,
 			},
-			"serviceReference": map[string]interface{}{
+			"serviceReference": map[string]any{
 				"name":      name.Name,
 				"namespace": name.Namespace,
 			},
@@ -472,13 +472,13 @@ func CreateLoadBalancerService(name types.NamespacedName, addDNSAnno bool) *core
 	return svc
 }
 
-func CreateNetConfig(namespace string, spec map[string]interface{}) client.Object {
+func CreateNetConfig(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "NetConfig",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -488,13 +488,13 @@ func CreateNetConfig(namespace string, spec map[string]interface{}) client.Objec
 	return th.CreateUnstructured(raw)
 }
 
-func GetNetConfigSpec(nets ...networkv1.Network) map[string]interface{} {
-	spec := make(map[string]interface{})
+func GetNetConfigSpec(nets ...networkv1.Network) map[string]any {
+	spec := make(map[string]any)
 
 	netSpec := []networkv1.Network{}
 	netSpec = append(netSpec, nets...)
 
-	spec["networks"] = interface{}(netSpec)
+	spec["networks"] = any(netSpec)
 
 	return spec
 }
@@ -526,7 +526,7 @@ func GetNetCtlplaneSpec(name string, subnets ...networkv1.Subnet) networkv1.Netw
 	return net
 }
 
-func GetDefaultNetConfigSpec() map[string]interface{} {
+func GetDefaultNetConfigSpec() map[string]any {
 	net := GetNetSpec(net1, GetSubnet1(subnet1))
 	return GetNetConfigSpec(net)
 }
@@ -603,13 +603,13 @@ func GetSubnetWithWrongExcludeAddress() networkv1.Subnet {
 	}
 }
 
-func CreateIPSet(namespace string, spec map[string]interface{}) client.Object {
+func CreateIPSet(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "IPSet",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -619,18 +619,18 @@ func CreateIPSet(namespace string, spec map[string]interface{}) client.Object {
 	return th.CreateUnstructured(raw)
 }
 
-func GetIPSetSpec(immutable bool, nets ...networkv1.IPSetNetwork) map[string]interface{} {
-	spec := make(map[string]interface{})
+func GetIPSetSpec(immutable bool, nets ...networkv1.IPSetNetwork) map[string]any {
+	spec := make(map[string]any)
 
 	networks := []networkv1.IPSetNetwork{}
 	networks = append(networks, nets...)
 	spec["immutable"] = immutable
-	spec["networks"] = interface{}(networks)
+	spec["networks"] = any(networks)
 
 	return spec
 }
 
-func GetDefaultIPSetSpec() map[string]interface{} {
+func GetDefaultIPSetSpec() map[string]any {
 	return GetIPSetSpec(false, GetIPSetNet1())
 }
 
@@ -698,12 +698,12 @@ func GetReservationFromNet(ipsetName types.NamespacedName, netName string) netwo
 	return res
 }
 
-func CreateMemcachedConfigWithName(name string, namespace string, spec map[string]interface{}) client.Object {
+func CreateMemcachedConfigWithName(name string, namespace string, spec map[string]any) client.Object {
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "memcached.openstack.org/v1beta1",
 		"kind":       "Memcached",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -712,17 +712,17 @@ func CreateMemcachedConfigWithName(name string, namespace string, spec map[strin
 
 	return th.CreateUnstructured(raw)
 }
-func CreateMemcachedConfig(namespace string, spec map[string]interface{}) client.Object {
+func CreateMemcachedConfig(namespace string, spec map[string]any) client.Object {
 	// name is set as a label on the statefulset and must not start with numbers
 	// "error": "Service \"6057811f-1ab3-4ebb-adaf-2\" is invalid: metadata.name: Invalid value: \"6057811f-1ab3-4ebb-adaf-2\":
 	// a DNS-1035 label must consist of lower case alphanumeric characters or '-',start with an alphabetic character, and end
 	// with an alphanumeric character (e.g. 'my-name',  or 'abc-123', regex used for validation is '[a-z]([-a-z0-9]*[a-z0-9])?')"}
 	name := "memcached-" + uuid.New().String()[:25]
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "memcached.openstack.org/v1beta1",
 		"kind":       "Memcached",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -732,8 +732,8 @@ func CreateMemcachedConfig(namespace string, spec map[string]interface{}) client
 	return th.CreateUnstructured(raw)
 }
 
-func GetDefaultMemcachedSpec() map[string]interface{} {
-	return map[string]interface{}{
+func GetDefaultMemcachedSpec() map[string]any {
+	return map[string]any{
 		"replicas": 1,
 	}
 }
@@ -746,13 +746,13 @@ func GetMemcached(name types.NamespacedName) *memcachedv1.Memcached {
 	return instance
 }
 
-func CreateBGPConfiguration(namespace string, spec map[string]interface{}) client.Object {
+func CreateBGPConfiguration(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
 
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "network.openstack.org/v1beta1",
 		"kind":       "BGPConfiguration",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name,
 			"namespace": namespace,
 		},
@@ -770,13 +770,13 @@ func GetBGPConfiguration(name types.NamespacedName) *networkv1.BGPConfiguration 
 	return instance
 }
 
-func GetBGPConfigurationSpec(namespace string) map[string]interface{} {
+func GetBGPConfigurationSpec(namespace string) map[string]any {
 	if namespace != "" {
-		return map[string]interface{}{
+		return map[string]any{
 			"frrConfigurationNamespace": namespace,
 		}
 	}
-	return map[string]interface{}{}
+	return map[string]any{}
 }
 
 func GetFRRConfiguration(name types.NamespacedName) *frrk8sv1.FRRConfiguration {
@@ -787,11 +787,11 @@ func GetFRRConfiguration(name types.NamespacedName) *frrk8sv1.FRRConfiguration {
 	return instance
 }
 
-func CreateFRRConfiguration(name types.NamespacedName, spec map[string]interface{}) client.Object {
-	raw := map[string]interface{}{
+func CreateFRRConfiguration(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
 		"apiVersion": "frrk8s.metallb.io/v1beta1",
 		"kind":       "FRRConfiguration",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      name.Name,
 			"namespace": name.Namespace,
 		},
@@ -801,13 +801,13 @@ func CreateFRRConfiguration(name types.NamespacedName, spec map[string]interface
 	return th.CreateUnstructured(raw)
 }
 
-func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
-	return map[string]interface{}{
-		"bgp": map[string]interface{}{
-			"routers": []map[string]interface{}{
+func GetMetalLBFRRConfigurationSpec(node string) map[string]any {
+	return map[string]any{
+		"bgp": map[string]any{
+			"routers": []map[string]any{
 				{
 					"asn": 64999,
-					"neighbors": []map[string]interface{}{
+					"neighbors": []map[string]any{
 						{
 							"address":       "10.10.10.10",
 							"asn":           64999,
@@ -816,8 +816,8 @@ func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
 							"keepaliveTime": "30s",
 							"password":      "foo",
 							"port":          179,
-							"toAdvertise": map[string]interface{}{
-								"allowed": map[string]interface{}{
+							"toAdvertise": map[string]any{
+								"allowed": map[string]any{
 									"mode": "filtered",
 									"prefixes": []string{
 										"11.11.11.11/32",
@@ -825,8 +825,8 @@ func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
 									},
 								},
 							},
-							"toReceive": map[string]interface{}{
-								"allowed": map[string]interface{}{
+							"toReceive": map[string]any{
+								"allowed": map[string]any{
 									"mode": "filtered",
 								},
 							},
@@ -839,16 +839,16 @@ func GetMetalLBFRRConfigurationSpec(node string) map[string]interface{} {
 				},
 			},
 		},
-		"nodeSelector": map[string]interface{}{
-			"matchLabels": map[string]interface{}{
+		"nodeSelector": map[string]any{
+			"matchLabels": map[string]any{
 				"kubernetes.io/hostname": node,
 			},
 		},
 	}
 }
 
-func GetNADSpec() map[string]interface{} {
-	return map[string]interface{}{
+func GetNADSpec() map[string]any {
+	return map[string]any{
 		"config": `{
       "cniVersion": "0.3.1",
       "name": "internalapi",
@@ -870,13 +870,13 @@ func GetNADSpec() map[string]interface{} {
 	}
 }
 
-func GetPodSpec(node string) map[string]interface{} {
-	return map[string]interface{}{
-		"containers": []map[string]interface{}{
+func GetPodSpec(node string) map[string]any {
+	return map[string]any{
+		"containers": []map[string]any{
 			{
 				"name":  "foo",
 				"image": "foo:latest",
-				"ports": []map[string]interface{}{
+				"ports": []map[string]any{
 					{
 						"containerPort": 80,
 					},
@@ -923,16 +923,16 @@ func GetPodAnnotation(namespace string) map[string]string {
 // want to avoid by default
 // 2. Usually a topologySpreadConstraints is used to take care about
 // multi AZ, which is not applicable in this context
-func GetSampleTopologySpec(selector string) (map[string]interface{}, []corev1.TopologySpreadConstraint) {
+func GetSampleTopologySpec(selector string) (map[string]any, []corev1.TopologySpreadConstraint) {
 	// Build the topology Spec
-	topologySpec := map[string]interface{}{
-		"topologySpreadConstraints": []map[string]interface{}{
+	topologySpec := map[string]any{
+		"topologySpreadConstraints": []map[string]any{
 			{
 				"maxSkew":           1,
 				"topologyKey":       corev1.LabelHostname,
 				"whenUnsatisfiable": "ScheduleAnyway",
-				"labelSelector": map[string]interface{}{
-					"matchLabels": map[string]interface{}{
+				"labelSelector": map[string]any{
+					"matchLabels": map[string]any{
 						"service": selector,
 					},
 				},
@@ -958,12 +958,12 @@ func GetSampleTopologySpec(selector string) (map[string]interface{}, []corev1.To
 // CreateTopology - Creates a Topology CR based on the spec passed as input
 func CreateTopology(
 	topology types.NamespacedName,
-	spec map[string]interface{},
+	spec map[string]any,
 ) (client.Object, topologyv1.TopoRef) {
-	raw := map[string]interface{}{
+	raw := map[string]any{
 		"apiVersion": "topology.openstack.org/v1beta1",
 		"kind":       "Topology",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      topology.Name,
 			"namespace": topology.Namespace,
 		},
@@ -1001,11 +1001,11 @@ func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 	}
 }
 
-func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]interface{}) client.Object {
-	raw := map[string]interface{}{
+func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
 		"apiVersion": "rabbitmq.openstack.org/v1beta1",
 		"kind":       "RabbitMq",
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"name":      rabbitmq.Name,
 			"namespace": rabbitmq.Namespace,
 		},
@@ -1015,8 +1015,8 @@ func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]interface{}) 
 	return th.CreateUnstructured(raw)
 }
 
-func GetDefaultRabbitMQSpec() map[string]interface{} {
-	return map[string]interface{}{
+func GetDefaultRabbitMQSpec() map[string]any {
+	return map[string]any{
 		"replicas": 1,
 	}
 }

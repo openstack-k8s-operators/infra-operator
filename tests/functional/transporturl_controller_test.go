@@ -57,7 +57,7 @@ var _ = Describe("TransportURL controller", func() {
 			CreateRabbitMQCluster(rabbitmqClusterName, GetDefaultRabbitMQClusterSpec(false))
 			DeferCleanup(DeleteRabbitMQCluster, rabbitmqClusterName)
 
-			spec := map[string]interface{}{
+			spec := map[string]any{
 				"rabbitmqClusterName": rabbitmqClusterName.Name,
 			}
 			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, spec))
@@ -89,7 +89,7 @@ var _ = Describe("TransportURL controller", func() {
 			Eventually(func(g Gomega) {
 				s := th.GetSecret(transportURLSecretName)
 				g.Expect(s.Data).To(HaveLen(1))
-				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", []byte(fmt.Sprintf("rabbit://user:12345678@host.%s.svc:5672/?ssl=0", namespace))))
+				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", fmt.Appendf(nil, "rabbit://user:12345678@host.%s.svc:5672/?ssl=0", namespace)))
 
 			}, timeout, interval).Should(Succeed())
 
@@ -111,7 +111,7 @@ var _ = Describe("TransportURL controller", func() {
 			CreateRabbitMQCluster(rabbitmqClusterName, GetDefaultRabbitMQClusterSpec(true))
 			DeferCleanup(DeleteRabbitMQCluster, rabbitmqClusterName)
 
-			spec := map[string]interface{}{
+			spec := map[string]any{
 				"rabbitmqClusterName": rabbitmqClusterName.Name,
 			}
 			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, spec))
@@ -123,7 +123,7 @@ var _ = Describe("TransportURL controller", func() {
 			Eventually(func(g Gomega) {
 				s := th.GetSecret(transportURLSecretName)
 				g.Expect(s.Data).To(HaveLen(1))
-				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", []byte(fmt.Sprintf("rabbit://user:12345678@host.%s.svc:5671/?ssl=1", namespace))))
+				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", fmt.Appendf(nil, "rabbit://user:12345678@host.%s.svc:5671/?ssl=1", namespace)))
 
 			}, timeout, interval).Should(Succeed())
 
@@ -145,7 +145,7 @@ var _ = Describe("TransportURL controller", func() {
 			CreateRabbitMQCluster(rabbitmqClusterName, GetDefaultRabbitMQClusterSpec(false))
 			DeferCleanup(DeleteRabbitMQCluster, rabbitmqClusterName)
 
-			spec := map[string]interface{}{
+			spec := map[string]any{
 				"rabbitmqClusterName": rabbitmqClusterName.Name,
 			}
 			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, spec))
@@ -158,7 +158,7 @@ var _ = Describe("TransportURL controller", func() {
 			Eventually(func(g Gomega) {
 				s := th.GetSecret(transportURLSecretName)
 				g.Expect(s.Data).To(HaveLen(1))
-				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", []byte(fmt.Sprintf("rabbit://user:12345678@host.%s.svc:5672/?ssl=0", namespace))))
+				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", fmt.Appendf(nil, "rabbit://user:12345678@host.%s.svc:5672/?ssl=0", namespace)))
 
 			}, timeout, interval).Should(Succeed())
 
@@ -169,7 +169,7 @@ var _ = Describe("TransportURL controller", func() {
 			Eventually(func(g Gomega) {
 				s := th.GetSecret(transportURLSecretName)
 				g.Expect(s.Data).To(HaveLen(1))
-				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", []byte(fmt.Sprintf("rabbit://user:12345678@host.%s.svc:5671/?ssl=1", namespace))))
+				g.Expect(s.Data).To(HaveKeyWithValue("transport_url", fmt.Appendf(nil, "rabbit://user:12345678@host.%s.svc:5671/?ssl=1", namespace)))
 
 			}, timeout, interval).Should(Succeed())
 
