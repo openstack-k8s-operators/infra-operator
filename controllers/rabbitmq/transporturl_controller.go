@@ -191,10 +191,12 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	rabbitSecret, _, err := oko_secret.GetSecret(ctx, helper, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
+			// Since the RabbitMQ secret should have been automatically created by the RabbitMQ cluster,
+			// we treat this as a warning because it means that the service will not be able to start.
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				rabbitmqv1.TransportURLReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
+				condition.ErrorReason,
+				condition.SeverityWarning,
 				rabbitmqv1.TransportURLInProgressMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
