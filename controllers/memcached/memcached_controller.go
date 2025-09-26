@@ -511,7 +511,7 @@ func (r *Reconciler) generateConfigMaps(
 		memcachedPort = fmt.Sprint(memcached.MemcachedPort)
 		instance.Status.TLSSupport = false
 	}
-	templateParameters := map[string]interface{}{
+	templateParameters := map[string]any{
 		"memcachedTLSListen":  memcachedTLSListen,
 		"memcachedTLSOptions": memcachedTLSOptions,
 		"memcachedPort":       memcachedPort,

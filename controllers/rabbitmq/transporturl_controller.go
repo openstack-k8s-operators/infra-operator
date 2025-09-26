@@ -350,7 +350,7 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 
 	// Create a new secret with the transport URL for this CR
 	data := map[string][]byte{
-		"transport_url": []byte(fmt.Sprintf("rabbit://%s:%s@%s:%s/%s", username, password, host, port, query)),
+		"transport_url": fmt.Appendf(nil, "rabbit://%s:%s@%s:%s/%s", username, password, host, port, query),
 	}
 	if quorum {
 		data["quorumqueues"] = []byte("true")

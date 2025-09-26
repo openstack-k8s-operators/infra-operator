@@ -137,7 +137,7 @@ var _ = Describe("Memcached Controller", func() {
 				Namespace: namespace,
 			}
 			//memcachedTopologies = GetTopologyRef(memcachefName.Name, memcachedName.Namespace)
-			spec["topologyRef"] = map[string]interface{}{
+			spec["topologyRef"] = map[string]any{
 				"name": topologyRef.Name,
 			}
 			memcached := CreateMemcachedConfigWithName(memcachedName.Name, namespace, spec)
@@ -244,10 +244,10 @@ var _ = Describe("Memcached Controller", func() {
 	When("a Memcached gets created with a name longer then 52 chars", func() {
 		It("gets blocked by the webhook and fail", func() {
 
-			raw := map[string]interface{}{
+			raw := map[string]any{
 				"apiVersion": "memcached.openstack.org/v1beta1",
 				"kind":       "Memcached",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "foo-1234567890-1234567890-1234567890-1234567890-1234567890",
 					"namespace": namespace,
 				},
@@ -266,14 +266,14 @@ var _ = Describe("Memcached Controller", func() {
 
 			spec := GetDefaultMemcachedSpec()
 			// Reference a top-level topology
-			spec["topologyRef"] = map[string]interface{}{
+			spec["topologyRef"] = map[string]any{
 				"name":      "foo",
 				"namespace": "bar",
 			}
-			raw := map[string]interface{}{
+			raw := map[string]any{
 				"apiVersion": "memcached.openstack.org/v1beta1",
 				"kind":       "Memcached",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      memcachedDefaultName,
 					"namespace": namespace,
 				},

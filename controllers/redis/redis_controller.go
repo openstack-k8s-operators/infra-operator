@@ -447,7 +447,7 @@ func (r *Reconciler) generateConfigMaps(
 	instance *redisv1.Redis,
 	envVars *map[string]env.Setter,
 ) error {
-	templateParameters := make(map[string]interface{})
+	templateParameters := make(map[string]any)
 	customData := make(map[string]string)
 
 	cms := []util.Template{
