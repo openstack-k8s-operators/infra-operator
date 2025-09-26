@@ -221,50 +221,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// all cert input checks out so report InputReady
 	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
 
-	// RabbitMq config maps
-	cms := []util.Template{
-		{
-			Name:         fmt.Sprintf("%s-config-data", instance.Name),
-			Namespace:    instance.Namespace,
-			Type:         util.TemplateTypeConfig,
-			InstanceType: "rabbitmq",
-			Labels:       map[string]string{},
-			CustomData: map[string]string{
-				"inter_node_tls.config": `[
-  {server, [
-    {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
-    {certfile,"/etc/rabbitmq-tls/tls.crt"},
-    {keyfile,"/etc/rabbitmq-tls/tls.key"},
-    {secure_renegotiate, true},
-    {fail_if_no_peer_cert, true},
-    {verify, verify_peer},
-    {versions, ['tlsv1.2','tlsv1.3']}
-  ]},
-  {client, [
-    {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
-    {certfile,"/etc/rabbitmq-tls/tls.crt"},
-    {keyfile,"/etc/rabbitmq-tls/tls.key"},
-    {secure_renegotiate, true},
-    {verify, verify_peer},
-    {versions, ['tlsv1.2','tlsv1.3']}
-  ]}
-].
-`,
-			},
-		},
-	}
-
-	err = configmap.EnsureConfigMaps(ctx, helper, instance, cms, nil)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ServiceConfigReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.ServiceConfigReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, fmt.Errorf("error calculating configmap hash: %w", err)
-	}
-
 	IPv6Enabled, err := ocp.FirstClusterNetworkIsIPv6(ctx, helper)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -285,6 +241,59 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ServiceConfigReadyErrorMessage,
 			err.Error()))
 		return ctrl.Result{}, fmt.Errorf("error getting cluster FIPS config: %w", err)
+	}
+
+	// NOTE(dciabrin) OSPRH-20331 reported RabbitMQ partitionning during
+	// key update events, so until this can be resolved, revert to the
+	// same configuration scheme as OSP17 (see OSPRH-13633)
+	var tlsVersions string
+	if fipsEnabled {
+		tlsVersions = "['tlsv1.2','tlsv1.3']"
+	} else {
+		tlsVersions = "['tlsv1.2']"
+	}
+	// RabbitMq config maps
+	cms := []util.Template{
+		{
+			Name:         fmt.Sprintf("%s-config-data", instance.Name),
+			Namespace:    instance.Namespace,
+			Type:         util.TemplateTypeConfig,
+			InstanceType: "rabbitmq",
+			Labels:       map[string]string{},
+			CustomData: map[string]string{
+				"inter_node_tls.config": fmt.Sprintf(`[
+  {server, [
+    {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
+    {certfile,"/etc/rabbitmq-tls/tls.crt"},
+    {keyfile,"/etc/rabbitmq-tls/tls.key"},
+    {secure_renegotiate, true},
+    {fail_if_no_peer_cert, true},
+    {verify, verify_peer},
+    {versions, %s}
+  ]},
+  {client, [
+    {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
+    {certfile,"/etc/rabbitmq-tls/tls.crt"},
+    {keyfile,"/etc/rabbitmq-tls/tls.key"},
+    {secure_renegotiate, true},
+    {verify, verify_peer},
+    {versions, %s}
+  ]}
+].
+`, tlsVersions, tlsVersions),
+			},
+		},
+	}
+
+	err = configmap.EnsureConfigMaps(ctx, helper, instance, cms, nil)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, fmt.Errorf("error calculating configmap hash: %w", err)
 	}
 
 	rabbitmqCluster := &rabbitmqv2.RabbitmqCluster{
