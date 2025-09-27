@@ -7,8 +7,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.7
 	github.com/metallb/frr-k8s v0.0.11
-	github.com/onsi/ginkgo/v2 v2.24.0
-	github.com/onsi/gomega v1.38.0
+	github.com/onsi/ginkgo/v2 v2.25.1
+	github.com/onsi/gomega v1.38.2
 	github.com/openshift/api v3.9.0+incompatible
 	github.com/openstack-k8s-operators/infra-operator/apis v0.6.1-0.20250319162810-463dd75a4cc4
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20250922082314-c83d83092a04
@@ -24,7 +24,7 @@ require (
 )
 
 require (
-	github.com/Masterminds/semver/v3 v3.3.1 // indirect
+	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
@@ -66,7 +66,7 @@ require (
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	go.yaml.in/yaml/v3 v3.0.3 // indirect
+	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
@@ -76,7 +76,7 @@ require (
 	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.36.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
+	google.golang.org/protobuf v1.36.7 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.31.12 // indirect
