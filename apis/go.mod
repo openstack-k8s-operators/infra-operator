@@ -7,7 +7,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.24.0
 	github.com/onsi/gomega v1.38.0
 	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20250922082314-c83d83092a04
-	github.com/rabbitmq/cluster-operator/v2 v2.9.0
+	github.com/rabbitmq/cluster-operator/v2 v2.16.1
 	k8s.io/api v0.31.12
 	k8s.io/apimachinery v0.31.12
 	k8s.io/client-go v0.31.12
