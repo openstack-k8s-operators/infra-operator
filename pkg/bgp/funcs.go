@@ -41,7 +41,7 @@ func GetFRRPodPrefixes(networkStatus []k8s_networkv1.NetworkStatus) []string {
 	return podPrefixes
 }
 
-// GetFRRNeighbors - returs a list of  FRR Neighor for for podPrefixes, using a copy of the
+// GetFRRNeighbors - returs a list of  FRR Neighor for podPrefixes, using a copy of the
 // nodeNeigbors and replacing its Prefixes with the podPrefixes.
 func GetFRRNeighbors(nodeNeighbors []frrk8sv1.Neighbor, podPrefixes []string) []frrk8sv1.Neighbor {
 	podNeighbors := []frrk8sv1.Neighbor{}

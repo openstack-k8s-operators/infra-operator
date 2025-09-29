@@ -258,7 +258,7 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			// Skip if
-			// * NAD annotation annotation key is missing
+			// * NAD annotation key is missing
 			// * there is no additional network configured
 			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
 				return false
@@ -268,7 +268,7 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 		},
 		CreateFunc: func(e event.CreateEvent) bool {
 			// Skip if
-			// * NAD annotation annotation key is missing
+			// * NAD annotation key is missing
 			// * there is no additional network configured
 			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
 				return false
