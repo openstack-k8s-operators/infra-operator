@@ -197,6 +197,7 @@ func ConfigureCluster(
 		// the AdvancedConfig field. We also add configuration flags which were known to
 		// work with FIPS in previous version of Openstack.
 		cluster.Spec.Rabbitmq.AdvancedConfig = fmt.Sprintf(`[
+{ssl, [{protocol_version, %s}]},
 {rabbit, [
 {ssl_options, [
   {cacertfile,"/etc/rabbitmq-tls/ca.crt"},
@@ -235,7 +236,7 @@ func ConfigureCluster(
 {versions, %s}
 ]}
 ].
-`, tlsVersions, tlsVersions, tlsVersions)
+`, tlsVersions, tlsVersions, tlsVersions, tlsVersions)
 
 		cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Volumes = append(
 			cluster.Spec.Override.StatefulSet.Spec.Template.Spec.Volumes,

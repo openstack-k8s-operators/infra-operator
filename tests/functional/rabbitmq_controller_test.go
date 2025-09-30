@@ -128,10 +128,11 @@ var _ = Describe("RabbitMQ Controller", func() {
 			Eventually(func(g Gomega) {
 				// TLS settings for Erlang and RabbitMQ endpoints (AdvancedConfig)
 				// are in an Erlang data structure, so just parse the expected strings
-				// for application "rabbit", "rabbitmq_management", and erlang "client"
+				// for application "rabbit", "rabbitmq_management", "client" and "ssl"
 				cluster := GetRabbitMQCluster(rabbitmqName)
 				advancedConfig := cluster.Spec.Rabbitmq.AdvancedConfig
 
+				g.Expect(advancedConfig).To(ContainSubstring("{ssl, [{protocol_version, ['tlsv1.2']}"))
 				g.Expect(advancedConfig).To(ContainSubstring("{rabbit, ["))
 				g.Expect(advancedConfig).To(ContainSubstring("{rabbitmq_management, ["))
 				g.Expect(advancedConfig).To(ContainSubstring("{client, ["))
@@ -208,10 +209,11 @@ var _ = Describe("RabbitMQ Controller", func() {
 			Eventually(func(g Gomega) {
 				// TLS settings for Erlang and RabbitMQ endpoints (AdvancedConfig)
 				// are in an Erlang data structure, so just parse the expected strings
-				// for application "rabbit", "rabbitmq_management", and erlang "client"
+				// for application "rabbit", "rabbitmq_management", "client" and "ssl"
 				cluster := GetRabbitMQCluster(rabbitmqName)
 				advancedConfig := cluster.Spec.Rabbitmq.AdvancedConfig
 
+				g.Expect(advancedConfig).To(ContainSubstring("{ssl, [{protocol_version, ['tlsv1.2','tlsv1.3']}"))
 				g.Expect(advancedConfig).To(ContainSubstring("{rabbit, ["))
 				g.Expect(advancedConfig).To(ContainSubstring("{rabbitmq_management, ["))
 				g.Expect(advancedConfig).To(ContainSubstring("{client, ["))
