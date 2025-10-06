@@ -541,6 +541,17 @@ def _redfish_reset(url, user, passwd, timeout, action):
     r = requests.post(url, data=json.dumps(payload), headers=headers, auth=(user, passwd), verify=False, timeout=timeout)
     return r
 
+def _redfish_get_power_state(url, user, passwd, timeout):
+    """Get the power state from Redfish API"""
+    try:
+        r = requests.get(url, auth=(user, passwd), verify=False, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get('PowerState', '').upper()
+    except Exception as e:
+        logging.error('Failed to get power state: %s' % str(e))
+    return None
+
 def _bmh_fence(token, namespace, host, action):
 
     url = "https://kubernetes.default.svc/apis/metal3.io/v1alpha1/namespaces/%s/baremetalhosts/%s?fieldManager=kubectl-patch" % (namespace, host)
@@ -604,7 +615,7 @@ def _host_fence(host, action):
                 logging.error('Timeout expired while sending IPMI command for power off of %s' % host)
                 return False
             except subprocess.CalledProcessError as e:
-                logging.error('Error while sending IPMI command for power off of %s: %s' % (host, e))
+                logging.error('Error while sending IPMI command for power off of %s' % host)
                 return False
 
             logging.info('Successfully powered off %s' % host)
@@ -617,7 +628,7 @@ def _host_fence(host, action):
                 logging.error('Timeout expired while sending IPMI command for power on of %s' % host)
                 return False
             except subprocess.CalledProcessError as e:
-                logging.error('Error while sending IPMI command for power on of %s: %s' % (host, e))
+                logging.error('Error while sending IPMI command for power on of %s' % host)
                 return False
 
             logging.info('Successfully powered on %s' % host)
@@ -648,6 +659,15 @@ def _host_fence(host, action):
             if r.status_code in [200, 204]:
                 logging.info('Power off of %s ok' % host)
                 return True
+            elif r.status_code == 409:
+                # Check if server is already powered off
+                power_state = _redfish_get_power_state(url, user, passwd, timeout)
+                if power_state == 'OFF':
+                    logging.info('Power off of %s ok (already off)' % host)
+                    return True
+                else:
+                    logging.error('Could not power off %s (409 but not OFF: %s)' % (host, power_state))
+                    return False
             else:
                 logging.error('Could not power off %s' % host)
                 return False
