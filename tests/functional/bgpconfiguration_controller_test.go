@@ -386,4 +386,161 @@ var _ = Describe("BGPConfiguration controller", func() {
 			}
 		})
 	})
+
+	When("octavia-hmport-map ConfigMap is present", func() {
+		var metallbNS *corev1.Namespace
+		var octaviaFrrName types.NamespacedName
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			// Create FRR configurations for workers
+			CreateFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"},
+				GetMetalLBFRRConfigurationSpec("worker-0"))
+			CreateFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-1"},
+				GetMetalLBFRRConfigurationSpec("worker-1"))
+
+			// Create a NAD config with gateway
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			// Create pods with NAD annotation on octavia workers
+			podName0 := types.NamespacedName{Namespace: namespace, Name: "octavia-pod-0"}
+			th.CreatePod(podName0, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName0)
+
+			podName1 := types.NamespacedName{Namespace: namespace, Name: "octavia-pod-1"}
+			th.CreatePod(podName1, GetPodAnnotation(namespace), GetPodSpec("worker-1"))
+			th.SimulatePodPhaseRunning(podName1)
+
+			// Create octavia ConfigMap
+			th.CreateConfigMap(types.NamespacedName{Namespace: namespace, Name: "octavia-hmport-map"},
+				GetOctaviaConfigMapData())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			octaviaFrrName = types.NamespacedName{
+				Name:      namespace + "-octavia-worker-0",
+				Namespace: metallbNS.Name,
+			}
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+		})
+
+		It("should create FRRConfiguration for octavia workers", func() {
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(octaviaFrrName)
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElements("172.23.0.103/32", "172.23.0.104/32"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		When("ConfigMap is updated", func() {
+			It("should update FRRConfigurations accordingly", func() {
+				// Update ConfigMap with different IPs
+				Eventually(func(g Gomega) {
+					cm := th.GetConfigMap(types.NamespacedName{Namespace: namespace, Name: "octavia-hmport-map"})
+					cm.Data["hm_worker-0"] = "172.23.0.203"
+					g.Expect(k8sClient.Update(ctx, cm)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				Eventually(func(g Gomega) {
+					frr := GetFRRConfiguration(octaviaFrrName)
+					g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.23.0.203/32"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("ConfigMap is deleted", func() {
+			It("should remove octavia FRRConfigurations", func() {
+				// Delete ConfigMap
+				Eventually(func(g Gomega) {
+					cm := th.GetConfigMap(types.NamespacedName{Namespace: namespace, Name: "octavia-hmport-map"})
+					g.Expect(k8sClient.Delete(ctx, cm)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Verify FRRConfiguration is deleted
+				frr := &frrk8sv1.FRRConfiguration{}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, octaviaFrrName, frr)).Should(Not(Succeed()))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+	})
+
+	When("designate ConfigMaps are present", func() {
+		var metallbNS *corev1.Namespace
+		var bindFrrName, mdnsFrrName types.NamespacedName
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			// Create FRR configurations for workers
+			CreateFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"},
+				GetMetalLBFRRConfigurationSpec("worker-0"))
+
+			// Create designate pods that the controller will look for
+			th.CreatePod(types.NamespacedName{Namespace: namespace, Name: "designate-backendbind9-0"},
+				map[string]string{}, GetDesignatePodSpec("worker-0"))
+			th.CreatePod(types.NamespacedName{Namespace: namespace, Name: "designate-mdns-0"},
+				map[string]string{}, GetDesignatePodSpec("worker-0"))
+
+			// Create designate ConfigMaps
+			th.CreateConfigMap(types.NamespacedName{Namespace: namespace, Name: "designate-bind-ip-map"},
+				GetDesignateBindConfigMapData())
+			th.CreateConfigMap(types.NamespacedName{Namespace: namespace, Name: "designate-mdns-ip-map"},
+				GetDesignateMdnsConfigMapData())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			bindFrrName = types.NamespacedName{
+				Name:      namespace + "-designate-bind-0",
+				Namespace: metallbNS.Name,
+			}
+			mdnsFrrName = types.NamespacedName{
+				Name:      namespace + "-designate-mdns-0",
+				Namespace: metallbNS.Name,
+			}
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+		})
+
+		It("should create FRRConfigurations for designate services", func() {
+			Eventually(func(g Gomega) {
+				bindFrr := GetFRRConfiguration(bindFrrName)
+				g.Expect(bindFrr).To(Not(BeNil()))
+				g.Expect(bindFrr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.67.0.100/32"))
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				mdnsFrr := GetFRRConfiguration(mdnsFrrName)
+				g.Expect(mdnsFrr).To(Not(BeNil()))
+				g.Expect(mdnsFrr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.67.0.97/32"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		When("designate ConfigMap is deleted", func() {
+			It("should remove corresponding FRRConfigurations", func() {
+				// Delete bind ConfigMap
+				Eventually(func(g Gomega) {
+					cm := th.GetConfigMap(types.NamespacedName{Namespace: namespace, Name: "designate-bind-ip-map"})
+					g.Expect(k8sClient.Delete(ctx, cm)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Verify bind FRRConfiguration is deleted
+				frr := &frrk8sv1.FRRConfiguration{}
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, bindFrrName, frr)).Should(Not(Succeed()))
+				}, timeout, interval).Should(Succeed())
+
+				// Verify mdns FRRConfiguration still exists
+				Eventually(func(g Gomega) {
+					mdnsFrr := GetFRRConfiguration(mdnsFrrName)
+					g.Expect(mdnsFrr).To(Not(BeNil()))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+	})
 })

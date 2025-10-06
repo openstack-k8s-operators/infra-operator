@@ -801,6 +801,27 @@ func CreateFRRConfiguration(name types.NamespacedName, spec map[string]any) clie
 	return th.CreateUnstructured(raw)
 }
 
+func GetOctaviaConfigMapData() map[string]interface{} {
+	return map[string]interface{}{
+		"hm_worker-0":      "172.23.0.103",
+		"hm_worker-1":      "172.23.0.105",
+		"rsyslog_worker-0": "172.23.0.104",
+		"rsyslog_worker-1": "172.23.0.106",
+	}
+}
+
+func GetDesignateBindConfigMapData() map[string]interface{} {
+	return map[string]interface{}{
+		"bind_address_0": "172.67.0.100",
+	}
+}
+
+func GetDesignateMdnsConfigMapData() map[string]interface{} {
+	return map[string]interface{}{
+		"mdns_address_0": "172.67.0.97",
+	}
+}
+
 func GetMetalLBFRRConfigurationSpec(node string) map[string]any {
 	return map[string]any{
 		"bgp": map[string]any{
@@ -886,6 +907,10 @@ func GetPodSpec(node string) map[string]any {
 		"terminationGracePeriodSeconds": 0,
 		"nodeName":                      node,
 	}
+}
+
+func GetDesignatePodSpec(node string) map[string]any {
+	return GetPodSpec(node)
 }
 
 func GetPodAnnotation(namespace string) map[string]string {
