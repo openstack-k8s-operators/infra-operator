@@ -243,38 +243,61 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 			// Skip if
 			// * no NAD annotation was configured on old object OR
 			// * no NAD annotation was configured on new object AND
+			// * no predictableip label was configured on old object OR
+			// * no predictableip label was configured on new object AND
 			// * the resourceVersion has not changed
 
-			oldConfigured := true
+			oldNADConfigured := true
 			if val, ok := e.ObjectOld.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
-				oldConfigured = false
+				oldNADConfigured = false
 			}
-			newConfigured := true
+			newNADConfigured := true
 			if val, ok := e.ObjectNew.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
-				newConfigured = false
+				newNADConfigured = false
 			}
 
-			return (oldConfigured || newConfigured) && e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
+			oldPredictableIPConfigured := true
+			if val, ok := e.ObjectOld.GetLabels()[networkv1.PredictableIPLabel]; !ok || len(val) == 0 {
+				oldPredictableIPConfigured = false
+			}
+			newPredictableIPConfigured := true
+			if val, ok := e.ObjectNew.GetLabels()[networkv1.PredictableIPLabel]; !ok || len(val) == 0 {
+				newPredictableIPConfigured = false
+			}
+
+			return (oldNADConfigured || newNADConfigured || oldPredictableIPConfigured || newPredictableIPConfigured) && e.ObjectOld.GetResourceVersion() != e.ObjectNew.GetResourceVersion()
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
 			// Skip if
-			// * NAD annotation key is missing
+			// * NAD annotation key is missing AND predictableip label is missing
 			// * there is no additional network configured
-			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
-				return false
+			nadConfigured := false
+			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; ok && len(val) > 0 {
+				nadConfigured = true
 			}
 
-			return true
+			predictableIPConfigured := false
+			if val, ok := e.Object.GetLabels()[networkv1.PredictableIPLabel]; ok && len(val) > 0 {
+				predictableIPConfigured = true
+			}
+
+			return nadConfigured || predictableIPConfigured
 		},
 		CreateFunc: func(e event.CreateEvent) bool {
 			// Skip if
-			// * NAD annotation key is missing
+			// * NAD annotation key is missing AND predictableip label is missing
 			// * there is no additional network configured
-			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; !ok || len(val) == 0 {
-				return false
+			nadConfigured := false
+			if val, ok := e.Object.GetAnnotations()[k8s_networkv1.NetworkAttachmentAnnot]; ok && len(val) > 0 {
+				nadConfigured = true
 			}
 
-			return true
+			predictableIPConfigured := false
+			if val, ok := e.Object.GetLabels()[networkv1.PredictableIPLabel]; ok && len(val) > 0 {
+				predictableIPConfigured = true
+			}
+
+			return nadConfigured || predictableIPConfigured
 		},
 	}
 
@@ -315,7 +338,7 @@ func (r *BGPConfigurationReconciler) SetupWithManager(ctx context.Context, mgr c
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&networkv1.BGPConfiguration{}).
-		// Watch pods which have additional networks configured with k8s_networkv1.NetworkAttachmentAnnot annotation in the same namespace
+		// Watch pods which have additional networks configured with k8s_networkv1.NetworkAttachmentAnnot annotation or predictableip label in the same namespace
 		Watches(&corev1.Pod{},
 			podFN,
 			builder.WithPredicates(pPod)).
@@ -479,7 +502,7 @@ func (r *BGPConfigurationReconciler) deleteStaleFRRConfigurations(ctx context.Co
 
 // getPodNetworkDetails - returns the podDetails for a list of pods in status.phase: Running
 // where the pod has the multus k8s_networkv1.NetworkAttachmentAnnot annotation
-// and its value is not '[]'
+// and its value is not '[]' OR has a predictableip label
 func getPodNetworkDetails(
 	ctx context.Context,
 	h *helper.Helper,
@@ -499,32 +522,62 @@ func getPodNetworkDetails(
 			if pod.Status.Phase != corev1.PodRunning {
 				continue
 			}
-			if netAttachString, ok := pod.Annotations[k8s_networkv1.NetworkAttachmentAnnot]; ok && netAttachString != "[]" {
-				// get the elements from val to validate the status annotation has the right length
+
+			// Check for pods with predictableip label
+			hasPredictableIP := false
+			predictableIP := ""
+			if ipValue, ok := pod.Labels[networkv1.PredictableIPLabel]; ok && ipValue != "" {
+				hasPredictableIP = true
+				predictableIP = ipValue
+			}
+
+			hasNetworkAttachment := false
+			var netAttachString string
+			if netAttach, ok := pod.Annotations[k8s_networkv1.NetworkAttachmentAnnot]; ok && netAttach != "[]" {
+				hasNetworkAttachment = true
+				netAttachString = netAttach
+			}
+
+			// Skip pods without network attachments or predictableip label
+			if !hasNetworkAttachment && !hasPredictableIP {
+				continue
+			}
+
+			// Verify the nodeName information is already present in the pod spec
+			if pod.Spec.NodeName == "" {
+				return detailList, fmt.Errorf("empty spec.nodeName on pod %s", pod.Name)
+			}
+
+			// Initialize pod detail and network status list
+			detail := bgp.PodDetail{
+				Name:      pod.Name,
+				Namespace: pod.Namespace,
+				Node:      pod.Spec.NodeName,
+			}
+			var netsStatus []k8s_networkv1.NetworkStatus
+
+			// Handle pods with network attachments
+			if hasNetworkAttachment {
 				netAttach := []k8s_networkv1.NetworkSelectionElement{}
-				err := json.Unmarshal([]byte(netAttachString), &netAttach)
-				if err != nil {
-					return nil, fmt.Errorf("failed to decode networks %s: %w", netAttachString, err)
+				trimmed := strings.TrimSpace(netAttachString)
+				var err error
+
+				// Try to unmarshal as NetworkSelectionElement array/object (JSON format)
+				if err = json.Unmarshal([]byte(netAttachString), &netAttach); err != nil {
+					// Try as quoted string
+					var nadName string
+					if err = json.Unmarshal([]byte(netAttachString), &nadName); err != nil {
+						// Fall back to unquoted string
+						nadName = trimmed
+					}
+					netAttach = []k8s_networkv1.NetworkSelectionElement{{Name: nadName, Namespace: pod.Namespace}}
 				}
 
-				// verify the nodeName information is already present in the pod spec, otherwise report an error to reconcile
-				if pod.Spec.NodeName == "" {
-					return detailList, fmt.Errorf("empty spec.nodeName on pod %s", pod.Name)
-				}
-
-				detail := bgp.PodDetail{
-					Name:      pod.Name,
-					Namespace: pod.Namespace,
-					Node:      pod.Spec.NodeName,
-				}
-
-				netsStatus, err := nad.GetNetworkStatusFromAnnotation(pod.Annotations)
+				netsStatus, err = nad.GetNetworkStatusFromAnnotation(pod.Annotations)
 				if err != nil {
 					return detailList, fmt.Errorf("failed to get netsStatus from pod annoation - %v: %w", pod.Annotations, err)
 				}
-				// on pod start it can happen that the network status annotation does not yet
-				// reflect all requested networks. return with an error to reconcile if the length
-				// is <= the status. Note: the status also has the pod network
+				// Verify network status annotation reflects all requested networks
 				if len(netsStatus) <= len(netAttach) {
 					return detailList, fmt.Errorf("metadata.Annotations['k8s.ovn.org/pod-networks'] %s on pod %s, does not match requested networks %s",
 						pod.GetAnnotations()[k8s_networkv1.NetworkStatusAnnot], pod.Name, netAttachString)
@@ -532,19 +585,17 @@ func getPodNetworkDetails(
 
 				netsStatusCopy := make([]k8s_networkv1.NetworkStatus, len(netsStatus))
 				copy(netsStatusCopy, netsStatus)
-				// verify there are IP information for all networks in the status, otherwise report an error to reconcile
+				// Verify there are IP information for all networks in the status
 				for idx, netStat := range netsStatusCopy {
-					// remove status for the pod interface
-					// it should always be ovn-kubernetes, but if not, remove status for eth0 which is the pod network
+					// Remove status for the pod interface (ovn-kubernetes or eth0)
 					if netStat.Name == "ovn-kubernetes" || netStat.Interface == "eth0" {
 						removeIndex(netsStatus, idx)
 						continue
 					}
 
-					// get ipam configuration from NAD
+					// Get ipam configuration from NAD
 					nadName := strings.TrimPrefix(netStat.Name, pod.Namespace+"/")
-					netAtt, err := nad.GetNADWithName(
-						ctx, h, nadName, pod.Namespace)
+					netAtt, err := nad.GetNADWithName(ctx, h, nadName, pod.Namespace)
 					if err != nil {
 						return detailList, err
 					}
@@ -554,23 +605,33 @@ func getPodNetworkDetails(
 						return detailList, err
 					}
 
-					// if the NAD has no ipam configured, skip it as there will be no IP
+					// Skip NADs with no ipam configured
 					if ipam == "{}" {
 						Log.Info(fmt.Sprintf("removing netsStatus for NAD %s for %s, IPAM configuration is empty: %s", netAtt.Name, pod.Name, ipam))
 						removeIndex(netsStatus, idx)
 						continue
 					}
 
-					// verify there is IP information for the network, otherwise report an error to reconcile
+					// Verify there is IP information for the network
 					if len(netStat.IPs) == 0 {
 						return detailList, fmt.Errorf("no IP information for network %s on pod %s", netStat.Name, pod.Name)
 					}
 				}
-
-				detail.NetworkStatus = netsStatus
-
-				detailList = append(detailList, detail)
 			}
+
+			// Handle pods with predictableip label
+			if hasPredictableIP {
+				netsStatus = append(netsStatus, k8s_networkv1.NetworkStatus{
+					Name:      networkv1.PredictableIPLabel,
+					Interface: networkv1.PredictableIPLabel,
+					IPs:       []string{predictableIP},
+				})
+				Log.Info(fmt.Sprintf("Added predictable IP %s for pod %s", predictableIP, pod.Name))
+			}
+
+			Log.Info(fmt.Sprintf("Pod %s final network statuses: %+v", pod.Name, netsStatus))
+			detail.NetworkStatus = netsStatus
+			detailList = append(detailList, detail)
 		}
 	}
 
@@ -594,6 +655,7 @@ func (r *BGPConfigurationReconciler) createOrPatchFRRConfiguration(
 	Log.Info("Reconciling createOrUpdateFRRConfiguration")
 
 	podPrefixes := bgp.GetFRRPodPrefixes(podDtl.NetworkStatus)
+	Log.Info(fmt.Sprintf("Generated prefixes for pod %s: %v", podDtl.Name, podPrefixes))
 
 	nodeFRRCfg := nodeFRRCfgs[podDtl.Node]
 
