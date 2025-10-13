@@ -290,4 +290,70 @@ var _ = Describe("Memcached Controller", func() {
 			)
 		})
 	})
+
+	When("testing server list formatting", func() {
+		It("should format IPv4 server lists correctly (without brackets)", func() {
+			// Create a memcached instance for testing
+			memcachedSpec := GetDefaultMemcachedSpec()
+			memcachedSpec["replicas"] = 3
+			memcached := CreateMemcachedConfig(namespace, memcachedSpec)
+			memcachedName := types.NamespacedName{
+				Name:      memcached.GetName(),
+				Namespace: memcached.GetNamespace(),
+			}
+			DeferCleanup(th.DeleteInstance, memcached)
+
+			// Simulate IPv4 memcached ready (this uses the helper method which now correctly formats IPv4)
+			th.SimulateMemcachedReady(memcachedName)
+
+			// Verify the server list formatting
+			instance := GetMemcached(memcachedName)
+
+			// Verify serverList (should not have brackets)
+			Expect(instance.Status.ServerList).To(HaveLen(3))
+			for i := 0; i < 3; i++ {
+				expectedServer := fmt.Sprintf("%s-%d.%s.%s.svc:11211", instance.Name, i, instance.Name, instance.Namespace)
+				Expect(instance.Status.ServerList[i]).To(Equal(expectedServer))
+			}
+
+			// Verify serverListWithInet for IPv4 (should not have brackets around hostname)
+			Expect(instance.Status.ServerListWithInet).To(HaveLen(3))
+			for i := 0; i < 3; i++ {
+				expectedServerWithInet := fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", instance.Name, i, instance.Name, instance.Namespace)
+				Expect(instance.Status.ServerListWithInet[i]).To(Equal(expectedServerWithInet))
+			}
+		})
+
+		It("should format IPv6 server lists correctly (with brackets)", func() {
+			// Create a memcached instance for testing
+			memcachedSpec := GetDefaultMemcachedSpec()
+			memcachedSpec["replicas"] = 3
+			memcached := CreateMemcachedConfig(namespace, memcachedSpec)
+			memcachedName := types.NamespacedName{
+				Name:      memcached.GetName(),
+				Namespace: memcached.GetNamespace(),
+			}
+			DeferCleanup(th.DeleteInstance, memcached)
+
+			// Simulate IPv6 memcached ready
+			th.SimulateIPv6MemcachedReady(memcachedName)
+
+			// Verify the server list formatting
+			instance := GetMemcached(memcachedName)
+
+			// Verify serverList (should not have brackets - same as IPv4)
+			Expect(instance.Status.ServerList).To(HaveLen(3))
+			for i := 0; i < 3; i++ {
+				expectedServer := fmt.Sprintf("%s-%d.%s.%s.svc:11211", instance.Name, i, instance.Name, instance.Namespace)
+				Expect(instance.Status.ServerList[i]).To(Equal(expectedServer))
+			}
+
+			// Verify serverListWithInet for IPv6 (should have brackets around hostname)
+			Expect(instance.Status.ServerListWithInet).To(HaveLen(3))
+			for i := 0; i < 3; i++ {
+				expectedServerWithInet := fmt.Sprintf("inet6:[%s-%d.%s.%s.svc]:11211", instance.Name, i, instance.Name, instance.Namespace)
+				Expect(instance.Status.ServerListWithInet[i]).To(Equal(expectedServerWithInet))
+			}
+		})
+	})
 })
