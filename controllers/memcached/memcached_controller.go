@@ -683,8 +683,11 @@ func (r *Reconciler) GetServerLists(
 		serverList = append(serverList, fmt.Sprintf("%s:%d", server, port))
 
 		// python-memcached requires inet(6) prefix according to the IP version
-		// used by the memcached server.
-		serverListWithInet = append(serverListWithInet, fmt.Sprintf("%s:[%s]:%d", prefix, server, memcached.MemcachedPort))
+		// used by the memcached server. IPv6 addresses also need to be wrapped in brackets.
+		if ipFamily == corev1.IPv6Protocol {
+			server = fmt.Sprintf("[%s]", server)
+		}
+		serverListWithInet = append(serverListWithInet, fmt.Sprintf("%s:%s:%d", prefix, server, memcached.MemcachedPort))
 	}
 
 	return serverList, serverListWithInet
