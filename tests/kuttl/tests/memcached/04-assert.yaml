@@ -34,7 +34,7 @@ commands:
       # Whether or not TLS is configured, the serverListWithInit always exposes port 11211
       # get the first memcached from serverListWithInet and validate
       template='{{ (index .status.serverListWithInet 0) }}'
-      regex="inet:\[memcached-0.memcached.$NAMESPACE.svc\]:11211"
+      regex="inet:memcached-0.memcached.$NAMESPACE.svc:11211"
       memcached=$(oc get -n $NAMESPACE memcached memcached -o go-template="$template")
       matches=$(echo "$memcached" | sed -e "s?$regex??")
       if [ -z "$matches" ]; then

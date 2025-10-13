@@ -152,7 +152,7 @@ func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
 		serverListWithInet := []string{}
 		for i := 0; i < int(*mc.Spec.Replicas); i++ {
 			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
 		}
 		mc.Status.ServerList = serverList
 		mc.Status.ServerListWithInet = serverListWithInet
@@ -177,7 +177,7 @@ func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
 		serverListWithInet := []string{}
 		for i := 0; i < int(*mc.Spec.Replicas); i++ {
 			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
 		}
 		mc.Status.ServerList = serverList
 		mc.Status.ServerListWithInet = serverListWithInet
@@ -203,7 +203,7 @@ func (tc *TestHelper) SimulateMTLSMemcachedReady(name types.NamespacedName) {
 		serverListWithInet := []string{}
 		for i := 0; i < int(*mc.Spec.Replicas); i++ {
 			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
 		}
 		mc.Status.ServerList = serverList
 		mc.Status.ServerListWithInet = serverListWithInet
@@ -225,4 +225,29 @@ func (tc *TestHelper) GetDefaultMemcachedSpec() memcachedv1.MemcachedSpec {
 			Replicas: ptr.To(int32(3)),
 		},
 	}
+}
+
+// SimulateIPv6MemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster with IPv6 server list formatting.
+func (tc *TestHelper) SimulateIPv6MemcachedReady(name types.NamespacedName) {
+	t.Eventually(func(g t.Gomega) {
+		mc := tc.GetMemcached(name)
+		mc.Status.ObservedGeneration = mc.Generation
+		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+		mc.Status.ReadyCount = *mc.Spec.Replicas
+
+		serverList := []string{}
+		serverListWithInet := []string{}
+		for i := 0; i < int(*mc.Spec.Replicas); i++ {
+			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
+			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet6:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
+		}
+		mc.Status.ServerList = serverList
+		mc.Status.ServerListWithInet = serverListWithInet
+
+		// This can return conflict so we have the t.Eventually block to retry
+		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
+
+	}, tc.Timeout, tc.Interval).Should(t.Succeed())
+
+	tc.Logger.Info("Simulated IPv6 memcached ready", "on", name)
 }
