@@ -552,6 +552,18 @@ def _redfish_get_power_state(url, user, passwd, timeout):
         logging.error('Failed to get power state: %s' % str(e))
     return None
 
+def _ipmi_get_power_state(ip, port, user, passwd, timeout):
+    """Get the power state from IPMI"""
+    try:
+        cmd = ['ipmitool', '-I', 'lanplus', '-H', ip, '-U', user, '-P', passwd, '-p', port, 'power', 'status']
+        cmd_output = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True, check=True)
+        return cmd_output.stdout.strip().upper()
+    except subprocess.TimeoutExpired:
+        logging.error('Failed to get IPMI power state: timeout expired')
+    except subprocess.CalledProcessError as e:
+        logging.error('Failed to get IPMI power state: command failed with return code %d' % e.returncode)
+    return None
+
 def _bmh_fence(token, namespace, host, action):
 
     url = "https://kubernetes.default.svc/apis/metal3.io/v1alpha1/namespaces/%s/baremetalhosts/%s?fieldManager=kubectl-patch" % (namespace, host)
@@ -602,6 +614,7 @@ def _host_fence(host, action):
         port = str(fencing_data["ipport"])
         user = str(fencing_data["login"])
         passwd = str(fencing_data["passwd"])
+        timeout = fencing_data["timeout"] if "timeout" in fencing_data else 30
 
         logging.debug('Checking %s power status' % host)
 
@@ -610,7 +623,7 @@ def _host_fence(host, action):
         if action == 'off':
             cmd = ["ipmitool", "-I", "lanplus", "-H", "%s" % ip, "-U", "%s" % user, "-P", "%s" % passwd, "-p", "%s" % port, "power", "off"]
             try:
-                cmd_output = subprocess.run(cmd, timeout=30, capture_output=True, text=True, check=True)
+                cmd_output = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True, check=True)
             except subprocess.TimeoutExpired:
                 logging.error('Timeout expired while sending IPMI command for power off of %s' % host)
                 return False
@@ -618,12 +631,19 @@ def _host_fence(host, action):
                 logging.error('Error while sending IPMI command for power off of %s' % host)
                 return False
 
-            logging.info('Successfully powered off %s' % host)
-            return True
+            # Wait for server to actually power off
+            for _ in range(timeout):
+                time.sleep(1)
+                power_state = _ipmi_get_power_state(ip, port, user, passwd, timeout)
+                if power_state == 'CHASSIS POWER IS OFF':
+                    logging.info('Successfully powered off %s' % host)
+                    return True
+            logging.error('Power off of %s timed out' % host)
+            return False
         else:
             cmd = ["ipmitool", "-I", "lanplus", "-H", "%s" % ip, "-U", "%s" % user, "-P", "%s" % passwd, "-p", "%s" % port, "power", "on"]
             try:
-                cmd_output = subprocess.run(cmd, timeout=30, capture_output=True, text=True, check=True)
+                cmd_output = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True, check=True)
             except subprocess.TimeoutExpired:
                 logging.error('Timeout expired while sending IPMI command for power on of %s' % host)
                 return False
@@ -657,8 +677,15 @@ def _host_fence(host, action):
             r = _redfish_reset(url, user, passwd, timeout, "ForceOff")
 
             if r.status_code in [200, 204]:
-                logging.info('Power off of %s ok' % host)
-                return True
+                # Wait for server to actually power off
+                for _ in range(timeout):
+                    time.sleep(1)
+                    power_state = _redfish_get_power_state(url, user, passwd, timeout)
+                    if power_state == 'OFF':
+                        logging.info('Power off of %s ok' % host)
+                        return True
+                logging.error('Power off of %s timed out' % host)
+                return False
             elif r.status_code == 409:
                 # Check if server is already powered off
                 power_state = _redfish_get_power_state(url, user, passwd, timeout)
