@@ -55,6 +55,33 @@ var _ = Describe("RabbitMQ Controller", func() {
 		DeferCleanup(th.DeleteConfigMap, clusterCm)
 	})
 
+	When("QueueType defaulting and explicit values", func() {
+		It("defaults QueueType to Quorum when unspecified", func() {
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				g.Expect(instance.Spec.QueueType).ToNot(BeNil())
+				g.Expect(*instance.Spec.QueueType).To(Equal("Quorum"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("preserves explicitly set QueueType", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				g.Expect(instance.Spec.QueueType).ToNot(BeNil())
+				g.Expect(*instance.Spec.QueueType).To(Equal("Mirrored"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("a default RabbitMQ gets created", func() {
 		BeforeEach(func() {
 			rabbitmq := CreateRabbitMQ(rabbitmqName, GetDefaultRabbitMQSpec())
