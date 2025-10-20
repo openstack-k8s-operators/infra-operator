@@ -72,7 +72,11 @@ func (spec *RabbitMqSpec) Default() {
 
 // Default - common validations go here (for the OpenStackControlplane which uses this one)
 func (spec *RabbitMqSpecCore) Default() {
-	//nothing to validate yet
+	// Set a sensible default for QueueType only when not explicitly provided
+	if spec.QueueType == nil || *spec.QueueType == "" {
+		queueType := "Quorum"
+		spec.QueueType = &queueType
+	}
 }
 
 // TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
@@ -101,6 +105,9 @@ func (r *RabbitMq) ValidateCreate() (admission.Warnings, error) {
 		CrMaxLengthCorrection,
 	)...) // omit issue with  statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
 
+	// Validate QueueType if specified
+	allErrs = append(allErrs, r.Spec.ValidateQueueType(basePath)...)
+
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
 			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMq"},
@@ -127,6 +134,9 @@ func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) 
 	warn, errs := r.Spec.ValidateOverride(basePath, r.Namespace)
 	allWarn = append(allWarn, warn...)
 	allErrs = append(allErrs, errs...)
+
+	// Validate QueueType if specified
+	allErrs = append(allErrs, r.Spec.ValidateQueueType(basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -172,4 +182,29 @@ func (r *RabbitMq) ValidateDelete() (admission.Warnings, error) {
 
 	// TODO(user): fill in your validation logic upon object deletion.
 	return nil, nil
+}
+
+// ValidateQueueType validates that QueueType is one of the allowed values
+func (spec *RabbitMqSpec) ValidateQueueType(basePath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if spec.QueueType != nil {
+		allowedValues := []string{"None", "Mirrored", "Quorum"}
+		isValid := false
+		for _, allowed := range allowedValues {
+			if *spec.QueueType == allowed {
+				isValid = true
+				break
+			}
+		}
+		if !isValid {
+			allErrs = append(allErrs, field.NotSupported(
+				basePath.Child("queueType"),
+				*spec.QueueType,
+				allowedValues,
+			))
+		}
+	}
+
+	return allErrs
 }
