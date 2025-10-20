@@ -17,10 +17,10 @@ limitations under the License.
 package v1beta1
 
 import (
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -40,7 +40,7 @@ const (
 
 // DNSMasqOption defines allowed options for dnsmasq
 type DNSMasqOption struct {
-	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local
+	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local;local-ttl;dhcp-ttl;max-ttl
 	Key    string   `json:"key"`
 	Values []string `json:"values"`
 }
