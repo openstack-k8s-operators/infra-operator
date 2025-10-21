@@ -100,7 +100,7 @@ func StatefulSet(
 					Containers: []corev1.Container{
 						{
 							Image:        r.Spec.ContainerImage,
-							Command:      []string{"/var/lib/operator-scripts/start_redis_replication.sh"},
+							Command:      []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_redis_replication.sh"},
 							Name:         "redis",
 							Env:          commonEnvVars,
 							Resources:    r.Spec.Resources,
@@ -125,9 +125,8 @@ func StatefulSet(
 							},
 						}, {
 							Image:   r.Spec.ContainerImage,
-							Command: []string{"/var/lib/operator-scripts/start_sentinel.sh"},
-
-							Name: "sentinel",
+							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_sentinel.sh"},
+							Name:    "sentinel",
 							Env: append(commonEnvVars, corev1.EnvVar{
 								Name:  "SENTINEL_QUORUM",
 								Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
