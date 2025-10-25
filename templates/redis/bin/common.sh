@@ -10,6 +10,9 @@ TIMEOUT=3
 POD_NAME=$HOSTNAME
 POD_FQDN=$HOSTNAME.$SVC_FQDN
 
+# Extract pod IP from /etc/hosts
+POD_IP=$(grep "$HOSTNAME" /etc/hosts | awk '{print $1}' | head -1)
+
 if test -d /var/lib/config-data/tls; then
     REDIS_CLI_CMD="redis-cli --tls"
     REDIS_CONFIG=/var/lib/redis/redis-tls.conf
@@ -35,7 +38,7 @@ function generate_configs() {
     cd /var/lib/config-data/default
     for cfg in $(find -L * -name '*.conf.in'); do
         log "Generating config file from template $PWD/${cfg}"
-        sed -e "s/{ POD_FQDN }/${POD_FQDN}/" "${cfg}" > "/var/lib/config-data/generated/${cfg%.in}"
+        sed -e "s/{ POD_FQDN }/${POD_FQDN}/g" -e "s/{ POD_IP }/${POD_IP}/g" "${cfg}" > "/var/lib/config-data/generated/${cfg%.in}"
     done
 }
 
