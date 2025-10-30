@@ -1,5 +1,5 @@
 dir /var/lib/redis
-bind { POD_FQDN } localhost
+bind { POD_IP } localhost
 replica-announce-ip { POD_FQDN }
 port 6379
 tcp-backlog 511
