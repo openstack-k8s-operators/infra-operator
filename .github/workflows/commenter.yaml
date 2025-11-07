@@ -1,0 +1,52 @@
+name: PR Commenter (Secure App)
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+# do not request perms for the standard token. it stays ro
+permissions: {}
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Check if Secrets are available
+        run: |
+          if [ -z "${{ secrets.COMMENTER_APP_ID }}" ]; then
+            echo "FEHLER: Das Secret COMMENTER_APP_ID ist nicht gesetzt oder leer."
+            echo "Stellen Sie sicher, dass es in den Repository-Einstellungen > Secrets > Actions vorhanden ist."
+            echo "Stellen Sie außerdem sicher, dass dies ein 'pull_request_target'-Workflow ist."
+            exit 1
+          else
+            echo "Das Secret COMMENTER_APP_ID ist vorhanden. (Der Wert wird maskiert, wenn er ausgegeben wird)"
+          fi
+
+          if [ -z "${{ secrets.COMMENTER_APP_PRIVATE_KEY }}" ]; then
+            echo "FEHLER: Das Secret COMMENTER_APP_PRIVATE_KEY ist nicht gesetzt oder leer."
+            exit 1
+          else
+            echo "Das Secret COMMENTER_APP_PRIVATE_KEY ist vorhanden. (Wird maskiert)"
+          fi
+
+      # 1. create Token using the GitHub App
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.COMMENTER_APP_ID }}
+          private-key: ${{ secrets.COMMENTER_APP_PRIVATE_KEY }}
+
+      # 2. use token to comment
+      - name: Post comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.generate_token.outputs.token }}
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: 'my comment'
+            })
