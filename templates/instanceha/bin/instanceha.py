@@ -686,17 +686,18 @@ def _host_fence(host, action):
                         return True
                 logging.error('Power off of %s timed out' % host)
                 return False
-            elif r.status_code == 409:
+            elif r.status_code in [400, 409]:
                 # Check if server is already powered off
+                # Some vendors (e.g., HPE iLo) return 400, others (e.g., Dell iDRAC) return 409
                 power_state = _redfish_get_power_state(url, user, passwd, timeout)
                 if power_state == 'OFF':
                     logging.info('Power off of %s ok (already off)' % host)
                     return True
                 else:
-                    logging.error('Could not power off %s (409 but not OFF: %s)' % (host, power_state))
+                    logging.error('Could not power off %s (%d but not OFF: %s)' % (host, r.status_code, power_state))
                     return False
             else:
-                logging.error('Could not power off %s' % host)
+                logging.error('Could not power off %s (status code: %d)' % (host, r.status_code))
                 return False
         else:
             r = _redfish_reset(url, user, passwd, timeout, "On")
