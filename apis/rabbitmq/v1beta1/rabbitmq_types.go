@@ -200,7 +200,7 @@ func (instance *RabbitMqSpecCore) ValidateTopology(
 // ValidateOverride validates the override section of RabbitMqSpecCore.
 func (instance *RabbitMqSpecCore) ValidateOverride(
 	basePath *field.Path,
-	namespace string,
+	_ string,
 ) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
 	var allWarn admission.Warnings

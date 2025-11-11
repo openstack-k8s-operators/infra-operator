@@ -317,6 +317,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmquser
+  failurePolicy: Fail
+  name: vrabbitmquser-v1beta1.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqusers
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
   name: vredis-v1beta1.kb.io
@@ -330,4 +350,24 @@ webhooks:
     - UPDATE
     resources:
     - redises
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmquser
+  failurePolicy: Fail
+  name: vrabbitmquser.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqusers
   sideEffects: None
