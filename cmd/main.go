@@ -346,6 +346,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&rabbitmqcontroller.RabbitMQVhostReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RabbitMQVhost")
+		os.Exit(1)
+	}
+
+	if err := (&rabbitmqcontroller.RabbitMQUserReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RabbitMQUser")
+		os.Exit(1)
+	}
+
+	if err := (&rabbitmqcontroller.RabbitMQPolicyReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RabbitMQPolicy")
+		os.Exit(1)
+	}
+
 	// Initialize webhook defaults
 	rabbitmqv1beta1.SetupDefaults()
 	memcachedv1.SetupDefaults()
@@ -378,6 +405,18 @@ func main() {
 		}
 		if err := webhookrabbitmqv1beta1.SetupRabbitMqWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMq")
+			os.Exit(1)
+		}
+		if err := webhookrabbitmqv1beta1.SetupRabbitMQUserWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMQUser")
+			os.Exit(1)
+		}
+		if err := webhookrabbitmqv1beta1.SetupRabbitMQPolicyWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMQPolicy")
+			os.Exit(1)
+		}
+		if err := webhookrabbitmqv1beta1.SetupRabbitMQVhostWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMQVhost")
 			os.Exit(1)
 		}
 		if err := webhooknetworkv1beta1.SetupNetConfigWebhookWithManager(mgr); err != nil {

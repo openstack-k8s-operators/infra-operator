@@ -18,6 +18,16 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: RabbitMQUser is the Schema for the rabbitmqusers API
+      displayName: RabbitMQ User
+      kind: RabbitMQUser
+      name: rabbitmqusers.rabbitmq.openstack.org
+      version: v1beta1
+    - description: RabbitMQVhost is the Schema for the rabbitmqvhosts API
+      displayName: RabbitMQ Vhost
+      kind: RabbitMQVhost
+      name: rabbitmqvhosts.rabbitmq.openstack.org
+      version: v1beta1
     - description: BGPConfiguration is the Schema for the bgpconfigurations API
       displayName: BGPConfiguration
       kind: BGPConfiguration
