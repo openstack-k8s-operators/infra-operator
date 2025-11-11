@@ -18,13 +18,14 @@ limitations under the License.
 package rabbitmq
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -53,7 +54,6 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/ocp"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pdb"
-	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
@@ -466,9 +466,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// Let's wait DeploymentReadyCondition=True to apply the policy
 		// QueueType should never be nil due to webhook defaulting, but add safety check
 		if instance.Spec.QueueType != nil {
-			if *instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeMirrored && *instance.Spec.Replicas > 1 && instance.Status.QueueType != rabbitmqv1beta1.QueueTypeMirrored {
 				Log.Info("ha-all policy not present. Applying.")
-				err := updateMirroredPolicy(ctx, helper, instance, r.config, true)
+				err := ensureMirroredPolicy(ctx, helper, instance)
 				if err != nil {
 					Log.Error(err, "Could not apply ha-all policy")
 					instance.Status.Conditions.Set(condition.FalseCondition(
@@ -478,9 +478,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 						condition.DeploymentReadyErrorMessage, err.Error()))
 					return ctrl.Result{}, err
 				}
-			} else if *instance.Spec.QueueType != "Mirrored" && instance.Status.QueueType == "Mirrored" {
-				Log.Info("Removing ha-all policy")
-				err := updateMirroredPolicy(ctx, helper, instance, r.config, false)
+				instance.Status.QueueType = rabbitmqv1beta1.QueueTypeMirrored
+			} else if *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeMirrored && instance.Status.QueueType == rabbitmqv1beta1.QueueTypeMirrored {
+				Log.Info("QueueType changed from Mirrored. Removing ha-all policy")
+				err := deleteMirroredPolicy(ctx, helper, instance)
 				if err != nil {
 					Log.Error(err, "Could not remove ha-all policy")
 					instance.Status.Conditions.Set(condition.FalseCondition(
@@ -490,16 +491,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 						condition.DeploymentReadyErrorMessage, err.Error()))
 					return ctrl.Result{}, err
 				}
+				instance.Status.QueueType = ""
 			}
 
 			// Update status for Quorum queue type
-			if *instance.Spec.QueueType == "Quorum" && instance.Status.QueueType != "Quorum" {
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum && instance.Status.QueueType != rabbitmqv1beta1.QueueTypeQuorum {
 				Log.Info("Setting queue type status to quorum")
-			} else if *instance.Spec.QueueType != "Quorum" && instance.Status.QueueType == "Quorum" {
+				instance.Status.QueueType = rabbitmqv1beta1.QueueTypeQuorum
+			} else if *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeQuorum && instance.Status.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
 				Log.Info("Removing quorum queue type status")
+				instance.Status.QueueType = ""
 			}
 
-			instance.Status.QueueType = *instance.Spec.QueueType
+			// Update status for None queue type
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeNone && instance.Status.QueueType != "" {
+				Log.Info("Setting queue type status to None (clearing)")
+				instance.Status.QueueType = ""
+			}
 		}
 	}
 
@@ -623,26 +631,77 @@ func (r *Reconciler) deletePerPodServices(ctx context.Context, instance *rabbitm
 	return nil
 }
 
-func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, config *rest.Config, apply bool) error {
-	cli := helper.GetKClient()
-
-	pod := types.NamespacedName{
-		Name:      instance.Name + "-server-0",
+func ensureMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq) error {
+	policyName := types.NamespacedName{
+		Name:      instance.Name + "-ha-all",
 		Namespace: instance.Namespace,
 	}
 
-	container := "rabbitmq"
-	s := []string{"/bin/bash", "-c", "rabbitmqctl clear_policy ha-all"}
+	policy := &rabbitmqv1beta1.RabbitMQPolicy{}
+	err := helper.GetClient().Get(ctx, policyName, policy)
 
-	if apply {
-		s = []string{"/bin/bash", "-c", "rabbitmqctl set_policy ha-all \"\" '{\"ha-mode\":\"exactly\",\"ha-params\":2,\"ha-promote-on-shutdown\":\"always\"}'"}
+	// Policy already exists
+	if err == nil {
+		return nil
 	}
 
-	err := rsh.ExecInPod(ctx, cli, config, pod, container, s,
-		func(_ *bytes.Buffer, _ *bytes.Buffer) error {
-			return nil
-		})
-	return err
+	// Return error if it's not NotFound
+	if !k8s_errors.IsNotFound(err) {
+		return err
+	}
+
+	// Create the policy CR
+	definition := map[string]interface{}{
+		"ha-mode":                "exactly",
+		"ha-params":              2,
+		"ha-promote-on-shutdown": "always",
+	}
+	definitionJSON, marshalErr := json.Marshal(definition)
+	if marshalErr != nil {
+		return marshalErr
+	}
+
+	policy = &rabbitmqv1beta1.RabbitMQPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      policyName.Name,
+			Namespace: policyName.Namespace,
+		},
+		Spec: rabbitmqv1beta1.RabbitMQPolicySpec{
+			RabbitmqClusterName: instance.Name,
+			Name:                "ha-all",
+			Pattern:             "",
+			Definition:          apiextensionsv1.JSON{Raw: definitionJSON},
+			Priority:            0,
+			ApplyTo:             "all",
+		},
+	}
+	if err := controllerutil.SetControllerReference(instance, policy, helper.GetScheme()); err != nil {
+		return err
+	}
+	return helper.GetClient().Create(ctx, policy)
+}
+
+func deleteMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq) error {
+	policyName := types.NamespacedName{
+		Name:      instance.Name + "-ha-all",
+		Namespace: instance.Namespace,
+	}
+
+	policy := &rabbitmqv1beta1.RabbitMQPolicy{}
+	err := helper.GetClient().Get(ctx, policyName, policy)
+
+	// Policy doesn't exist, nothing to delete
+	if k8s_errors.IsNotFound(err) {
+		return nil
+	}
+
+	// Return error if Get() failed for other reasons
+	if err != nil {
+		return err
+	}
+
+	// Delete the policy
+	return helper.GetClient().Delete(ctx, policy)
 }
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper) (ctrl.Result, error) {

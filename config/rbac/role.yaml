@@ -214,7 +214,10 @@ rules:
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqpolicies
   - rabbitmqs
+  - rabbitmqusers
+  - rabbitmqvhosts
   - transporturls
   verbs:
   - create
@@ -227,14 +230,20 @@ rules:
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqpolicies/finalizers
   - rabbitmqs/finalizers
+  - rabbitmqusers/finalizers
+  - rabbitmqvhosts/finalizers
   - transporturls/finalizers
   verbs:
   - update
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqpolicies/status
   - rabbitmqs/status
+  - rabbitmqusers/status
+  - rabbitmqvhosts/status
   - transporturls/status
   verbs:
   - get
