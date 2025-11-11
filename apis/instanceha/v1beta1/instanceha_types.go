@@ -86,6 +86,11 @@ type InstanceHaSpec struct {
 	// TopologyRef to apply the Topology defined by the associated CR referenced
 	// by name
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// CustomScriptConfigMap allows overriding the default instanceha.py script
+	// with a custom script from a pre-created ConfigMap
+	CustomScriptConfigMap *string `json:"customScriptConfigMap,omitempty"`
 }
 
 // InstanceHaStatus defines the observed state of InstanceHa
@@ -104,6 +109,9 @@ type InstanceHaStatus struct {
 
 	// LastAppliedTopology - the last applied Topology
 	LastAppliedTopology *topologyv1.TopoRef `json:"lastAppliedTopology,omitempty"`
+
+	// Unsupported - indicates when unsupported configurations are used
+	Unsupported string `json:"unsupported,omitempty"`
 }
 
 //+kubebuilder:object:root=true
