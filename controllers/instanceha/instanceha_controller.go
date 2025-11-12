@@ -367,25 +367,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	// begin custom script inject
-	cmLabels := labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{})
-	envVars := make(map[string]env.Setter)
-	cms := []util.Template{
-		// ScriptsConfigMap
-		{
-			Name:               instance.Name + "-sh",
-			Namespace:          instance.Namespace,
-			Type:               util.TemplateTypeScripts,
-			InstanceType:       instance.Kind,
-			AdditionalTemplate: map[string]string{},
-			Labels:             cmLabels,
-		},
-	}
+	// Only create the default script ConfigMap if CustomScriptConfigMap is not specified
+	if instance.Spec.CustomScriptConfigMap == nil || *instance.Spec.CustomScriptConfigMap == "" {
+		cmLabels := labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{})
+		envVars := make(map[string]env.Setter)
+		cms := []util.Template{
+			// ScriptsConfigMap
+			{
+				Name:               instance.Name + "-sh",
+				Namespace:          instance.Namespace,
+				Type:               util.TemplateTypeScripts,
+				InstanceType:       instance.Kind,
+				AdditionalTemplate: map[string]string{},
+				Labels:             cmLabels,
+			},
+		}
 
-	err = configmap.EnsureConfigMaps(ctx, helper, instance, cms, &envVars)
-	if err != nil {
-		return ctrl.Result{}, err
+		err = configmap.EnsureConfigMaps(ctx, helper, instance, cms, &envVars)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		instance.Status.Unsupported = ""
+	} else {
+		instance.Status.Unsupported = "CustomScriptConfigMap"
 	}
-
 	// end custom script inject
 
 	// Create netattachment
