@@ -425,40 +425,43 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions.MarkTrue(condition.PDBReadyCondition, condition.PDBReadyMessage)
 
 		// Let's wait DeploymentReadyCondition=True to apply the policy
-		if instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
-			Log.Info("ha-all policy not present. Applying.")
-			err := updateMirroredPolicy(ctx, helper, instance, r.config, true)
-			if err != nil {
-				Log.Error(err, "Could not apply ha-all policy")
-				instance.Status.Conditions.Set(condition.FalseCondition(
-					condition.DeploymentReadyCondition,
-					condition.ErrorReason,
-					condition.SeverityWarning,
-					condition.DeploymentReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
+		// QueueType should never be nil due to webhook defaulting, but add safety check
+		if instance.Spec.QueueType != nil {
+			if *instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
+				Log.Info("ha-all policy not present. Applying.")
+				err := updateMirroredPolicy(ctx, helper, instance, r.config, true)
+				if err != nil {
+					Log.Error(err, "Could not apply ha-all policy")
+					instance.Status.Conditions.Set(condition.FalseCondition(
+						condition.DeploymentReadyCondition,
+						condition.ErrorReason,
+						condition.SeverityWarning,
+						condition.DeploymentReadyErrorMessage, err.Error()))
+					return ctrl.Result{}, err
+				}
+			} else if *instance.Spec.QueueType != "Mirrored" && instance.Status.QueueType == "Mirrored" {
+				Log.Info("Removing ha-all policy")
+				err := updateMirroredPolicy(ctx, helper, instance, r.config, false)
+				if err != nil {
+					Log.Error(err, "Could not remove ha-all policy")
+					instance.Status.Conditions.Set(condition.FalseCondition(
+						condition.DeploymentReadyCondition,
+						condition.ErrorReason,
+						condition.SeverityWarning,
+						condition.DeploymentReadyErrorMessage, err.Error()))
+					return ctrl.Result{}, err
+				}
 			}
-		} else if instance.Spec.QueueType != "Mirrored" && instance.Status.QueueType == "Mirrored" {
-			Log.Info("Removing ha-all policy")
-			err := updateMirroredPolicy(ctx, helper, instance, r.config, false)
-			if err != nil {
-				Log.Error(err, "Could not remove ha-all policy")
-				instance.Status.Conditions.Set(condition.FalseCondition(
-					condition.DeploymentReadyCondition,
-					condition.ErrorReason,
-					condition.SeverityWarning,
-					condition.DeploymentReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
+
+			// Update status for Quorum queue type
+			if *instance.Spec.QueueType == "Quorum" && instance.Status.QueueType != "Quorum" {
+				Log.Info("Setting queue type status to quorum")
+			} else if *instance.Spec.QueueType != "Quorum" && instance.Status.QueueType == "Quorum" {
+				Log.Info("Removing quorum queue type status")
 			}
-		}
 
-		// Update status for Quorum queue type
-		if instance.Spec.QueueType == "Quorum" && instance.Status.QueueType != "Quorum" {
-			Log.Info("Setting queue type status to quorum")
-		} else if instance.Spec.QueueType != "Quorum" && instance.Status.QueueType == "Quorum" {
-			Log.Info("Removing quorum queue type status")
+			instance.Status.QueueType = *instance.Spec.QueueType
 		}
-
-		instance.Status.QueueType = instance.Spec.QueueType
 	}
 
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
