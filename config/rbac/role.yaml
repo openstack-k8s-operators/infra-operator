@@ -140,6 +140,7 @@ rules:
   - dnsdatas
   - dnsmasqs
   - ipsets
+  - netconfigs
   - reservations
   - services
   verbs:
@@ -154,6 +155,7 @@ rules:
   - network.openstack.org
   resources:
   - bgpconfigurations/finalizers
+  - netconfigs/finalizers
   verbs:
   - update
 - apiGroups:
@@ -163,6 +165,8 @@ rules:
   - dnsdata/status
   - dnsmasqs/status
   - ipsets/status
+  - netconfigs/status
+  - reservations/status
   - services/status
   verbs:
   - get
@@ -179,14 +183,6 @@ rules:
   verbs:
   - patch
   - update
-- apiGroups:
-  - network.openstack.org
-  resources:
-  - netconfigs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - policy
   resources:
@@ -291,7 +287,24 @@ rules:
   resources:
   - topologies
   verbs:
+  - create
+  - delete
   - get
   - list
+  - patch
   - update
   - watch
+- apiGroups:
+  - topology.openstack.org
+  resources:
+  - topologies/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - topology.openstack.org
+  resources:
+  - topologies/status
+  verbs:
+  - get
+  - patch
+  - update

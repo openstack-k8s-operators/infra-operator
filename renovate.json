@@ -9,7 +9,7 @@
 	"packageRules": [
 		{
 			"matchPackageNames": [
-				"github.com/openstack-k8s-operators/infra-operator/apis"
+				"github.com/openstack-k8s-operators/infra-operator/api"
 			],
 			"enabled": false
 		}

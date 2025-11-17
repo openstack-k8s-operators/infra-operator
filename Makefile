@@ -48,7 +48,7 @@ endif
 
 # Set the Operator SDK version to use. By default, what is installed on the system is used.
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
-OPERATOR_SDK_VERSION ?= v1.31.0
+OPERATOR_SDK_VERSION ?= v1.41.1
 
 # Image URL to use all building/pushing image targets
 DEFAULT_IMG ?= quay.io/openstack-k8s-operators/infra-operator:latest
@@ -98,7 +98,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: gowork controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases && \
-	rm -f apis/bases/* && cp -a config/crd/bases apis/
+	rm -f api/bases/* && cp -a config/crd/bases api/
 
 .PHONY: generate
 generate: gowork controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -111,12 +111,12 @@ fmt: ## Run go fmt against code.
 .PHONY: vet
 vet: gowork ## Run go vet against code.
 	go vet ./...
-	go vet ./apis/...
+	go vet ./api/...
 
 .PHONY: tidy
 tidy: ## Run go mod tidy on every mod file in the repo
 	go mod tidy
-	cd ./apis && go mod tidy
+	cd ./api && go mod tidy
 
 PROCS?=$(shell expr $(shell nproc --ignore 2) / 2)
 PROC_CMD = --procs ${PROCS}
@@ -125,13 +125,13 @@ PROC_CMD = --procs ${PROCS}
 test: manifests generate gowork fmt vet envtest ginkgo ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" \
 	OPERATOR_TEMPLATES="$(PWD)/templates" \
-	$(GINKGO) --trace --cover --coverpkg=./pkg/...,./controllers/...,./apis/network/v1beta1/... --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./tests/... ./apis/network/...
+	$(GINKGO) --trace --cover --coverpkg=./internal/...,./api/network/v1beta1/... --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/... ./api/network/...
 
 ##@ Build
 
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
-	go build -o bin/manager main.go
+	go build -o bin/manager cmd/main.go
 
 .PHONY: run
 run: export METRICS_PORT?=8080
@@ -141,7 +141,7 @@ run: export OPERATOR_TEMPLATES=./templates
 run: export ENABLE_WEBHOOKS?=false
 run: manifests generate fmt vet ## Run a controller from your host.
 	/bin/bash hack/clean_local_webhook.sh
-	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)" -pprof-bind-address ":$(PPROF_PORT)"
+	go run ./cmd/main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)" -pprof-bind-address ":$(PPROF_PORT)"
 
 # If you wish built the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64 ). However, you must enable docker buildKit for it.
@@ -208,7 +208,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 GINKGO ?= $(LOCALBIN)/ginkgo
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v3.8.7
+KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.18.0
 GOTOOLCHAIN_VERSION ?= go1.24.0
 
@@ -329,12 +329,12 @@ get-ci-tools:
 # Run go fmt against code
 gofmt: get-ci-tools
 	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/gofmt.sh
-	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/gofmt.sh ./apis
+	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/gofmt.sh ./api
 
 # Run go vet against code
 govet: get-ci-tools
 	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/govet.sh
-	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/govet.sh  ./apis
+	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/govet.sh  ./api
 
 # Run go test against code
 gotest: test
@@ -342,24 +342,24 @@ gotest: test
 # Run golangci-lint test against code
 golangci: get-ci-tools
 	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/golangci.sh
-	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/golangci.sh  ./apis
+	GOWORK=off $(CI_TOOLS_REPO_DIR)/test-runner/golangci.sh  ./api
 
 # Run go lint against code
 golint: get-ci-tools
 	GOWORK=off PATH=$(GOBIN):$(PATH); $(CI_TOOLS_REPO_DIR)/test-runner/golint.sh
-	GOWORK=off PATH=$(GOBIN):$(PATH); $(CI_TOOLS_REPO_DIR)/test-runner/golint.sh ./apis
+	GOWORK=off PATH=$(GOBIN):$(PATH); $(CI_TOOLS_REPO_DIR)/test-runner/golint.sh ./api
 
 .PHONY: gowork
 gowork: ## Generate go.work file to support our multi module repository
 	test -f go.work || GOTOOLCHAIN=$(GOTOOLCHAIN_VERSION) go work init
 	go work use .
-	go work use ./apis
+	go work use ./api
 	go work sync
 
 .PHONY: operator-lint
 operator-lint: gowork ## Runs operator-lint
 	GOBIN=$(LOCALBIN) go install github.com/gibizer/operator-lint@v0.3.0
-	go vet -vettool=$(LOCALBIN)/operator-lint ./... ./apis/...
+	go vet -vettool=$(LOCALBIN)/operator-lint ./... ./api/...
 
 # Used for webhook testing
 # The configure_local_webhook.sh script below will remove any OLM webhooks
@@ -383,8 +383,8 @@ force-bump: ## Force bump operator and lib-common dependencies
 	for dep in $$(cat go.mod | grep openstack-k8s-operators | grep -vE -- 'indirect|infra-operator|^replace' | awk '{print $$1}'); do \
 		go get $$dep@$(BRANCH) ; \
 	done
-	for dep in $$(cat apis/go.mod | grep openstack-k8s-operators | grep -vE -- 'indirect|infra-operator|^replace' | awk '{print $$1}'); do \
-		cd ./apis && go get $$dep@$(BRANCH) && cd .. ; \
+	for dep in $$(cat api/go.mod | grep openstack-k8s-operators | grep -vE -- 'indirect|infra-operator|^replace' | awk '{print $$1}'); do \
+		cd ./api && go get $$dep@$(BRANCH) && cd .. ; \
 	done
 
 CRD_SCHEMA_CHECKER_VERSION ?= release-4.16
