@@ -130,6 +130,11 @@ func ConfigureCluster(
 		}
 	}
 
+	// Apply service override if provided
+	if override != nil && override.Service != nil {
+		cluster.Spec.Override.Service = override.Service
+	}
+
 	if cluster.Spec.Override.StatefulSet.Spec.Template.Spec.NodeSelector == nil {
 		if nodeselector != nil {
 			cluster.Spec.Override.StatefulSet.Spec.Template.Spec.NodeSelector = *nodeselector
