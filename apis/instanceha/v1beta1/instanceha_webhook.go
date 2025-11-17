@@ -21,7 +21,6 @@ package v1beta1
 
 import (
 	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -46,15 +45,6 @@ func SetupInstanceHaDefaults(defaults InstanceHaDefaults) {
 	instancehalog.Info("InstanceHa defaults initialized", "defaults", defaults)
 }
 
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *InstanceHa) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-client-openstack-org-v1beta1-instanceha,mutating=true,failurePolicy=fail,sideEffects=None,groups=client.openstack.org,resources=instancehas,verbs=create;update,versions=v1beta1,name=minstanceha.kb.io,admissionReviewVersions=v1
-
 var _ webhook.Defaulter = &InstanceHa{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
@@ -69,10 +59,25 @@ func (spec *InstanceHaSpec) Default() {
 	if spec.ContainerImage == "" {
 		spec.ContainerImage = instanceHaDefaults.ContainerImageURL
 	}
+	if spec.OpenStackCloud == "" {
+                spec.OpenStackCloud = OpenStackCloud
+        }
+        if spec.OpenStackConfigMap == "" {
+                spec.OpenStackConfigMap = "openstack-config"
+        }
+        if spec.OpenStackConfigSecret == "" {
+                spec.OpenStackConfigSecret = "openstack-config-secret"
+        }
+        if spec.FencingSecret == "" {
+                spec.FencingSecret = "fencing-secret"
+        }
+        if spec.InstanceHaConfigMap == "" {
+                spec.InstanceHaConfigMap = "instanceha-config"
+        }
+        if spec.InstanceHaKdumpPort == 0 {
+                spec.InstanceHaKdumpPort = 7410
+        }
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-client-openstack-org-v1beta1-instanceha,mutating=false,failurePolicy=fail,sideEffects=None,groups=client.openstack.org,resources=instancehas,verbs=create;update,versions=v1beta1,name=vinstanceha.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &InstanceHa{}
 

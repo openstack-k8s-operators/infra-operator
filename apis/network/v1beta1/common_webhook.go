@@ -16,6 +16,12 @@ import (
 // to any particular webhook)
 var webhookClient goClient.Client
 
+// SetWebhookClient sets the webhook client for use in validation functions
+func SetWebhookClient(client goClient.Client) error {
+	webhookClient = client
+	return nil
+}
+
 const (
 	errNotIPAddr              = "not an IP address"
 	errInvalidCidr            = "IP address prefix (CIDR) %s"

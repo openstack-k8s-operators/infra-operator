@@ -87,7 +87,7 @@ type RabbitMqSpecCore struct {
 	PodOverride *PodOverride `json:"podOverride,omitempty"`
 }
 
-// Method to convert RabbitMqSpec to RabbitmqClusterSpec
+// MarshalInto converts RabbitMqSpec to RabbitmqClusterSpec.
 // Need to Marshal/Unmarshal to convert rabbitmqv2.RabbitmqClusterSpecCore to rabbitmqv2.RabbitmqClusterSpec
 // as they are distinct types instead of inlined.
 // NOTE(owalsh): override.statefulset will be ignored by json.Unmarshal
@@ -197,6 +197,7 @@ func (instance *RabbitMqSpecCore) ValidateTopology(
 	return allErrs
 }
 
+// ValidateOverride validates the override section of RabbitMqSpecCore.
 func (instance *RabbitMqSpecCore) ValidateOverride(
 	basePath *field.Path,
 	namespace string,

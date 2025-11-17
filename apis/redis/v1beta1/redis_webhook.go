@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
         "k8s.io/apimachinery/pkg/runtime/schema"
         "k8s.io/apimachinery/pkg/util/validation/field"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -51,15 +50,6 @@ func SetupRedisDefaults(defaults RedisDefaults) {
 	redislog.Info("Redis defaults initialized", "defaults", defaults)
 }
 
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *Redis) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-redis-openstack-org-v1beta1-redis,mutating=true,failurePolicy=fail,sideEffects=None,groups=redis.openstack.org,resources=redises,verbs=create;update,versions=v1beta1,name=mredis.kb.io,admissionReviewVersions=v1
-
 var _ webhook.Defaulter = &Redis{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
@@ -77,13 +67,10 @@ func (spec *RedisSpec) Default() {
 	spec.RedisSpecCore.Default()
 }
 
-// Default - common validations go here (for the OpenStackControlplane which uses this one)
+// Default - common defaults go here (for the OpenStackControlplane which uses this one)
 func (spec *RedisSpecCore) Default() {
 	//nothing to validate yet
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-redis-openstack-org-v1beta1-redis,mutating=false,failurePolicy=fail,sideEffects=None,groups=redis.openstack.org,resources=redises,verbs=create;update,versions=v1beta1,name=vredis.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &Redis{}
 

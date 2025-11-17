@@ -9,10 +9,52 @@ resources:
 - role_binding.yaml
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
-# Comment the following 4 lines if you want to disable
-# the auth proxy (https://github.com/brancz/kube-rbac-proxy)
-# which protects your /metrics endpoint.
-- auth_proxy_service.yaml
-- auth_proxy_role.yaml
-- auth_proxy_role_binding.yaml
-- auth_proxy_client_clusterrole.yaml
+# The following RBAC configurations are used to protect
+# the metrics endpoint with authn/authz. These configurations
+# ensure that only authorized users and service accounts
+# can access the metrics endpoint. Comment the following
+# permissions if you want to disable this protection.
+# More info: https://book.kubebuilder.io/reference/metrics.html
+- metrics_auth_role.yaml
+- metrics_auth_role_binding.yaml
+- metrics_reader_role.yaml
+# For each CRD, "Admin", "Editor" and "Viewer" roles are scaffolded by
+# default, aiding admins in cluster management. Those roles are
+# not used by the infra-operator itself. You can comment the following lines
+# if you do not want those helpers be installed with your Project.
+- rabbitmq_rabbitmq_admin_role.yaml
+- rabbitmq_rabbitmq_editor_role.yaml
+- rabbitmq_rabbitmq_viewer_role.yaml
+- network_bgpconfiguration_admin_role.yaml
+- network_bgpconfiguration_editor_role.yaml
+- network_bgpconfiguration_viewer_role.yaml
+- topology_topology_admin_role.yaml
+- topology_topology_editor_role.yaml
+- topology_topology_viewer_role.yaml
+- network_ipset_admin_role.yaml
+- network_ipset_editor_role.yaml
+- network_ipset_viewer_role.yaml
+- network_reservation_admin_role.yaml
+- network_reservation_editor_role.yaml
+- network_reservation_viewer_role.yaml
+- network_netconfig_admin_role.yaml
+- network_netconfig_editor_role.yaml
+- network_netconfig_viewer_role.yaml
+- network_dnsdata_admin_role.yaml
+- network_dnsdata_editor_role.yaml
+- network_dnsdata_viewer_role.yaml
+- network_dnsmasq_admin_role.yaml
+- network_dnsmasq_editor_role.yaml
+- network_dnsmasq_viewer_role.yaml
+- redis_redis_admin_role.yaml
+- redis_redis_editor_role.yaml
+- redis_redis_viewer_role.yaml
+- instanceha_instanceha_admin_role.yaml
+- instanceha_instanceha_editor_role.yaml
+- instanceha_instanceha_viewer_role.yaml
+- memcached_memcached_admin_role.yaml
+- memcached_memcached_editor_role.yaml
+- memcached_memcached_viewer_role.yaml
+- rabbitmq_transporturl_admin_role.yaml
+- rabbitmq_transporturl_editor_role.yaml
+- rabbitmq_transporturl_viewer_role.yaml

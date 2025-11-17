@@ -69,6 +69,11 @@ spec:
       - description: NodeSelector to target subset of worker nodes running this service
         displayName: Node Selector
         path: nodeSelector
+      - description: |-
+          QueueType to eventually apply the ha-all policy or configure default queue type for the cluster.
+          Allowed values are: None, Mirrored, Quorum. Defaults to Quorum if not specified.
+        displayName: Queue Type
+        path: queueType
       version: v1beta1
     - description: Redis is the Schema for the redises API
       displayName: Redis
@@ -83,6 +88,11 @@ spec:
       displayName: Reservation
       kind: Reservation
       name: reservations.network.openstack.org
+      version: v1beta1
+    - description: Topology is the Schema for the topologies API
+      displayName: Topology
+      kind: Topology
+      name: topologies.topology.openstack.org
       version: v1beta1
     - description: TransportURL is the Schema for the transporturls API
       displayName: Transport URL
@@ -111,6 +121,7 @@ spec:
   - name: Infra Operator
     url: https://github.com/openstack-k8s-operators/infra-operator
   maturity: beta
+  minKubeVersion: 0.0.0
   provider:
     name: Red Hat Inc.
     url: https://redhat.com/

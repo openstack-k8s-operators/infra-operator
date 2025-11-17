@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -51,15 +50,6 @@ func SetupMemcachedDefaults(defaults MemcachedDefaults) {
 	memcachedlog.Info("Memcached defaults initialized", "defaults", defaults)
 }
 
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *Memcached) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-memcached-openstack-org-v1beta1-memcached,mutating=true,failurePolicy=fail,sideEffects=None,groups=memcached.openstack.org,resources=memcacheds,verbs=create;update,versions=v1beta1,name=mmemcached.kb.io,admissionReviewVersions=v1
-
 var _ webhook.Defaulter = &Memcached{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
@@ -77,13 +67,10 @@ func (spec *MemcachedSpec) Default() {
 	spec.MemcachedSpecCore.Default()
 }
 
-// Default - common validations go here (for the OpenStackControlplane which uses this one)
+// Default - common defaults go here (for the OpenStackControlplane which uses this one)
 func (spec *MemcachedSpecCore) Default() {
 	// nothing here
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-memcached-openstack-org-v1beta1-memcached,mutating=false,failurePolicy=fail,sideEffects=None,groups=memcached.openstack.org,resources=memcacheds,verbs=create;update,versions=v1beta1,name=vmemcached.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &Memcached{}
 

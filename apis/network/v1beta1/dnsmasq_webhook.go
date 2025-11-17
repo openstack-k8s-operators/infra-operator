@@ -18,7 +18,6 @@ package v1beta1
 
 import (
 	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -43,15 +42,6 @@ func SetupDNSMasqDefaults(defaults DNSMasqDefaults) {
 	dnsmasqlog.Info("DNSMasq defaults initialized", "defaults", defaults)
 }
 
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *DNSMasq) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-network-openstack-org-v1beta1-dnsmasq,mutating=true,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=dnsmasqs,verbs=create;update,versions=v1beta1,name=mdnsmasq.kb.io,admissionReviewVersions=v1
-
 var _ webhook.Defaulter = &DNSMasq{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
@@ -69,13 +59,10 @@ func (spec *DNSMasqSpec) Default() {
 	spec.DNSMasqSpecCore.Default()
 }
 
-// Default - common validations go here (for the OpenStackControlplane which uses this one)
+// Default - common defaults go here (for the OpenStackControlplane which uses this one)
 func (spec *DNSMasqSpecCore) Default() {
 	// nothing here
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-dnsmasq,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=dnsmasqs,verbs=create;update,versions=v1beta1,name=vdnsmasq.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &DNSMasq{}
 

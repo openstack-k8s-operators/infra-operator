@@ -4,7 +4,7 @@
 # More info: https://book.kubebuilder.io/reference/project-config.html
 domain: openstack.org
 layout:
-- go.kubebuilder.io/v3
+- go.kubebuilder.io/v4
 multigroup: true
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
@@ -55,7 +55,6 @@ resources:
   group: redis
   kind: Redis
   path: github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1
-  plural: redises
   version: v1beta1
   webhooks:
     defaulting: true
@@ -86,6 +85,7 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: openstack.org
   group: network
   kind: NetConfig
@@ -98,6 +98,7 @@ resources:
 - api:
     crdVersion: v1
     namespaced: true
+  controller: true
   domain: openstack.org
   group: network
   kind: Reservation
@@ -120,6 +121,15 @@ resources:
     defaulting: true
     validation: true
     webhookVersion: v1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
+  group: topology
+  kind: Topology
+  path: github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: true

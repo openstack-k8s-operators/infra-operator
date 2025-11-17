@@ -30,7 +30,8 @@ const (
 
 	// InstanceHaContainerImage is the fall-back container image for InstanceHa
 	InstanceHaContainerImage = "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
-	OpenStackCloud           = "default"
+	// OpenStackCloud is the default cloud name to use
+	OpenStackCloud = "default"
 )
 
 // InstanceHaSpec defines the desired state of InstanceHa

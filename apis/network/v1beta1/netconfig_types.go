@@ -29,8 +29,11 @@ import (
 type NetNameStr string
 
 // +kubebuilder:validation:Pattern="^[a-z0-9][a-z0-9\\-_]*[a-z0-9]$"
+
+// ServiceNetNameStr is used for validation of a service network name.
 type ServiceNetNameStr string
 
+// ToDefaultServiceNetwork converts a NetNameStr to a ServiceNetNameStr by lowercasing it.
 func ToDefaultServiceNetwork(n NetNameStr) ServiceNetNameStr {
 	return ServiceNetNameStr(strings.ToLower(string(n)))
 }

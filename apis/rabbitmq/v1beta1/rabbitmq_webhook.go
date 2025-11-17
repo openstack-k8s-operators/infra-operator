@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -51,16 +50,6 @@ func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 	rabbitMqDefaults = defaults
 	rabbitmqlog.Info("RabbitMq defaults initialized", "defaults", defaults)
 }
-
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *RabbitMq) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	webhookClient = mgr.GetClient()
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-rabbitmq-openstack-org-v1beta1-rabbitmq,mutating=true,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=create;update,versions=v1beta1,name=mrabbitmq.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Defaulter = &RabbitMq{}
 
@@ -125,9 +114,6 @@ func (spec *RabbitMqSpecCore) Default(isNew bool) {
 		spec.QueueType = &queueType
 	}
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-rabbitmq-openstack-org-v1beta1-rabbitmq,mutating=false,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=create;update,versions=v1beta1,name=vrabbitmq.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &RabbitMq{}
 
@@ -195,28 +181,30 @@ func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) 
 	return allWarn, nil
 }
 
-func (r *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
+// ValidateCreate performs validation when creating a new RabbitMqSpecCore.
+func (spec *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
 	var allWarn []string
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	allErrs = append(allErrs, r.ValidateTopology(basePath, namespace)...)
-	warn, errs := r.ValidateOverride(basePath, namespace)
+	allErrs = append(allErrs, spec.ValidateTopology(basePath, namespace)...)
+	warn, errs := spec.ValidateOverride(basePath, namespace)
 	allWarn = append(allWarn, warn...)
 	allErrs = append(allErrs, errs...)
 
 	return allWarn, allErrs
 }
 
-func (r *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
+// ValidateUpdate performs validation when updating an existing RabbitMqSpecCore.
+func (spec *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
 	var allWarn []string
 
 	// When a TopologyRef CR is referenced, fail if a different Namespace is
 	// referenced because is not supported
-	allErrs = append(allErrs, r.ValidateTopology(basePath, namespace)...)
-	warn, errs := r.ValidateOverride(basePath, namespace)
+	allErrs = append(allErrs, spec.ValidateTopology(basePath, namespace)...)
+	warn, errs := spec.ValidateOverride(basePath, namespace)
 	allWarn = append(allWarn, warn...)
 	allErrs = append(allErrs, errs...)
 

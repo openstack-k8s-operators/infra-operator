@@ -84,7 +84,7 @@ type MemcachedSpecCore struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
-// TLSSection
+// TLSSection contains TLS and MTLS configuration
 type TLSSection struct {
 	tls.SimpleService `json:",inline"`
 
@@ -92,6 +92,7 @@ type TLSSection struct {
 	MTLS MTLSSection `json:"mtls,omitempty"`
 }
 
+// MTLSSection contains mutual TLS configuration
 type MTLSSection struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Enum="None";"Request";"Require"
