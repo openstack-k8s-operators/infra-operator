@@ -589,4 +589,115 @@ var _ = Describe("RabbitMQ Controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 	})
+
+	When("RabbitMQ per-pod services are deleted when podOverride is removed", func() {
+		BeforeEach(func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = 3
+			spec["queueType"] = "None"
+			spec["podOverride"] = map[string]any{
+				"services": []map[string]any{
+					{
+						"spec": map[string]any{
+							"type": string(corev1.ServiceTypeLoadBalancer),
+						},
+					},
+					{
+						"spec": map[string]any{
+							"type": string(corev1.ServiceTypeLoadBalancer),
+						},
+					},
+					{
+						"spec": map[string]any{
+							"type": string(corev1.ServiceTypeLoadBalancer),
+						},
+					},
+				},
+			}
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("should delete per-pod services when podOverride is removed", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Verify services are created
+			Eventually(func(g Gomega) {
+				for i := 0; i < 3; i++ {
+					svcName := types.NamespacedName{
+						Name:      fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i),
+						Namespace: namespace,
+					}
+					svc := &corev1.Service{}
+					g.Expect(k8sClient.Get(ctx, svcName, svc)).Should(Succeed())
+				}
+			}, timeout, interval).Should(Succeed())
+
+			// Remove podOverride
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				instance.Spec.PodOverride = nil
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify services are deleted
+			Eventually(func(g Gomega) {
+				for i := 0; i < 3; i++ {
+					svcName := types.NamespacedName{
+						Name:      fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i),
+						Namespace: namespace,
+					}
+					svc := &corev1.Service{}
+					err := k8sClient.Get(ctx, svcName, svc)
+					g.Expect(err).To(HaveOccurred())
+					g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQ per-pod services with podOverride", func() {
+		BeforeEach(func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = 2
+			spec["queueType"] = "None"
+			spec["podOverride"] = map[string]any{
+				"services": []map[string]any{
+					{
+						"spec": map[string]any{
+							"type": string(corev1.ServiceTypeLoadBalancer),
+						},
+					},
+					{
+						"spec": map[string]any{
+							"type": string(corev1.ServiceTypeLoadBalancer),
+						},
+					},
+				},
+			}
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("should create per-pod services with owner references for automatic cleanup", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Verify services are created with owner references
+			Eventually(func(g Gomega) {
+				for i := 0; i < 2; i++ {
+					svcName := types.NamespacedName{
+						Name:      fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i),
+						Namespace: namespace,
+					}
+					svc := &corev1.Service{}
+					g.Expect(k8sClient.Get(ctx, svcName, svc)).Should(Succeed())
+
+					// Verify service has owner reference to RabbitMq CR
+					g.Expect(svc.OwnerReferences).NotTo(BeEmpty())
+					g.Expect(svc.OwnerReferences[0].Kind).To(Equal("RabbitMq"))
+					g.Expect(svc.OwnerReferences[0].Name).To(Equal(rabbitmqDefaultName))
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
 })
