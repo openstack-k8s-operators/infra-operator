@@ -19,6 +19,7 @@ package rabbitmq
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -237,20 +238,6 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	var host string
-	if h, ok := rabbitSecret.Data["host"]; ok {
-		host = string(h)
-	} else {
-		err := fmt.Errorf("host does not exist in rabbitmq secret %s", rabbitSecret.Name)
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.TransportURLReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			rabbitmqv1.TransportURLReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
-	}
-
 	var port string
 	if p, ok := rabbitSecret.Data["port"]; ok {
 		port = string(p)
@@ -265,40 +252,51 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
+	// Get RabbitMq CR to check for service hostnames in status
+	rabbitmqCR := &rabbitmqv1.RabbitMq{}
+	err = r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitmqCR)
+	if err != nil && !k8s_errors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	// Build list of hosts - use ServiceHostnames from status if available, otherwise use host from secret
+	var hosts []string
+	if len(rabbitmqCR.Status.ServiceHostnames) > 0 {
+		hosts = rabbitmqCR.Status.ServiceHostnames
+	} else {
+		h, ok := rabbitSecret.Data["host"]
+		if !ok {
+			err := fmt.Errorf("host does not exist in rabbitmq secret %s", rabbitSecret.Name)
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.TransportURLReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.TransportURLReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		hosts = []string{string(h)}
+	}
+
 	tlsEnabled := rabbit.Spec.TLS.SecretName != ""
 
 	Log.Info(fmt.Sprintf("rabbitmq cluster %s has TLS enabled: %t", rabbit.Name, tlsEnabled))
 
-	// Get RabbitMq CR for both secret generation and status update
-	rabbitmqCR := &rabbitmqv1.RabbitMq{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitmqCR)
+	// Determine quorum setting and update status if RabbitMQ CR is available
+	quorum := rabbitmqCR.Status.QueueType == "Quorum"
+	if rabbitmqCR.Status.QueueType != instance.Status.QueueType {
+		Log.Info(fmt.Sprintf("Updating transportURL Status.QueueType from %s to %s", instance.Status.QueueType, rabbitmqCR.Status.QueueType))
+		instance.Status.QueueType = rabbitmqCR.Status.QueueType
 
-	// Determine quorum setting for secret generation
-	quorum := false
-	if err != nil {
-		Log.Info(fmt.Sprintf("Could not fetch RabbitMQ CR: %v", err))
-		// Default to false for quorum if we can't fetch the CR
-	} else {
-		Log.Info(fmt.Sprintf("Found RabbitMQ CR: %s", rabbitmqCR.Name))
-
-		quorum = rabbitmqCR.Status.QueueType == "Quorum"
-		Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType", quorum))
-
-		// Update QueueType and add annotation to signal change
-		if rabbitmqCR.Status.QueueType != instance.Status.QueueType {
-			Log.Info(fmt.Sprintf("Updating transportURL Status.QueueType from %s to %s", instance.Status.QueueType, rabbitmqCR.Status.QueueType))
-			instance.Status.QueueType = rabbitmqCR.Status.QueueType
-
-			// Signal change to dependent controllers via annotation
-			if instance.Annotations == nil {
-				instance.Annotations = make(map[string]string)
-			}
-			instance.Annotations["rabbitmq.openstack.org/queuetype-hash"] = fmt.Sprintf("%s-%d", rabbitmqCR.Status.QueueType, time.Now().Unix())
+		// Signal change to dependent controllers via annotation
+		if instance.Annotations == nil {
+			instance.Annotations = make(map[string]string)
 		}
+		instance.Annotations["rabbitmq.openstack.org/queuetype-hash"] = fmt.Sprintf("%s-%d", rabbitmqCR.Status.QueueType, time.Now().Unix())
 	}
 
 	// Create a new secret with the transport URL for this CR
-	secret := r.createTransportURLSecret(instance, string(username), string(password), string(host), string(port), tlsEnabled, quorum)
+	secret := r.createTransportURLSecret(instance, string(username), string(password), hosts, string(port), tlsEnabled, quorum)
 	_, op, err := oko_secret.CreateOrPatchSecret(ctx, helper, instance, secret)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -338,7 +336,7 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	instance *rabbitmqv1.TransportURL,
 	username string,
 	password string,
-	host string,
+	hosts []string,
 	port string,
 	tlsEnabled bool,
 	quorum bool,
@@ -350,9 +348,16 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 		query += "?ssl=0"
 	}
 
+	// Build transport URL with all hosts
+	var hostParts []string
+	for _, host := range hosts {
+		hostParts = append(hostParts, fmt.Sprintf("%s:%s@%s:%s", username, password, host, port))
+	}
+	transportURL := fmt.Sprintf("rabbit://%s/%s", strings.Join(hostParts, ","), query)
+
 	// Create a new secret with the transport URL for this CR
 	data := map[string][]byte{
-		"transport_url": fmt.Appendf(nil, "rabbit://%s:%s@%s:%s/%s", username, password, host, port, query),
+		"transport_url": []byte(transportURL),
 	}
 	if quorum {
 		data["quorumqueues"] = []byte("true")

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
@@ -41,6 +42,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/go-logr/logr"
+	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
+	"github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq"
+	"github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/impl"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
@@ -48,15 +54,10 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/ocp"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pdb"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-
-	"github.com/go-logr/logr"
-	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
-	"github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq"
-	"github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/impl"
-
-	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -102,6 +103,9 @@ type Reconciler struct {
 
 // Required to manage PodDisruptionBudgets for multi-replica deployments
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+
+// Required to create per-pod LoadBalancer services
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile - RabbitMq
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -178,6 +182,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
 		// PDB ready
 		condition.UnknownCondition(condition.PDBReadyCondition, condition.InitReason, condition.PDBReadyInitMessage),
+		// per-pod services ready
+		condition.UnknownCondition(condition.CreateServiceReadyCondition, condition.InitReason, condition.CreateServiceReadyInitMessage),
 	)
 
 	instance.Status.Conditions.Init(&cl)
@@ -395,14 +401,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 
+		labelMap := map[string]string{
+			labels.K8sAppName:      instance.Name,
+			labels.K8sAppComponent: "rabbitmq",
+			labels.K8sAppPartOf:    "rabbitmq",
+		}
+
 		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
 			// Apply PDB for multi-replica deployments
-			labelMap := map[string]string{
-				labels.K8sAppName:      instance.Name,
-				labels.K8sAppComponent: "rabbitmq",
-				labels.K8sAppPartOf:    "rabbitmq",
-			}
-
 			pdbSpec := pdb.MaxUnavailablePodDisruptionBudget(
 				instance.Name,
 				instance.Namespace,
@@ -423,6 +429,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			}
 		}
 		instance.Status.Conditions.MarkTrue(condition.PDBReadyCondition, condition.PDBReadyMessage)
+
+		// Create per-pod services when podOverride is configured
+		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 0 &&
+			instance.Spec.PodOverride != nil && len(instance.Spec.PodOverride.Services) > 0 {
+			ctrlResult, err := r.reconcilePerPodServices(ctx, instance, helper, labelMap)
+			if err != nil {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.CreateServiceReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.CreateServiceReadyErrorMessage, err.Error()))
+				return ctrlResult, err
+			} else if (ctrlResult != ctrl.Result{}) {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.CreateServiceReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					condition.CreateServiceReadyRunningMessage))
+				return ctrlResult, nil
+			}
+		}
+		instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
 		// Let's wait DeploymentReadyCondition=True to apply the policy
 		// QueueType should never be nil due to webhook defaulting, but add safety check
@@ -468,6 +496,94 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
+	return ctrl.Result{}, nil
+}
+
+func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper, labelMap map[string]string) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+
+	if instance.Spec.PodOverride == nil || len(instance.Spec.PodOverride.Services) == 0 {
+		Log.Info("PodOverride not configured, skipping per-pod service creation")
+		instance.Status.ServiceHostnames = nil
+		return ctrl.Result{}, nil
+	}
+
+	replicas := int(*instance.Spec.Replicas)
+
+	if len(instance.Spec.PodOverride.Services) != replicas {
+		return ctrl.Result{}, fmt.Errorf("number of services in podOverride (%d) must match number of replicas (%d)", len(instance.Spec.PodOverride.Services), replicas)
+	}
+
+	Log.Info("Creating per-pod services using podOverride configuration")
+
+	var serviceHostnames []string
+	var requeueNeeded bool
+	for i := 0; i < replicas; i++ {
+		podName := fmt.Sprintf("%s-server-%d", instance.Name, i)
+		svcName := podName
+
+		svc, err := service.NewService(
+			service.GenericService(&service.GenericServiceDetails{
+				Name:      svcName,
+				Namespace: instance.Namespace,
+				Labels:    labelMap,
+				Selector: map[string]string{
+					appsv1.StatefulSetPodNameLabel: podName,
+				},
+				Ports: []corev1.ServicePort{
+					{Name: "amqp", Port: 5672, TargetPort: intstr.FromInt(5672)},
+					{Name: "amqps", Port: 5671, TargetPort: intstr.FromInt(5671)},
+				},
+			}),
+			5,
+			&instance.Spec.PodOverride.Services[i],
+		)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.CreateServiceReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.CreateServiceReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
+		}
+
+		if svc.GetServiceType() == corev1.ServiceTypeLoadBalancer {
+			svc.AddAnnotation(map[string]string{
+				service.AnnotationHostnameKey: svc.GetServiceHostname(),
+			})
+		}
+
+		ctrlResult, err := svc.CreateOrPatch(ctx, helper)
+		if err != nil {
+			// Check if this is a LoadBalancer IP pending error - if so, continue with other services
+			if k8s_errors.IsServiceUnavailable(err) || strings.Contains(err.Error(), "LoadBalancer IP still pending") {
+				requeueNeeded = true
+			} else {
+				// Real error, return immediately
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.CreateServiceReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.CreateServiceReadyErrorMessage, err.Error()))
+				return ctrlResult, err
+			}
+		} else if (ctrlResult != ctrl.Result{}) {
+			requeueNeeded = true
+		}
+
+		serviceHostnames = append(serviceHostnames, svc.GetServiceHostname())
+		instance.Status.ServiceHostnames = serviceHostnames
+	}
+
+	if requeueNeeded {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.CreateServiceReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.CreateServiceReadyRunningMessage))
+		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
