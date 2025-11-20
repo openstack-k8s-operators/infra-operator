@@ -915,6 +915,60 @@ func GetPodAnnotation(namespace string) map[string]string {
 	}
 }
 
+func GetPodAnnotationUnquotedString(namespace string) map[string]string {
+	return map[string]string{
+		k8s_networkv1.NetworkStatusAnnot: fmt.Sprintf(`[{
+    "name": "ovn-kubernetes",
+    "interface": "eth0",
+    "ips": [
+      "192.168.56.59"
+    ],
+    "mac": "0a:58:c0:a8:38:3b",
+    "default": true,
+    "dns": {}
+},{
+    "name": "%s/internalapi",
+    "interface": "internalapi",
+    "ips": [
+      "172.17.0.40"
+    ],
+    "mac": "de:39:07:a1:b5:6b",
+    "dns": {},
+    "gateway": [
+      "172.17.0.1"
+    ]
+}]`, namespace),
+		k8s_networkv1.NetworkAttachmentAnnot: "internalapi",
+	}
+}
+
+func GetPodAnnotationQuotedString(namespace string) map[string]string {
+	return map[string]string{
+		k8s_networkv1.NetworkStatusAnnot: fmt.Sprintf(`[{
+    "name": "ovn-kubernetes",
+    "interface": "eth0",
+    "ips": [
+      "192.168.56.59"
+    ],
+    "mac": "0a:58:c0:a8:38:3b",
+    "default": true,
+    "dns": {}
+},{
+    "name": "%s/internalapi",
+    "interface": "internalapi",
+    "ips": [
+      "172.17.0.40"
+    ],
+    "mac": "de:39:07:a1:b5:6b",
+    "dns": {},
+    "gateway": [
+      "172.17.0.1"
+    ]
+}]`, namespace),
+		k8s_networkv1.NetworkAttachmentAnnot: `"internalapi"`,
+	}
+}
+
 // GetSampleTopologySpec - A sample (and opinionated) Topology Spec used to
 // test Services
 // Note this is just an example that should not be used in production for

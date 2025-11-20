@@ -24,7 +24,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
+	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = Describe("BGPConfiguration controller", func() {
@@ -384,6 +386,191 @@ var _ = Describe("BGPConfiguration controller", func() {
 					g.Expect(k8sClient.Get(ctx, podFrrNameList[idx], frr)).Should(Not(Succeed()))
 				}, timeout, interval).Should(Succeed())
 			}
+		})
+	})
+
+	When("a pod with unquoted string NAD annotation gets created", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			meallbFRRCfgName = types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"}
+			meallbFRRCfg := CreateFRRConfiguration(meallbFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfg).To(Not(BeNil()))
+
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			th.CreatePod(podName, GetPodAnnotationUnquotedString(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = metallbNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
+		})
+
+		It("should have created a FRRConfiguration for the pod", func() {
+			pod := th.GetPod(podName)
+			Expect(pod).To(Not(BeNil()))
+
+			podFrrName := podName.Namespace + "-" + podName.Name
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a pod with quoted string NAD annotation gets created", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			meallbFRRCfgName = types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"}
+			meallbFRRCfg := CreateFRRConfiguration(meallbFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfg).To(Not(BeNil()))
+
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			th.CreatePod(podName, GetPodAnnotationQuotedString(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = metallbNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
+		})
+
+		It("should have created a FRRConfiguration for the pod", func() {
+			pod := th.GetPod(podName)
+			Expect(pod).To(Not(BeNil()))
+
+			podFrrName := podName.Namespace + "-" + podName.Name
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a pod with predictableip label gets created", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+			// create a FRR configuration for a node
+			meallbFRRCfgName = types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"}
+			meallbFRRCfg := CreateFRRConfiguration(meallbFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfg).To(Not(BeNil()))
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			// create pod with predictableip label but no NAD annotation
+			podLabels := map[string]string{
+				networkv1.PredictableIPLabel: "172.67.0.102",
+			}
+
+			// Create pod directly with labels
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName.Name,
+					Namespace: podName.Namespace,
+					Labels:    podLabels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "foo",
+							Image: "foo:latest",
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: 80,
+								},
+							},
+						},
+					},
+					TerminationGracePeriodSeconds: func() *int64 { i := int64(0); return &i }(),
+					NodeName:                      "worker-0",
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).Should(Succeed())
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = metallbNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
+			DeferCleanup(th.DeleteInstance, pod)
+		})
+
+		It("should have created a FRRConfiguration for the pod with predictableip", func() {
+			pod := th.GetPod(podName)
+			Expect(pod).To(Not(BeNil()))
+			Expect(pod.Labels[networkv1.PredictableIPLabel]).To(Equal("172.67.0.102"))
+
+			podFrrName := podName.Namespace + "-" + podName.Name
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.67.0.102/32"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		When("NAD annotation gets added to the pod with predictableip", func() {
+			BeforeEach(func() {
+				// create a nad config with gateway
+				nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+				DeferCleanup(th.DeleteInstance, nad)
+
+				pod := th.GetPod(podName)
+				Expect(pod).To(Not(BeNil()))
+
+				pod.Annotations = GetPodAnnotation(namespace)
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Update(ctx, pod)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should have created a FRRConfiguration with both NAD and predictableip prefixes", func() {
+				pod := th.GetPod(podName)
+				Expect(pod).To(Not(BeNil()))
+				Expect(pod.Labels[networkv1.PredictableIPLabel]).To(Equal("172.67.0.102"))
+
+				podFrrName := podName.Namespace + "-" + podName.Name
+				Eventually(func(g Gomega) {
+					frr := GetFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName})
+					g.Expect(frr).To(Not(BeNil()))
+					// Should have both the NAD IP and the predictable IP
+					g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.17.0.40/32"))  // NAD IP
+					g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.67.0.102/32")) // Predictable IP
+				}, timeout, interval).Should(Succeed())
+			})
 		})
 	})
 })
