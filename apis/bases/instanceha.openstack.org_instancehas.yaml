@@ -56,6 +56,11 @@ spec:
                 description: ContainerImage for the InstanceHa container (will be
                   set to environmental default if empty)
                 type: string
+              customScriptConfigMap:
+                description: |-
+                  CustomScriptConfigMap allows overriding the default instanceha.py script
+                  with a custom script from a pre-created ConfigMap
+                type: string
               fencingSecret:
                 default: fencing-secret
                 description: FencingSecret is the name of the Secret containing the
@@ -197,6 +202,10 @@ spec:
                 type: integer
               podName:
                 description: PodName
+                type: string
+              unsupported:
+                description: Unsupported - indicates when unsupported configurations
+                  are used
                 type: string
             type: object
         type: object

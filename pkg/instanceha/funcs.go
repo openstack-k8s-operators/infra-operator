@@ -203,7 +203,12 @@ func instancehaPodVolumes(
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					DefaultMode: &config0644AccessMode,
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: instance.Name + "-sh",
+						Name: func() string {
+							if instance.Spec.CustomScriptConfigMap != nil && *instance.Spec.CustomScriptConfigMap != "" {
+								return *instance.Spec.CustomScriptConfigMap
+							}
+							return instance.Name + "-sh"
+						}(),
 					},
 				},
 			},
