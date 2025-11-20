@@ -449,6 +449,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.CreateServiceReadyRunningMessage))
 				return ctrlResult, nil
 			}
+		} else if len(instance.Status.ServiceHostnames) > 0 {
+			// PodOverride was removed, clean up per-pod services
+			if err := r.deletePerPodServices(ctx, instance); err != nil {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.CreateServiceReadyCondition,
+					condition.ErrorReason,
+					condition.SeverityWarning,
+					condition.CreateServiceReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
+			}
+			instance.Status.ServiceHostnames = nil
 		}
 		instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
@@ -587,6 +598,31 @@ func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabb
 	return ctrl.Result{}, nil
 }
 
+func (r *Reconciler) deletePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) error {
+	// List all services owned by this RabbitMq instance
+	serviceList := &corev1.ServiceList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(instance.Namespace),
+	}
+
+	if err := r.List(ctx, serviceList, listOpts...); err != nil {
+		return err
+	}
+
+	// Delete services that are owned by this RabbitMq instance
+	for _, svc := range serviceList.Items {
+		for _, ownerRef := range svc.GetOwnerReferences() {
+			if ownerRef.UID == instance.UID {
+				if err := r.Delete(ctx, &svc); err != nil && !k8s_errors.IsNotFound(err) {
+					return err
+				}
+				break
+			}
+		}
+	}
+	return nil
+}
+
 func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, config *rest.Config, apply bool) error {
 	cli := helper.GetKClient()
 
@@ -612,6 +648,11 @@ func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *
 func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling Service delete")
+
+	// Delete per-pod services if they exist
+	if err := r.deletePerPodServices(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	rabbitmqCluster := impl.NewRabbitMqCluster(
 		&rabbitmqv2.RabbitmqCluster{
@@ -691,6 +732,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1beta1.RabbitMq{}).
 		Owns(&rabbitmqv2.RabbitmqCluster{}).
+		Owns(&corev1.Service{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
