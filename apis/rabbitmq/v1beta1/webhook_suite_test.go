@@ -30,6 +30,8 @@ import (
 
 	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	//+kubebuilder:scaffold:imports
+	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/test"
 	"k8s.io/apimachinery/pkg/runtime"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -65,16 +67,21 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
+	rabbitmqv2CRDs, err := test.GetCRDDirFromModule(
+		"github.com/rabbitmq/cluster-operator/v2", "../../../go.mod", "config/crd/bases")
+	Expect(err).ShouldNot(HaveOccurred())
+
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "..", "config", "crd", "bases"),
+			rabbitmqv2CRDs,
+		},
 		ErrorIfCRDPathMissing: false,
 		WebhookInstallOptions: envtest.WebhookInstallOptions{
 			Paths: []string{filepath.Join("..", "..", "..", "config", "webhook")},
 		},
 	}
-
-	var err error
 	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
@@ -87,6 +94,9 @@ var _ = BeforeSuite(func() {
 	err = admissionv1beta1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = rabbitmqv2.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	//+kubebuilder:scaffold:scheme
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
@@ -95,8 +105,18 @@ var _ = BeforeSuite(func() {
 
 	// start webhook server using Manager
 	webhookInstallOptions := &testEnv.WebhookInstallOptions
+
+	// Create a scheme with both kscheme and our custom schemes
+	mgrScheme := runtime.NewScheme()
+	err = kscheme.AddToScheme(mgrScheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = AddToScheme(mgrScheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = rabbitmqv2.AddToScheme(mgrScheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: kscheme.Scheme,
+		Scheme: mgrScheme,
 		// NOTE(gibi): disable metrics reporting in test to allow
 		// parallel test execution. Otherwise each instance would like to
 		// bind to the same port
