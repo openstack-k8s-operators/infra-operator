@@ -17,12 +17,17 @@ limitations under the License.
 package v1beta1
 
 import (
+	"context"
+
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
+	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -38,6 +43,9 @@ var rabbitMqDefaults RabbitMqDefaults
 // log is for logging in this package.
 var rabbitmqlog = logf.Log.WithName("rabbitmq-resource")
 
+// webhookClient is the client used by the webhook to query for RabbitMQCluster resources
+var webhookClient client.Client
+
 // SetupRabbitMqDefaults - initialize RabbitMq spec defaults for use with either internal or external webhooks
 func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 	rabbitMqDefaults = defaults
@@ -46,6 +54,7 @@ func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 
 // SetupWebhookWithManager sets up the webhook with the Manager
 func (r *RabbitMq) SetupWebhookWithManager(mgr ctrl.Manager) error {
+	webhookClient = mgr.GetClient()
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(r).
 		Complete()
@@ -59,21 +68,59 @@ var _ webhook.Defaulter = &RabbitMq{}
 func (r *RabbitMq) Default() {
 	rabbitmqlog.Info("default", "name", r.Name)
 
-	r.Spec.Default()
+	isNew := true
+
+	if webhookClient != nil {
+		// First check if existing RabbitMq CR has QueueType set - preserve it across updates
+		existingRabbitMq := &RabbitMq{}
+		err := webhookClient.Get(context.Background(), types.NamespacedName{
+			Name: r.Name, Namespace: r.Namespace,
+		}, existingRabbitMq)
+
+		if err != nil && !apierrors.IsNotFound(err) {
+			// Fail the webhook to avoid making incorrect defaulting decisions
+			rabbitmqlog.Error(err, "failed to get existing RabbitMq CR", "name", r.Name, "namespace", r.Namespace)
+			panic("cannot determine if RabbitMq resource is new or existing due to API error")
+		}
+
+		if err == nil && existingRabbitMq.Spec.QueueType != nil && *existingRabbitMq.Spec.QueueType != "" {
+			r.Spec.QueueType = existingRabbitMq.Spec.QueueType
+			rabbitmqlog.Info("preserving QueueType from existing CR", "name", r.Name, "queueType", *r.Spec.QueueType)
+			isNew = false
+		} else {
+			// Check if RabbitMQCluster exists (upgrade scenario: cluster exists but CR is new)
+			cluster := &rabbitmqv2.RabbitmqCluster{}
+			err = webhookClient.Get(context.Background(), types.NamespacedName{
+				Name: r.Name, Namespace: r.Namespace,
+			}, cluster)
+
+			if err != nil && !apierrors.IsNotFound(err) {
+				// Fail the webhook to avoid making incorrect defaulting decisions
+				rabbitmqlog.Error(err, "failed to get existing RabbitMQCluster", "name", r.Name, "namespace", r.Namespace)
+				panic("cannot determine if RabbitMQCluster is new or existing due to API error")
+			}
+
+			if err == nil && !cluster.CreationTimestamp.IsZero() {
+				isNew = false
+				rabbitmqlog.Info("found existing RabbitMQCluster", "name", r.Name, "creationTimestamp", cluster.CreationTimestamp.String())
+			}
+		}
+	}
+
+	r.Spec.Default(isNew)
 }
 
 // Default - set defaults for this RabbitMq spec
-func (spec *RabbitMqSpec) Default() {
+func (spec *RabbitMqSpec) Default(isNew bool) {
 	if spec.ContainerImage == "" {
 		spec.ContainerImage = rabbitMqDefaults.ContainerImageURL
 	}
-	spec.RabbitMqSpecCore.Default()
+	spec.RabbitMqSpecCore.Default(isNew)
 }
 
-// Default - common validations go here (for the OpenStackControlplane which uses this one)
-func (spec *RabbitMqSpecCore) Default() {
-	// Set a sensible default for QueueType only when not explicitly provided
-	if spec.QueueType == nil || *spec.QueueType == "" {
+// Default - set defaults for this RabbitMqSpecCore
+func (spec *RabbitMqSpecCore) Default(isNew bool) {
+	if isNew && (spec.QueueType == nil || *spec.QueueType == "") {
 		queueType := "Quorum"
 		spec.QueueType = &queueType
 	}
