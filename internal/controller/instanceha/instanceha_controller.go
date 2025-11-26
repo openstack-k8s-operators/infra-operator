@@ -361,11 +361,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// all cert input checks out so report InputReady
 	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
 
-	configVarsHash, err := util.HashOfInputHashes(configVars)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// begin custom script inject
 	cmLabels := labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{})
 	envVars := make(map[string]env.Setter)
@@ -386,7 +381,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, err
 	}
 
+	// Add the script ConfigMap hash to configVars to trigger pod recreation on script changes
+	scriptConfigMapName := instance.Name + "-sh"
+	_, scriptConfigMapHash, err := configmap.GetConfigMapAndHashWithName(ctx, helper, scriptConfigMapName, instance.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	configVars[scriptConfigMapName] = env.SetValue(scriptConfigMapHash)
+
 	// end custom script inject
+
+	// Calculate the config hash AFTER adding the script ConfigMap hash
+	configVarsHash, err := util.HashOfInputHashes(configVars)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Create netattachment
 	nadList := []networkv1.NetworkAttachmentDefinition{}
@@ -602,6 +611,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Owns(&corev1.ConfigMap{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
