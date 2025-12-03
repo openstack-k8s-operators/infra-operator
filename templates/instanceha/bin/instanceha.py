@@ -1,5 +1,7 @@
 #!/usr/libexec/platform-python -tt
 
+# foobar
+
 import os
 import sys
 import time
