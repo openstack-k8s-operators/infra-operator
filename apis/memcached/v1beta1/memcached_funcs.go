@@ -112,9 +112,8 @@ func (instance *Memcached) GetMemcachedMTLSSecret() string {
 	if instance.Spec.TLS.MTLS.SslVerifyMode == "Request" || instance.Spec.TLS.MTLS.SslVerifyMode == "Require" {
 		secret := *instance.Spec.TLS.MTLS.AuthCertSecret.SecretName
 		return secret
-	} else {
-		return ""
 	}
+	return ""
 }
 
 // GetMemcachedByName - gets the Memcached instance

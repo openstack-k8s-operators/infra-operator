@@ -76,7 +76,7 @@ func (tc *TestHelper) CreateMemcached(namespace string, memcachedName string, sp
 	return name
 }
 
-// CreateMemcachedMTLS creates a new Memcached instance with the specified namespace in the Kubernetes cluster.
+// CreateMTLSMemcached creates a new Memcached instance with the specified namespace in the Kubernetes cluster.
 func (tc *TestHelper) CreateMTLSMemcached(namespace string, memcachedName string, spec memcachedv1.MemcachedSpec) types.NamespacedName {
 	name := types.NamespacedName{
 		Name:      memcachedName,

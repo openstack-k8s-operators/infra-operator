@@ -45,6 +45,10 @@ type TopologySpec struct {
 	//TODO: We could add NodeSelector here as it belongs to the same APIGroup
 }
 
+// TopologyStatus defines the observed state of Topology
+type TopologyStatus struct {
+}
+
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 
@@ -52,7 +56,8 @@ type TopologySpec struct {
 type Topology struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              TopologySpec `json:"spec,omitempty"`
+	Spec              TopologySpec   `json:"spec,omitempty"`
+	Status            TopologyStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -225,8 +230,7 @@ func EnsureDeletedTopologyRef(
 	return ctrl.Result{}, nil
 }
 
-// Given a StatefulSet/Deployment/DaemonSet PodTemplateSpec, apply the referenced
-// topology
+// ApplyTo applies the referenced topology to a StatefulSet/Deployment/DaemonSet PodTemplateSpec.
 func (t Topology) ApplyTo(
 	pod *corev1.PodTemplateSpec,
 ) {
@@ -242,10 +246,9 @@ func (t Topology) ApplyTo(
 	}
 }
 
-
-// ensureServiceTopology - when a Topology CR is referenced, remove the
-// finalizer from a previous referenced Topology (if any), and retrieve the
-// newly referenced topology object
+// EnsureServiceTopology removes the finalizer from a previous referenced Topology
+// (if any) when a Topology CR is referenced, and retrieves the newly referenced
+// topology object.
 func EnsureServiceTopology(
 	ctx context.Context,
 	helper *helper.Helper,

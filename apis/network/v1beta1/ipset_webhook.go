@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8snet "k8s.io/utils/net"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -36,19 +35,6 @@ import (
 
 // log is for logging in this package.
 var ipsetlog = logf.Log.WithName("ipset-resource")
-
-// SetupWebhookWithManager sets up the webhook with the Manager
-func (r *IPSet) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	if webhookClient == nil {
-		webhookClient = mgr.GetClient()
-	}
-
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-network-openstack-org-v1beta1-ipset,mutating=true,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=ipsets,verbs=create;update,versions=v1beta1,name=mipset.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Defaulter = &IPSet{}
 
@@ -58,9 +44,6 @@ func (r *IPSet) Default() {
 
 	// TODO(user): fill in your defaulting logic.
 }
-
-// TODO(user): change verbs to "verbs=create;update;delete" if you want to enable deletion validation.
-//+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-ipset,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=ipsets,verbs=create;update,versions=v1beta1,name=vipset.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &IPSet{}
 
@@ -75,7 +58,7 @@ func (r *IPSet) ValidateCreate() (admission.Warnings, error) {
 	}
 	// stop if there is no NetConfig in the namespace.
 	if netcfg == nil {
-		return nil, fmt.Errorf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace())
+		return nil, fmt.Errorf("no NetConfig found in namespace %s, please create one", r.GetNamespace())
 	}
 
 	allErrs := field.ErrorList{}
@@ -126,7 +109,7 @@ func (r *IPSet) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 		}
 		// stop if there is no NetConfig in the namespace.
 		if netcfg == nil {
-			return nil, fmt.Errorf("no NetConfig found in namespace %s. Please create one.", r.GetNamespace())
+			return nil, fmt.Errorf("no NetConfig found in namespace %s, please create one", r.GetNamespace())
 		}
 
 		basePath := field.NewPath("spec")

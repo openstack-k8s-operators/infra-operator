@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8snet "k8s.io/utils/net"
-	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -37,15 +36,6 @@ import (
 
 // log is for logging in this package.
 var netconfiglog = logf.Log.WithName("netconfig-resource")
-
-// SetupWebhookWithManager -
-func (r *NetConfig) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
-		Complete()
-}
-
-//+kubebuilder:webhook:path=/mutate-network-openstack-org-v1beta1-netconfig,mutating=true,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update,versions=v1beta1,name=mnetconfig.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Defaulter = &NetConfig{}
 
@@ -57,8 +47,6 @@ func (r *NetConfig) Default() {
 		}
 	}
 }
-
-//+kubebuilder:webhook:path=/validate-network-openstack-org-v1beta1-netconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=network.openstack.org,resources=netconfigs,verbs=create;update;delete,versions=v1beta1,name=vnetconfig.kb.io,admissionReviewVersions=v1
 
 var _ webhook.Validator = &NetConfig{}
 
@@ -73,7 +61,7 @@ func (r *NetConfig) ValidateCreate() (admission.Warnings, error) {
 	}
 	// stop if there is already a NetConfig in the namespace.
 	if netcfg != nil {
-		return nil, fmt.Errorf("there is already NetConfig %s in namespace %s. There can only be one.", netcfg.GetName(), r.GetNamespace())
+		return nil, fmt.Errorf("there is already NetConfig %s in namespace %s, there can only be one", netcfg.GetName(), r.GetNamespace())
 	}
 
 	allErrs := field.ErrorList{}

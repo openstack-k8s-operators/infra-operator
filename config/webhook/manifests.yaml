@@ -10,12 +10,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /mutate-client-openstack-org-v1beta1-instanceha
+      path: /mutate-instanceha-openstack-org-v1beta1-instanceha
   failurePolicy: Fail
-  name: minstanceha.kb.io
+  name: minstanceha-v1beta1.kb.io
   rules:
   - apiGroups:
-    - client.openstack.org
+    - instanceha.openstack.org
     apiVersions:
     - v1beta1
     operations:
@@ -32,7 +32,7 @@ webhooks:
       namespace: system
       path: /mutate-memcached-openstack-org-v1beta1-memcached
   failurePolicy: Fail
-  name: mmemcached.kb.io
+  name: mmemcached-v1beta1.kb.io
   rules:
   - apiGroups:
     - memcached.openstack.org
@@ -52,7 +52,7 @@ webhooks:
       namespace: system
       path: /mutate-network-openstack-org-v1beta1-dnsmasq
   failurePolicy: Fail
-  name: mdnsmasq.kb.io
+  name: mdnsmasq-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -72,7 +72,7 @@ webhooks:
       namespace: system
       path: /mutate-network-openstack-org-v1beta1-ipset
   failurePolicy: Fail
-  name: mipset.kb.io
+  name: mipset-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -92,7 +92,7 @@ webhooks:
       namespace: system
       path: /mutate-network-openstack-org-v1beta1-netconfig
   failurePolicy: Fail
-  name: mnetconfig.kb.io
+  name: mnetconfig-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -112,7 +112,7 @@ webhooks:
       namespace: system
       path: /mutate-network-openstack-org-v1beta1-reservation
   failurePolicy: Fail
-  name: mreservation.kb.io
+  name: mreservation-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -132,7 +132,7 @@ webhooks:
       namespace: system
       path: /mutate-rabbitmq-openstack-org-v1beta1-rabbitmq
   failurePolicy: Fail
-  name: mrabbitmq.kb.io
+  name: mrabbitmq-v1beta1.kb.io
   rules:
   - apiGroups:
     - rabbitmq.openstack.org
@@ -152,7 +152,7 @@ webhooks:
       namespace: system
       path: /mutate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
-  name: mredis.kb.io
+  name: mredis-v1beta1.kb.io
   rules:
   - apiGroups:
     - redis.openstack.org
@@ -176,12 +176,12 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-client-openstack-org-v1beta1-instanceha
+      path: /validate-instanceha-openstack-org-v1beta1-instanceha
   failurePolicy: Fail
-  name: vinstanceha.kb.io
+  name: vinstanceha-v1beta1.kb.io
   rules:
   - apiGroups:
-    - client.openstack.org
+    - instanceha.openstack.org
     apiVersions:
     - v1beta1
     operations:
@@ -198,7 +198,7 @@ webhooks:
       namespace: system
       path: /validate-memcached-openstack-org-v1beta1-memcached
   failurePolicy: Fail
-  name: vmemcached.kb.io
+  name: vmemcached-v1beta1.kb.io
   rules:
   - apiGroups:
     - memcached.openstack.org
@@ -218,7 +218,7 @@ webhooks:
       namespace: system
       path: /validate-network-openstack-org-v1beta1-dnsmasq
   failurePolicy: Fail
-  name: vdnsmasq.kb.io
+  name: vdnsmasq-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -238,7 +238,7 @@ webhooks:
       namespace: system
       path: /validate-network-openstack-org-v1beta1-ipset
   failurePolicy: Fail
-  name: vipset.kb.io
+  name: vipset-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -258,7 +258,7 @@ webhooks:
       namespace: system
       path: /validate-network-openstack-org-v1beta1-netconfig
   failurePolicy: Fail
-  name: vnetconfig.kb.io
+  name: vnetconfig-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -279,7 +279,7 @@ webhooks:
       namespace: system
       path: /validate-network-openstack-org-v1beta1-reservation
   failurePolicy: Fail
-  name: vreservation.kb.io
+  name: vreservation-v1beta1.kb.io
   rules:
   - apiGroups:
     - network.openstack.org
@@ -299,7 +299,7 @@ webhooks:
       namespace: system
       path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmq
   failurePolicy: Fail
-  name: vrabbitmq.kb.io
+  name: vrabbitmq-v1beta1.kb.io
   rules:
   - apiGroups:
     - rabbitmq.openstack.org
@@ -319,7 +319,7 @@ webhooks:
       namespace: system
       path: /validate-redis-openstack-org-v1beta1-redis
   failurePolicy: Fail
-  name: vredis.kb.io
+  name: vredis-v1beta1.kb.io
   rules:
   - apiGroups:
     - redis.openstack.org
