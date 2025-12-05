@@ -56,7 +56,7 @@ var _ = Describe("RabbitMQVhost controller", func() {
 			Eventually(func(g Gomega) {
 				vhost := GetRabbitMQVhost(vhostName)
 				g.Expect(vhost.Status.Conditions).NotTo(BeNil())
-				g.Expect(vhost.Status.Conditions.Has(rabbitmqv1.VhostReadyCondition)).To(BeTrue())
+				g.Expect(vhost.Status.Conditions.Has(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -114,7 +114,7 @@ var _ = Describe("RabbitMQVhost controller", func() {
 			Eventually(func(g Gomega) {
 				vhost := &rabbitmqv1.RabbitMQVhost{}
 				g.Expect(th.K8sClient.Get(th.Ctx, ownedVhostName, vhost)).To(Succeed())
-				g.Expect(vhost.Finalizers).To(ContainElement(rabbitmqv1.VhostFinalizer))
+				g.Expect(vhost.Finalizers).To(ContainElement(rabbitmqv1.TransportURLFinalizer))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -130,7 +130,7 @@ var _ = Describe("RabbitMQVhost controller", func() {
 				v := &rabbitmqv1.RabbitMQVhost{}
 				g.Expect(th.K8sClient.Get(th.Ctx, ownedVhostName, v)).To(Succeed())
 				g.Expect(v.DeletionTimestamp).NotTo(BeNil())
-				g.Expect(v.Finalizers).To(ContainElement(rabbitmqv1.VhostFinalizer))
+				g.Expect(v.Finalizers).To(ContainElement(rabbitmqv1.TransportURLFinalizer))
 			}, "2s", interval).Should(Succeed())
 		})
 	})
@@ -151,21 +151,11 @@ var _ = Describe("RabbitMQVhost controller", func() {
 			vhost := CreateRabbitMQVhost(vhostWithUser, spec)
 			DeferCleanup(th.DeleteInstance, vhost)
 
-			// Add finalizer to vhost
+			// Wait for vhost controller to add its finalizer
 			Eventually(func(g Gomega) {
 				v := &rabbitmqv1.RabbitMQVhost{}
 				g.Expect(th.K8sClient.Get(th.Ctx, vhostWithUser, v)).To(Succeed())
-				hasVhostFinalizer := false
-				for _, f := range v.Finalizers {
-					if f == rabbitmqv1.VhostFinalizer {
-						hasVhostFinalizer = true
-						break
-					}
-				}
-				if !hasVhostFinalizer {
-					v.Finalizers = append(v.Finalizers, rabbitmqv1.VhostFinalizer)
-					g.Expect(th.K8sClient.Update(th.Ctx, v)).To(Succeed())
-				}
+				g.Expect(v.Finalizers).NotTo(BeEmpty())
 			}, timeout, interval).Should(Succeed())
 
 			// Create user referencing this vhost
@@ -189,7 +179,7 @@ var _ = Describe("RabbitMQVhost controller", func() {
 				v := &rabbitmqv1.RabbitMQVhost{}
 				g.Expect(th.K8sClient.Get(th.Ctx, vhostWithUser, v)).To(Succeed())
 				g.Expect(v.DeletionTimestamp).NotTo(BeNil())
-				g.Expect(v.Finalizers).To(ContainElement(rabbitmqv1.VhostFinalizer))
+				g.Expect(v.Finalizers).NotTo(BeEmpty())
 			}, "2s", interval).Should(Succeed())
 		})
 

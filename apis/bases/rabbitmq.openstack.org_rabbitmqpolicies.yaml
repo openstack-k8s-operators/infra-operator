@@ -85,8 +85,8 @@ spec:
                 description: RabbitmqClusterName - the name of the RabbitMQ cluster
                 type: string
               vhostRef:
-                description: VhostRef - reference to the RabbitMQVhost resource (defaults
-                  to "/")
+                description: VhostRef - reference to the RabbitMQVhost resource (if
+                  empty, uses default vhost "/")
                 type: string
             required:
             - definition

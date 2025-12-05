@@ -68,18 +68,22 @@ func (r *RabbitMQPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	h, _ := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, Log)
 
-	// Initialize status
-	if instance.Status.Conditions == nil {
-		instance.Status.Conditions = condition.Conditions{}
-		cl := condition.CreateList(
-			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
-			condition.UnknownCondition(rabbitmqv1.PolicyReadyCondition, condition.InitReason, rabbitmqv1.PolicyReadyInitMessage),
-		)
-		instance.Status.Conditions.Init(&cl)
-		instance.Status.ObservedGeneration = instance.Generation
-	}
+	// Save a copy of the conditions so that we can restore the LastTransitionTime
+	// when a condition's state doesn't change
+	savedConditions := instance.Status.Conditions.DeepCopy()
+
+	// Initialize status conditions
+	cl := condition.CreateList(
+		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+		condition.UnknownCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.InitReason, rabbitmqv1.RabbitMQPolicyReadyInitMessage),
+	)
+	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	defer func() {
+		// Restore condition timestamps if they haven't changed
+		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
+
 		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
 			instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
@@ -93,21 +97,19 @@ func (r *RabbitMQPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return r.reconcileDelete(ctx, instance, h)
 	}
 
-	// Add finalizer
+	// Add finalizer if not being deleted
 	if !controllerutil.ContainsFinalizer(instance, policyFinalizer) {
 		controllerutil.AddFinalizer(instance, policyFinalizer)
-		return ctrl.Result{Requeue: true}, nil
+		// No need to requeue, the update will trigger a reconcile
+		return ctrl.Result{}, nil
 	}
 
 	return r.reconcileNormal(ctx, instance, h)
 }
 
 func (r *RabbitMQPolicyReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.RabbitMQPolicy, h *helper.Helper) (ctrl.Result, error) {
-	// Determine policy name
+	// Policy name is defaulted by webhook
 	policyName := instance.Spec.Name
-	if policyName == "" {
-		policyName = instance.Name
-	}
 
 	// Determine vhost name
 	vhostName := "/"
@@ -115,27 +117,24 @@ func (r *RabbitMQPolicyReconciler) reconcileNormal(ctx context.Context, instance
 		vhost := &rabbitmqv1.RabbitMQVhost{}
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost)
 		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.PolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.PolicyReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 		vhostName = vhost.Spec.Name
-		if vhostName == "" {
-			vhostName = "/"
-		}
 	}
 
 	// Get RabbitMQ cluster
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.PolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.PolicyReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
 	// Get admin credentials
 	rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.PolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.PolicyReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -151,22 +150,18 @@ func (r *RabbitMQPolicyReconciler) reconcileNormal(ctx context.Context, instance
 	apiClient := rabbitmqapi.NewClient(baseURL, string(rabbitSecret.Data["username"]), string(rabbitSecret.Data["password"]), tlsEnabled)
 
 	// Create or update policy
-	applyTo := instance.Spec.ApplyTo
-	if applyTo == "" {
-		applyTo = "all"
-	}
 	var definition map[string]interface{}
 	if err := json.Unmarshal(instance.Spec.Definition.Raw, &definition); err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.PolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.PolicyReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
-	err = apiClient.CreateOrUpdatePolicy(vhostName, policyName, instance.Spec.Pattern, definition, instance.Spec.Priority, applyTo)
+	err = apiClient.CreateOrUpdatePolicy(vhostName, policyName, instance.Spec.Pattern, definition, instance.Spec.Priority, instance.Spec.ApplyTo)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.PolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.PolicyReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
-	instance.Status.Conditions.MarkTrue(rabbitmqv1.PolicyReadyCondition, rabbitmqv1.PolicyReadyMessage)
+	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQPolicyReadyCondition, rabbitmqv1.RabbitMQPolicyReadyMessage)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
 	return ctrl.Result{}, nil
@@ -182,21 +177,34 @@ func (r *RabbitMQPolicyReconciler) reconcileDelete(ctx context.Context, instance
 	if instance.Spec.VhostRef != "" {
 		vhost := &rabbitmqv1.RabbitMQVhost{}
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost)
-		if err == nil {
+		if err != nil && !k8s_errors.IsNotFound(err) {
+			// Log non-NotFound errors but continue with deletion
+			log.FromContext(ctx).Error(err, "Failed to get vhost", "vhost", instance.Spec.VhostRef)
+		}
+		if err == nil && vhost.Spec.Name != "" {
 			vhostName = vhost.Spec.Name
-			if vhostName == "" {
-				vhostName = "/"
-			}
 		}
 	}
 
 	// Get RabbitMQ cluster
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
-	if err == nil {
+	if err != nil {
+		if !k8s_errors.IsNotFound(err) {
+			// Log non-NotFound errors but continue with deletion
+			log.FromContext(ctx).Error(err, "Failed to get RabbitMQ cluster", "cluster", instance.Spec.RabbitmqClusterName)
+		}
+		// Skip policy deletion if cluster is not accessible - finalizer will still be removed
+	} else {
 		// Get admin credentials
 		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
-		if err == nil {
+		if err != nil {
+			if !k8s_errors.IsNotFound(err) {
+				// Log non-NotFound errors but continue with deletion
+				log.FromContext(ctx).Error(err, "Failed to get admin secret")
+			}
+			// Skip policy deletion if credentials are not accessible - finalizer will still be removed
+		} else {
 			// Create API client
 			tlsEnabled := rabbit.Spec.TLS.SecretName != ""
 			protocol := "http"
@@ -208,9 +216,10 @@ func (r *RabbitMQPolicyReconciler) reconcileDelete(ctx context.Context, instance
 			baseURL := fmt.Sprintf("%s://%s:%s", protocol, string(rabbitSecret.Data["host"]), managementPort)
 			apiClient := rabbitmqapi.NewClient(baseURL, string(rabbitSecret.Data["username"]), string(rabbitSecret.Data["password"]), tlsEnabled)
 
-			// Delete policy
+			// Delete policy from RabbitMQ
+			// Note: DeletePolicy already treats 404 as success
 			if err := apiClient.DeletePolicy(vhostName, policyName); err != nil {
-				// Log error but don't fail deletion - the policy may already be gone
+				// Log error but don't fail deletion - finalizer will still be removed to prevent CR from being stuck
 				log.FromContext(ctx).Error(err, "Failed to delete policy from RabbitMQ", "policy", policyName, "vhost", vhostName)
 			}
 		}

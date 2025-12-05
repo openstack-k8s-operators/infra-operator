@@ -35,10 +35,39 @@ var log = logf.Log.WithName("rabbitmquser-resource")
 // SetupRabbitMQUserWebhookWithManager registers the webhook for RabbitMQUser in the manager.
 func SetupRabbitMQUserWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&rabbitmqv1beta1.RabbitMQUser{}).
+		WithDefaulter(&RabbitMQUserCustomDefaulter{
+			Client: mgr.GetClient(),
+		}).
 		WithValidator(&RabbitMQUserCustomValidator{
 			Client: mgr.GetClient(),
 		}).
 		Complete()
+}
+
+// +kubebuilder:webhook:path=/mutate-rabbitmq-openstack-org-v1beta1-rabbitmquser,mutating=true,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=create;update,versions=v1beta1,name=mrabbitmquser-v1beta1.kb.io,admissionReviewVersions=v1
+
+// RabbitMQUserCustomDefaulter struct is responsible for setting default values on the RabbitMQUser resource
+// when it is created or updated.
+//
+// NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
+// as this struct is used only for temporary operations and does not need to be deeply copied.
+// +kubebuilder:object:generate=false
+type RabbitMQUserCustomDefaulter struct {
+	Client client.Client
+}
+
+var _ webhook.CustomDefaulter = &RabbitMQUserCustomDefaulter{}
+
+// Default implements webhook.CustomDefaulter so a webhook will be registered for the type RabbitMQUser.
+func (d *RabbitMQUserCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
+	rabbitmquser, ok := obj.(*rabbitmqv1beta1.RabbitMQUser)
+	if !ok {
+		return fmt.Errorf("expected a RabbitMQUser object but got %T", obj)
+	}
+	log.Info("Defaulting for RabbitMQUser", "name", rabbitmquser.GetName())
+
+	rabbitmquser.Default(d.Client)
+	return nil
 }
 
 // +kubebuilder:webhook:path=/validate-rabbitmq-openstack-org-v1beta1-rabbitmquser,mutating=false,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=create;update,versions=v1beta1,name=vrabbitmquser-v1beta1.kb.io,admissionReviewVersions=v1

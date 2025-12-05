@@ -29,7 +29,7 @@ type RabbitMQPolicySpec struct {
 	RabbitmqClusterName string `json:"rabbitmqClusterName"`
 
 	// +kubebuilder:validation:Optional
-	// VhostRef - reference to the RabbitMQVhost resource (defaults to "/")
+	// VhostRef - reference to the RabbitMQVhost resource (if empty, uses default vhost "/")
 	VhostRef string `json:"vhostRef,omitempty"`
 
 	// +kubebuilder:validation:Optional
@@ -104,15 +104,15 @@ func (instance RabbitMQPolicy) IsReady() bool {
 }
 
 const (
-	// PolicyReadyCondition indicates that the policy is ready
-	PolicyReadyCondition condition.Type = "PolicyReady"
+	// RabbitMQPolicyReadyCondition indicates that the policy is ready
+	RabbitMQPolicyReadyCondition condition.Type = "RabbitMQPolicyReady"
 
-	// PolicyReadyMessage is the message for the PolicyReady condition
-	PolicyReadyMessage = "RabbitMQ policy is ready"
+	// RabbitMQPolicyReadyMessage is the message for the RabbitMQPolicyReady condition
+	RabbitMQPolicyReadyMessage = "RabbitMQ policy is ready"
 
-	// PolicyReadyInitMessage is the message for the PolicyReady condition when not started
-	PolicyReadyInitMessage = "RabbitMQ policy not started"
+	// RabbitMQPolicyReadyInitMessage is the message for the RabbitMQPolicyReady condition when not started
+	RabbitMQPolicyReadyInitMessage = "RabbitMQ policy not started"
 
-	// PolicyReadyErrorMessage is the message format for the PolicyReady condition when an error occurs
-	PolicyReadyErrorMessage = "RabbitMQ policy error occurred %s"
+	// RabbitMQPolicyReadyErrorMessage is the message format for the RabbitMQPolicyReady condition when an error occurs
+	RabbitMQPolicyReadyErrorMessage = "RabbitMQ policy error occurred %s"
 )

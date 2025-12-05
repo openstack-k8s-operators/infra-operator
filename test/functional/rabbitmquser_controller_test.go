@@ -64,7 +64,7 @@ var _ = Describe("RabbitMQUser controller", func() {
 			Eventually(func(g Gomega) {
 				user := GetRabbitMQUser(userName)
 				g.Expect(user.Status.Conditions).NotTo(BeNil())
-				g.Expect(user.Status.Conditions.Has(rabbitmqv1.UserReadyCondition)).To(BeTrue())
+				g.Expect(user.Status.Conditions.Has(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -146,7 +146,7 @@ var _ = Describe("RabbitMQUser controller", func() {
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(th.K8sClient.Get(th.Ctx, ownedUserName, user)).To(Succeed())
-				g.Expect(user.Finalizers).To(ContainElement(rabbitmqv1.UserFinalizer))
+				g.Expect(user.Finalizers).To(ContainElement(rabbitmqv1.TransportURLFinalizer))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -162,7 +162,7 @@ var _ = Describe("RabbitMQUser controller", func() {
 				u := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(th.K8sClient.Get(th.Ctx, ownedUserName, u)).To(Succeed())
 				g.Expect(u.DeletionTimestamp).NotTo(BeNil())
-				g.Expect(u.Finalizers).To(ContainElement(rabbitmqv1.UserFinalizer))
+				g.Expect(u.Finalizers).To(ContainElement(rabbitmqv1.TransportURLFinalizer))
 			}, "2s", interval).Should(Succeed())
 		})
 

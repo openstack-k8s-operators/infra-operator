@@ -31,6 +31,18 @@ import (
 
 var rabbitmquserlog = logf.Log.WithName("rabbitmquser-resource")
 
+//+kubebuilder:webhook:path=/mutate-rabbitmq-openstack-org-v1beta1-rabbitmquser,mutating=true,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=create;update,versions=v1beta1,name=mrabbitmquser.kb.io,admissionReviewVersions=v1
+
+// Default implements defaulting for RabbitMQUser
+func (r *RabbitMQUser) Default(_ client.Client) {
+	rabbitmquserlog.Info("default", "name", r.Name)
+
+	// Default the username to the CR name if not specified
+	if r.Spec.Username == "" {
+		r.Spec.Username = r.Name
+	}
+}
+
 //+kubebuilder:webhook:path=/validate-rabbitmq-openstack-org-v1beta1-rabbitmquser,mutating=false,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=create;update,versions=v1beta1,name=vrabbitmquser.kb.io,admissionReviewVersions=v1
 
 // ValidateCreate validates the RabbitMQUser on creation
@@ -40,8 +52,28 @@ func (r *RabbitMQUser) ValidateCreate(k8sClient client.Client) (admission.Warnin
 }
 
 // ValidateUpdate validates the RabbitMQUser on update
-func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, _ runtime.Object) (admission.Warnings, error) {
+func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Object) (admission.Warnings, error) {
 	rabbitmquserlog.Info("validate update", "name", r.Name)
+
+	oldUser, ok := old.(*RabbitMQUser)
+	if !ok {
+		return nil, fmt.Errorf("expected RabbitMQUser but got %T", old)
+	}
+
+	// Prevent changing the username after creation
+	if r.Spec.Username != oldUser.Spec.Username {
+		return nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+			r.Name,
+			field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec", "username"),
+					"username cannot be changed after creation",
+				),
+			},
+		)
+	}
+
 	return nil, r.validateUniqueUsername(k8sClient)
 }
 
@@ -52,16 +84,6 @@ func (r *RabbitMQUser) ValidateDelete(client.Client) (admission.Warnings, error)
 
 // validateUniqueUsername checks that no other RabbitMQUser exists with the same username, vhost, and cluster
 func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
-	if k8sClient == nil {
-		return nil
-	}
-
-	// Determine the username that will be used
-	username := r.Spec.Username
-	if username == "" {
-		username = r.Name
-	}
-
 	// List all RabbitMQUsers in the same namespace
 	userList := &RabbitMQUserList{}
 	if err := k8sClient.List(context.TODO(), userList, client.InNamespace(r.Namespace)); err != nil {
@@ -85,14 +107,8 @@ func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 			continue
 		}
 
-		// Determine the other user's username
-		otherUsername := user.Spec.Username
-		if otherUsername == "" {
-			otherUsername = user.Name
-		}
-
 		// If usernames match, reject
-		if username == otherUsername {
+		if r.Spec.Username == user.Spec.Username {
 			return apierrors.NewInvalid(
 				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
 				r.Name,
@@ -100,7 +116,7 @@ func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 					field.Duplicate(
 						field.NewPath("spec", "username"),
 						fmt.Sprintf("username %q already exists in vhost %q on cluster %q (existing RabbitMQUser: %s)",
-							username, r.Spec.VhostRef, r.Spec.RabbitmqClusterName, user.Name),
+							r.Spec.Username, r.Spec.VhostRef, r.Spec.RabbitmqClusterName, user.Name),
 					),
 				},
 			)

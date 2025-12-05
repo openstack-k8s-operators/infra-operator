@@ -25,17 +25,17 @@ import (
 type RabbitMQUserPermissions struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=".*"
-	// Configure - configure permission regex
+	// Configure - configure permission regex (default ".*" allows all, "" denies all)
 	Configure string `json:"configure"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=".*"
-	// Write - write permission regex
+	// Write - write permission regex (default ".*" allows all, "" denies all)
 	Write string `json:"write"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=".*"
-	// Read - read permission regex
+	// Read - read permission regex (default ".*" allows all, "" denies all)
 	Read string `json:"read"`
 }
 
@@ -55,7 +55,7 @@ type RabbitMQUserSpec struct {
 
 	// +kubebuilder:validation:Optional
 	// Permissions - user permissions on the vhost
-	Permissions RabbitMQUserPermissions `json:"permissions,omitempty"`
+	Permissions RabbitMQUserPermissions `json:"permissions"`
 
 	// +kubebuilder:validation:Optional
 	// Tags - RabbitMQ user tags
@@ -120,15 +120,15 @@ const (
 	// UserFinalizer - finalizer to protect user from deletion when owned by TransportURL
 	UserFinalizer = "rabbitmquser.rabbitmq.openstack.org/finalizer"
 
-	// UserReadyCondition indicates that the user is ready
-	UserReadyCondition condition.Type = "UserReady"
+	// RabbitMQUserReadyCondition indicates that the user is ready
+	RabbitMQUserReadyCondition condition.Type = "RabbitMQUserReady"
 
-	// UserReadyMessage is the message for the UserReady condition
-	UserReadyMessage = "RabbitMQ user is ready"
+	// RabbitMQUserReadyMessage is the message for the RabbitMQUserReady condition
+	RabbitMQUserReadyMessage = "RabbitMQ user is ready"
 
-	// UserReadyInitMessage is the message for the UserReady condition when not started
-	UserReadyInitMessage = "RabbitMQ user not started"
+	// RabbitMQUserReadyInitMessage is the message for the RabbitMQUserReady condition when not started
+	RabbitMQUserReadyInitMessage = "RabbitMQ user not started"
 
-	// UserReadyErrorMessage is the message format for the UserReady condition when an error occurs
-	UserReadyErrorMessage = "RabbitMQ user error occurred %s"
+	// RabbitMQUserReadyErrorMessage is the message format for the RabbitMQUserReady condition when an error occurs
+	RabbitMQUserReadyErrorMessage = "RabbitMQ user error occurred %s"
 )

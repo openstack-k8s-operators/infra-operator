@@ -206,6 +206,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = webhookrabbitmqv1beta1.SetupRabbitMQUserWebhookWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
+	err = webhookrabbitmqv1beta1.SetupRabbitMQPolicyWebhookWithManager(k8sManager)
+	Expect(err).NotTo(HaveOccurred())
 
 	err = (&network_ctrl.DNSMasqReconciler{
 		Client:  k8sManager.GetClient(),

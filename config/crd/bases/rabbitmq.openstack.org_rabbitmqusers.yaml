@@ -65,15 +65,18 @@ spec:
                 properties:
                   configure:
                     default: .*
-                    description: Configure - configure permission regex
+                    description: Configure - configure permission regex (default ".*"
+                      allows all, "" denies all)
                     type: string
                   read:
                     default: .*
-                    description: Read - read permission regex
+                    description: Read - read permission regex (default ".*" allows
+                      all, "" denies all)
                     type: string
                   write:
                     default: .*
-                    description: Write - write permission regex
+                    description: Write - write permission regex (default ".*" allows
+                      all, "" denies all)
                     type: string
                 type: object
               rabbitmqClusterName:

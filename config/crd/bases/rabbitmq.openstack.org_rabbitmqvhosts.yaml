@@ -60,6 +60,7 @@ spec:
               name:
                 default: /
                 description: Name - the vhost name in RabbitMQ (defaults to "/")
+                minLength: 1
                 type: string
               rabbitmqClusterName:
                 description: RabbitmqClusterName - the name of the RabbitMQ cluster

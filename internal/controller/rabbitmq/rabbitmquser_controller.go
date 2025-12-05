@@ -85,18 +85,22 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	h, _ := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, Log)
 
-	// Initialize status
-	if instance.Status.Conditions == nil {
-		instance.Status.Conditions = condition.Conditions{}
-		cl := condition.CreateList(
-			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
-			condition.UnknownCondition(rabbitmqv1.UserReadyCondition, condition.InitReason, rabbitmqv1.UserReadyInitMessage),
-		)
-		instance.Status.Conditions.Init(&cl)
-		instance.Status.ObservedGeneration = instance.Generation
-	}
+	// Save a copy of the conditions so that we can restore the LastTransitionTime
+	// when a condition's state doesn't change
+	savedConditions := instance.Status.Conditions.DeepCopy()
+
+	// Initialize status conditions
+	cl := condition.CreateList(
+		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+		condition.UnknownCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.InitReason, rabbitmqv1.RabbitMQUserReadyInitMessage),
+	)
+	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	defer func() {
+		// Restore condition timestamps if they haven't changed
+		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
+
 		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
 			instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
@@ -110,41 +114,36 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, instance, h)
 	}
 
-	// Add finalizer
+	// Add finalizer if not being deleted
 	if !controllerutil.ContainsFinalizer(instance, userFinalizer) {
 		controllerutil.AddFinalizer(instance, userFinalizer)
-		return ctrl.Result{Requeue: true}, nil
+		// No need to requeue, the update will trigger a reconcile
+		return ctrl.Result{}, nil
 	}
 
 	return r.reconcileNormal(ctx, instance, h)
 }
 
 func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.RabbitMQUser, h *helper.Helper) (ctrl.Result, error) {
-	// Determine username
+	// Username is defaulted by webhook
 	username := instance.Spec.Username
-	if username == "" {
-		username = instance.Name
-	}
 
 	// Get vhost - default to "/" if VhostRef is empty
 	vhostName := "/"
 	if instance.Spec.VhostRef != "" {
 		vhost := &rabbitmqv1.RabbitMQVhost{}
 		if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost); err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 		vhostName = vhost.Spec.Name
-		if vhostName == "" {
-			vhostName = "/"
-		}
 	}
 
 	// Get RabbitMQ cluster
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -157,7 +156,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		if k8s_errors.IsNotFound(err) {
 			password, _ = generatePassword(32)
 		} else {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 	} else {
@@ -182,7 +181,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		return controllerutil.SetControllerReference(instance, secret, r.Scheme)
 	})
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -191,7 +190,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		// Get admin credentials
 		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 
@@ -213,28 +212,18 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		}
 		err = apiClient.CreateOrUpdateUser(username, password, tags)
 		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 
 		// Set permissions
-		perms := instance.Spec.Permissions
-		configure := perms.Configure
-		if configure == "" {
-			configure = ".*"
-		}
-		write := perms.Write
-		if write == "" {
-			write = ".*"
-		}
-		read := perms.Read
-		if read == "" {
-			read = ".*"
-		}
-
-		err = apiClient.SetPermissions(vhostName, username, configure, write, read)
+		// Permissions are defaulted by kubebuilder defaults
+		err = apiClient.SetPermissions(vhostName, username,
+			instance.Spec.Permissions.Configure,
+			instance.Spec.Permissions.Write,
+			instance.Spec.Permissions.Read)
 		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.UserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.UserReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 	}
@@ -242,30 +231,17 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 	instance.Status.SecretName = secretName
 	instance.Status.Username = username
 	instance.Status.Vhost = vhostName
-	instance.Status.Conditions.MarkTrue(rabbitmqv1.UserReadyCondition, rabbitmqv1.UserReadyMessage)
+	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, rabbitmqv1.RabbitMQUserReadyMessage)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
 	return ctrl.Result{}, nil
 }
 
 func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.RabbitMQUser, h *helper.Helper) (ctrl.Result, error) {
-	// If protection finalizer exists, check if still actively used by TransportURL
-	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.UserFinalizer) {
-		for _, owner := range instance.OwnerReferences {
-			if owner.Controller != nil && *owner.Controller && owner.Kind == "TransportURL" {
-				transportURL := &rabbitmqv1.TransportURL{}
-				if err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: instance.Namespace}, transportURL); err == nil && transportURL.DeletionTimestamp.IsZero() {
-					expectedRef := transportURL.Spec.UserRef
-					if expectedRef == "" && transportURL.Spec.Username != "" {
-						expectedRef = fmt.Sprintf("%s-%s-user", transportURL.Name, transportURL.Spec.Username)
-					}
-					if expectedRef == instance.Name {
-						return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
-					}
-				}
-			}
-		}
-		controllerutil.RemoveFinalizer(instance, rabbitmqv1.UserFinalizer)
+	// If TransportURL finalizer exists, wait for TransportURL to remove it
+	// The TransportURL controller manages this finalizer and removes it when switching users
+	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.TransportURLFinalizer) {
+		return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 	}
 
 	username := instance.Status.Username
@@ -280,21 +256,35 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	vhostName := "/"
 	if instance.Spec.VhostRef != "" {
 		vhost := &rabbitmqv1.RabbitMQVhost{}
-		if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost); err == nil {
+		err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost)
+		if err != nil && !k8s_errors.IsNotFound(err) {
+			// Log non-NotFound errors but continue with deletion
+			log.FromContext(ctx).Error(err, "Failed to get vhost", "vhost", instance.Spec.VhostRef)
+		}
+		if vhost.Spec.Name != "" {
 			vhostName = vhost.Spec.Name
-			if vhostName == "" {
-				vhostName = "/"
-			}
 		}
 	}
 
 	// Get RabbitMQ cluster
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
-	if err == nil {
+	if err != nil {
+		if !k8s_errors.IsNotFound(err) {
+			// Log non-NotFound errors but continue with deletion
+			log.FromContext(ctx).Error(err, "Failed to get RabbitMQ cluster", "cluster", instance.Spec.RabbitmqClusterName)
+		}
+		// Skip user deletion if cluster is not accessible - finalizer will still be removed
+	} else {
 		// Get admin credentials
 		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
-		if err == nil {
+		if err != nil {
+			if !k8s_errors.IsNotFound(err) {
+				// Log non-NotFound errors but continue with deletion
+				log.FromContext(ctx).Error(err, "Failed to get admin secret")
+			}
+			// Skip user deletion if credentials are not accessible - finalizer will still be removed
+		} else {
 			// Create API client
 			tlsEnabled := rabbit.Spec.TLS.SecretName != ""
 			protocol := "http"
@@ -306,13 +296,14 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 			baseURL := fmt.Sprintf("%s://%s:%s", protocol, string(rabbitSecret.Data["host"]), managementPort)
 			apiClient := rabbitmqapi.NewClient(baseURL, string(rabbitSecret.Data["username"]), string(rabbitSecret.Data["password"]), tlsEnabled)
 
-			// Delete permissions and user
+			// Delete permissions and user from RabbitMQ
+			// Note: Delete methods already treat 404 as success
 			if err := apiClient.DeletePermissions(vhostName, username); err != nil {
-				// Log error but don't fail deletion - the permissions may already be gone
+				// Log error but don't fail deletion - finalizer will still be removed to prevent CR from being stuck
 				log.FromContext(ctx).Error(err, "Failed to delete permissions from RabbitMQ", "user", username, "vhost", vhostName)
 			}
 			if err := apiClient.DeleteUser(username); err != nil {
-				// Log error but don't fail deletion - the user may already be gone
+				// Log error but don't fail deletion - finalizer will still be removed to prevent CR from being stuck
 				log.FromContext(ctx).Error(err, "Failed to delete user from RabbitMQ", "user", username)
 			}
 		}

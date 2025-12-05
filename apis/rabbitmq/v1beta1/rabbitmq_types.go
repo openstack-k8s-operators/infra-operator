@@ -43,6 +43,14 @@ const (
 	CrMaxLengthCorrection   = 11
 	errInvalidOverride      = "invalid spec override (%s)"
 	warnOverrideStatefulSet = "%s: is deprecated and will be removed in a future API version"
+
+	// Queue types
+	// QueueTypeMirrored - mirrored queue type
+	QueueTypeMirrored = "Mirrored"
+	// QueueTypeQuorum - quorum queue type
+	QueueTypeQuorum = "Quorum"
+	// QueueTypeNone - no special queue type
+	QueueTypeNone = "None"
 )
 
 // PodOverride defines per-pod service configurations

@@ -466,7 +466,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// Let's wait DeploymentReadyCondition=True to apply the policy
 		// QueueType should never be nil due to webhook defaulting, but add safety check
 		if instance.Spec.QueueType != nil {
-			if *instance.Spec.QueueType == "Mirrored" && *instance.Spec.Replicas > 1 && instance.Status.QueueType != "Mirrored" {
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeMirrored && *instance.Spec.Replicas > 1 && instance.Status.QueueType != rabbitmqv1beta1.QueueTypeMirrored {
 				Log.Info("ha-all policy not present. Applying.")
 				err := updateMirroredPolicy(ctx, helper, instance, true)
 				if err != nil {
@@ -478,8 +478,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 						condition.DeploymentReadyErrorMessage, err.Error()))
 					return ctrl.Result{}, err
 				}
-				instance.Status.QueueType = "Mirrored"
-			} else if *instance.Spec.QueueType != "Mirrored" && instance.Status.QueueType == "Mirrored" {
+				instance.Status.QueueType = rabbitmqv1beta1.QueueTypeMirrored
+			} else if *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeMirrored && instance.Status.QueueType == rabbitmqv1beta1.QueueTypeMirrored {
 				Log.Info("QueueType changed from Mirrored. Removing ha-all policy")
 				err := updateMirroredPolicy(ctx, helper, instance, false)
 				if err != nil {
@@ -495,16 +495,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			}
 
 			// Update status for Quorum queue type
-			if *instance.Spec.QueueType == "Quorum" && instance.Status.QueueType != "Quorum" {
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum && instance.Status.QueueType != rabbitmqv1beta1.QueueTypeQuorum {
 				Log.Info("Setting queue type status to quorum")
-				instance.Status.QueueType = "Quorum"
-			} else if *instance.Spec.QueueType != "Quorum" && instance.Status.QueueType == "Quorum" {
+				instance.Status.QueueType = rabbitmqv1beta1.QueueTypeQuorum
+			} else if *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeQuorum && instance.Status.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
 				Log.Info("Removing quorum queue type status")
 				instance.Status.QueueType = ""
 			}
 
 			// Update status for None queue type
-			if *instance.Spec.QueueType == "None" && instance.Status.QueueType != "" {
+			if *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeNone && instance.Status.QueueType != "" {
 				Log.Info("Setting queue type status to None (clearing)")
 				instance.Status.QueueType = ""
 			}
@@ -640,8 +640,8 @@ func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *
 	policy := &rabbitmqv1beta1.RabbitMQPolicy{}
 	err := helper.GetClient().Get(ctx, policyName, policy)
 
-	if apply {
-		// Create or update the policy CR
+	if apply && k8s_errors.IsNotFound(err) {
+		// Create the policy CR
 		definition := map[string]interface{}{
 			"ha-mode":                "exactly",
 			"ha-params":              2,
@@ -652,27 +652,28 @@ func updateMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *
 			return marshalErr
 		}
 
-		if err != nil && k8s_errors.IsNotFound(err) {
-			// Create new policy
-			policy = &rabbitmqv1beta1.RabbitMQPolicy{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      policyName.Name,
-					Namespace: policyName.Namespace,
-				},
-				Spec: rabbitmqv1beta1.RabbitMQPolicySpec{
-					RabbitmqClusterName: instance.Name,
-					Name:                "ha-all",
-					Pattern:             "",
-					Definition:          apiextensionsv1.JSON{Raw: definitionJSON},
-					Priority:            0,
-					ApplyTo:             "all",
-				},
-			}
-			if err := controllerutil.SetControllerReference(instance, policy, helper.GetScheme()); err != nil {
-				return err
-			}
-			return helper.GetClient().Create(ctx, policy)
+		policy = &rabbitmqv1beta1.RabbitMQPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      policyName.Name,
+				Namespace: policyName.Namespace,
+			},
+			Spec: rabbitmqv1beta1.RabbitMQPolicySpec{
+				RabbitmqClusterName: instance.Name,
+				Name:                "ha-all",
+				Pattern:             "",
+				Definition:          apiextensionsv1.JSON{Raw: definitionJSON},
+				Priority:            0,
+				ApplyTo:             "all",
+			},
 		}
+		if err := controllerutil.SetControllerReference(instance, policy, helper.GetScheme()); err != nil {
+			return err
+		}
+		return helper.GetClient().Create(ctx, policy)
+	}
+
+	if apply {
+		// Policy already exists, nothing to do
 		return err
 	}
 

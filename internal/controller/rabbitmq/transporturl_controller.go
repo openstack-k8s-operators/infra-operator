@@ -158,6 +158,17 @@ func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// Handle deletion by removing finalizers from owned resources
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, helper)
+	}
+
+	// Add finalizer if not present
+	if !controllerutil.ContainsFinalizer(instance, transportURLFinalizer) {
+		controllerutil.AddFinalizer(instance, transportURLFinalizer)
+		return ctrl.Result{}, nil
+	}
+
 	return r.reconcileNormal(ctx, instance, helper)
 }
 
@@ -267,18 +278,18 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 				},
 				Spec: rabbitmqv1.RabbitMQVhostSpec{RabbitmqClusterName: instance.Spec.RabbitmqClusterName, Name: vhostName},
 			}
-			if err := controllerutil.SetControllerReference(instance, vhost, r.Scheme); err == nil {
-				if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, vhost, func() error {
-					if !controllerutil.ContainsFinalizer(vhost, rabbitmqv1.VhostFinalizer) {
-						controllerutil.AddFinalizer(vhost, rabbitmqv1.VhostFinalizer)
-					}
-					vhost.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
-					vhost.Spec.Name = vhostName
-					return nil
-				}); err != nil {
-					instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
-					return ctrl.Result{}, err
-				}
+			if err := controllerutil.SetControllerReference(instance, vhost, r.Scheme); err != nil {
+				instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
+			}
+			if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, vhost, func() error {
+				controllerutil.AddFinalizer(vhost, rabbitmqv1.TransportURLFinalizer)
+				vhost.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
+				vhost.Spec.Name = vhostName
+				return nil
+			}); err != nil {
+				instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -291,18 +302,46 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			},
 			Spec: rabbitmqv1.RabbitMQUserSpec{RabbitmqClusterName: instance.Spec.RabbitmqClusterName, Username: instance.Spec.Username, VhostRef: vhostRef},
 		}
-		if err := controllerutil.SetControllerReference(instance, user, r.Scheme); err == nil {
-			if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, user, func() error {
-				if !controllerutil.ContainsFinalizer(user, rabbitmqv1.UserFinalizer) {
-					controllerutil.AddFinalizer(user, rabbitmqv1.UserFinalizer)
+		if err := controllerutil.SetControllerReference(instance, user, r.Scheme); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
+		}
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, user, func() error {
+			// Add TransportURL finalizer to protect user while in use
+			controllerutil.AddFinalizer(user, rabbitmqv1.TransportURLFinalizer)
+			user.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
+			user.Spec.Username = instance.Spec.Username
+			user.Spec.VhostRef = vhostRef
+			return nil
+		}); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
+		}
+
+		// Remove TransportURL finalizer from previously used users that are no longer referenced
+		// This handles credential rotation and rollback scenarios
+		userList := &rabbitmqv1.RabbitMQUserList{}
+		if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
+			for i := range userList.Items {
+				oldUser := &userList.Items[i]
+				// Check if this user has TransportURL finalizer and is owned by this TransportURL
+				if controllerutil.ContainsFinalizer(oldUser, rabbitmqv1.TransportURLFinalizer) {
+					isOwned := false
+					for _, owner := range oldUser.OwnerReferences {
+						if owner.Controller != nil && *owner.Controller &&
+							owner.Kind == "TransportURL" && owner.Name == instance.Name {
+							isOwned = true
+							break
+						}
+					}
+					// If owned by this TransportURL but not the current userRef, remove finalizer
+					if isOwned && oldUser.Name != userRef {
+						controllerutil.RemoveFinalizer(oldUser, rabbitmqv1.TransportURLFinalizer)
+						if err := r.Update(ctx, oldUser); err != nil {
+							Log.Error(err, "Failed to remove TransportURL finalizer from old user", "user", oldUser.Name)
+						}
+					}
 				}
-				user.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
-				user.Spec.Username = instance.Spec.Username
-				user.Spec.VhostRef = vhostRef
-				return nil
-			}); err != nil {
-				instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
 			}
 		}
 	}
@@ -377,7 +416,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	} else {
 		Log.Info(fmt.Sprintf("Found RabbitMQ CR: %s", rabbitmqCR.Name))
 
-		quorum = rabbitmqCR.Status.QueueType == "Quorum"
+		quorum = rabbitmqCR.Status.QueueType == rabbitmqv1.QueueTypeQuorum
 		Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType", quorum))
 
 		// Update QueueType and add annotation to signal change
@@ -478,7 +517,64 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 // fields to index to reconcile when change
 const (
 	rabbitmqClusterNameField = ".spec.rabbitmqClusterName"
+	transportURLFinalizer    = "transporturl.rabbitmq.openstack.org"
 )
+
+func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.TransportURL, _ *helper.Helper) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling delete")
+
+	// Remove TransportURL finalizer from all owned users and vhosts
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
+		for i := range userList.Items {
+			user := &userList.Items[i]
+			// Check if this user is owned by this TransportURL
+			isOwned := false
+			for _, owner := range user.OwnerReferences {
+				if owner.Controller != nil && *owner.Controller &&
+					owner.Kind == "TransportURL" && owner.Name == instance.Name {
+					isOwned = true
+					break
+				}
+			}
+			if isOwned && controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer) {
+				controllerutil.RemoveFinalizer(user, rabbitmqv1.TransportURLFinalizer)
+				if err := r.Update(ctx, user); err != nil {
+					Log.Error(err, "Failed to remove TransportURL finalizer from user", "user", user.Name)
+					return ctrl.Result{}, err
+				}
+			}
+		}
+	}
+
+	vhostList := &rabbitmqv1.RabbitMQVhostList{}
+	if err := r.List(ctx, vhostList, client.InNamespace(instance.Namespace)); err == nil {
+		for i := range vhostList.Items {
+			vhost := &vhostList.Items[i]
+			// Check if this vhost is owned by this TransportURL
+			isOwned := false
+			for _, owner := range vhost.OwnerReferences {
+				if owner.Controller != nil && *owner.Controller &&
+					owner.Kind == "TransportURL" && owner.Name == instance.Name {
+					isOwned = true
+					break
+				}
+			}
+			if isOwned && controllerutil.ContainsFinalizer(vhost, rabbitmqv1.TransportURLFinalizer) {
+				controllerutil.RemoveFinalizer(vhost, rabbitmqv1.TransportURLFinalizer)
+				if err := r.Update(ctx, vhost); err != nil {
+					Log.Error(err, "Failed to remove TransportURL finalizer from vhost", "vhost", vhost.Name)
+					return ctrl.Result{}, err
+				}
+			}
+		}
+	}
+
+	// Remove own finalizer to allow deletion
+	controllerutil.RemoveFinalizer(instance, transportURLFinalizer)
+	return ctrl.Result{}, nil
+}
 
 var allWatchFields = []string{
 	rabbitmqClusterNameField,

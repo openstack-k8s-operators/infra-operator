@@ -28,6 +28,7 @@ type RabbitMQVhostSpec struct {
 	RabbitmqClusterName string `json:"rabbitmqClusterName"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:default="/"
 	// Name - the vhost name in RabbitMQ (defaults to "/")
 	Name string `json:"name"`
@@ -81,15 +82,15 @@ const (
 	// VhostFinalizer - finalizer to protect vhost from deletion when owned by TransportURL
 	VhostFinalizer = "rabbitmqvhost.rabbitmq.openstack.org/finalizer"
 
-	// VhostReadyCondition indicates that the vhost is ready
-	VhostReadyCondition condition.Type = "VhostReady"
+	// RabbitMQVhostReadyCondition indicates that the vhost is ready
+	RabbitMQVhostReadyCondition condition.Type = "RabbitMQVhostReady"
 
-	// VhostReadyMessage is the message for the VhostReady condition
-	VhostReadyMessage = "RabbitMQ vhost is ready"
+	// RabbitMQVhostReadyMessage is the message for the RabbitMQVhostReady condition
+	RabbitMQVhostReadyMessage = "RabbitMQ vhost is ready"
 
-	// VhostReadyInitMessage is the message for the VhostReady condition when not started
-	VhostReadyInitMessage = "RabbitMQ vhost not started"
+	// RabbitMQVhostReadyInitMessage is the message for the RabbitMQVhostReady condition when not started
+	RabbitMQVhostReadyInitMessage = "RabbitMQ vhost not started"
 
-	// VhostReadyErrorMessage is the message format for the VhostReady condition when an error occurs
-	VhostReadyErrorMessage = "RabbitMQ vhost error occurred %s"
+	// RabbitMQVhostReadyErrorMessage is the message format for the RabbitMQVhostReady condition when an error occurs
+	RabbitMQVhostReadyErrorMessage = "RabbitMQ vhost error occurred %s"
 )

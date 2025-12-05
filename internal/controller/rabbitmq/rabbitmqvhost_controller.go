@@ -70,18 +70,22 @@ func (r *RabbitMQVhostReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	h, _ := helper.NewHelper(instance, r.Client, r.Kclient, r.Scheme, Log)
 
-	// Initialize status
-	if instance.Status.Conditions == nil {
-		instance.Status.Conditions = condition.Conditions{}
-		cl := condition.CreateList(
-			condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
-			condition.UnknownCondition(rabbitmqv1.VhostReadyCondition, condition.InitReason, rabbitmqv1.VhostReadyInitMessage),
-		)
-		instance.Status.Conditions.Init(&cl)
-		instance.Status.ObservedGeneration = instance.Generation
-	}
+	// Save a copy of the conditions so that we can restore the LastTransitionTime
+	// when a condition's state doesn't change
+	savedConditions := instance.Status.Conditions.DeepCopy()
+
+	// Initialize status conditions
+	cl := condition.CreateList(
+		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
+		condition.UnknownCondition(rabbitmqv1.RabbitMQVhostReadyCondition, condition.InitReason, rabbitmqv1.RabbitMQVhostReadyInitMessage),
+	)
+	instance.Status.Conditions.Init(&cl)
+	instance.Status.ObservedGeneration = instance.Generation
 
 	defer func() {
+		// Restore condition timestamps if they haven't changed
+		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
+
 		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
 			instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
@@ -95,10 +99,11 @@ func (r *RabbitMQVhostReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.reconcileDelete(ctx, instance, h)
 	}
 
-	// Add finalizer
+	// Add finalizer if not being deleted
 	if !controllerutil.ContainsFinalizer(instance, vhostFinalizer) {
 		controllerutil.AddFinalizer(instance, vhostFinalizer)
-		return ctrl.Result{Requeue: true}, nil
+		// No need to requeue, the update will trigger a reconcile
+		return ctrl.Result{}, nil
 	}
 
 	return r.reconcileNormal(ctx, instance, h)
@@ -109,14 +114,14 @@ func (r *RabbitMQVhostReconciler) reconcileNormal(ctx context.Context, instance 
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.VhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.VhostReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQVhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQVhostReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
 	// Get admin credentials
 	rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.VhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.VhostReadyErrorMessage, err.Error()))
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQVhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQVhostReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -140,62 +145,47 @@ func (r *RabbitMQVhostReconciler) reconcileNormal(ctx context.Context, instance 
 	if vhostName != "/" {
 		err = apiClient.CreateOrUpdateVhost(vhostName)
 		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.VhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.VhostReadyErrorMessage, err.Error()))
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQVhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQVhostReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
 	}
 
-	instance.Status.Conditions.MarkTrue(rabbitmqv1.VhostReadyCondition, rabbitmqv1.VhostReadyMessage)
+	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQVhostReadyCondition, rabbitmqv1.RabbitMQVhostReadyMessage)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
 	return ctrl.Result{}, nil
 }
 
 func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.RabbitMQVhost, h *helper.Helper) (ctrl.Result, error) {
-	// If protection finalizer exists, check if still actively used
-	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.VhostFinalizer) {
-		// Check if still actively used by TransportURL
-		for _, owner := range instance.OwnerReferences {
-			if owner.Controller != nil && *owner.Controller && owner.Kind == "TransportURL" {
-				transportURL := &rabbitmqv1.TransportURL{}
-				if err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: instance.Namespace}, transportURL); err == nil && transportURL.DeletionTimestamp.IsZero() {
-					vhost := transportURL.Spec.Vhost
-					if vhost == "" {
-						vhost = "/"
-					}
-					expectedRef := ""
-					if vhost != "/" {
-						expectedRef = fmt.Sprintf("%s-%s-vhost", transportURL.Name, vhost)
-					}
-					if expectedRef == instance.Name {
-						return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
-					}
-				}
+	// If TransportURL finalizer exists, wait for TransportURL to remove it
+	// The TransportURL controller manages this finalizer
+	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.TransportURLFinalizer) {
+		return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
+	}
+
+	// Check if any active users reference this vhost
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
+		for _, user := range userList.Items {
+			if user.Spec.VhostRef == instance.Name && user.DeletionTimestamp.IsZero() {
+				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 			}
 		}
-		// Check if any active users reference this vhost
-		userList := &rabbitmqv1.RabbitMQUserList{}
-		if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
-			for _, user := range userList.Items {
-				if user.Spec.VhostRef == instance.Name && user.DeletionTimestamp.IsZero() {
-					return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
-				}
-			}
-		}
-		controllerutil.RemoveFinalizer(instance, rabbitmqv1.VhostFinalizer)
 	}
 
 	// Get RabbitMQ cluster
 	rabbit := &rabbitmqclusterv2.RabbitmqCluster{}
 	err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbit)
 	if err != nil && !k8s_errors.IsNotFound(err) {
-		return ctrl.Result{}, err
-	}
-
-	if err == nil {
+		// Log non-NotFound errors but continue with deletion
+		log.FromContext(ctx).Error(err, "Failed to get RabbitMQ cluster", "cluster", instance.Spec.RabbitmqClusterName)
+	} else if err == nil {
 		// Get admin credentials
 		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
-		if err == nil {
+		if err != nil && !k8s_errors.IsNotFound(err) {
+			// Log non-NotFound errors but continue with deletion
+			log.FromContext(ctx).Error(err, "Failed to get admin secret")
+		} else if err == nil {
 			// Create API client
 			tlsEnabled := rabbit.Spec.TLS.SecretName != ""
 			protocol := "http"
@@ -214,7 +204,9 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 			}
 			if vhostName != "/" {
 				if err := apiClient.DeleteVhost(vhostName); err != nil {
-					// Log error but don't fail deletion - the vhost may already be gone
+					// Log error but don't fail deletion to ensure CR cleanup completes.
+					// The vhost may already be deleted, or RabbitMQ may be unavailable.
+					// If this is a real issue, it will be apparent in RabbitMQ itself.
 					log.FromContext(ctx).Error(err, "Failed to delete vhost from RabbitMQ", "vhost", vhostName)
 				}
 			}
