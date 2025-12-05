@@ -39,7 +39,7 @@ var _ = Describe("RabbitMq webhook", func() {
 				Spec: rabbitmqv1beta1.RabbitMqSpec{},
 			}
 
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.QueueType).NotTo(BeNil())
 			Expect(*rabbitmq.Spec.QueueType).To(Equal("Quorum"))
@@ -75,7 +75,7 @@ var _ = Describe("RabbitMq webhook", func() {
 				Spec: rabbitmqv1beta1.RabbitMqSpec{},
 			}
 
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.QueueType).To(BeNil())
 		})
@@ -94,7 +94,7 @@ var _ = Describe("RabbitMq webhook", func() {
 				},
 			}
 
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.QueueType).NotTo(BeNil())
 			Expect(*rabbitmq.Spec.QueueType).To(Equal("Mirrored"))
@@ -133,7 +133,7 @@ var _ = Describe("RabbitMq webhook", func() {
 				Spec: rabbitmqv1beta1.RabbitMqSpec{},
 			}
 
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.ContainerImage).To(Equal("test-image:latest"))
 			Expect(rabbitmq.Spec.QueueType).To(BeNil())
@@ -174,7 +174,7 @@ var _ = Describe("RabbitMq webhook", func() {
 				},
 			}
 
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.ContainerImage).To(Equal("custom-image:v1"))
 		})
@@ -200,7 +200,7 @@ var _ = Describe("RabbitMq webhook", func() {
 			}).Should(BeTrue())
 
 			// First webhook call - should set QueueType to Quorum
-			rabbitmq.Default()
+			rabbitmq.Default(k8sClient)
 			Expect(rabbitmq.Spec.QueueType).NotTo(BeNil())
 			Expect(*rabbitmq.Spec.QueueType).To(Equal("Quorum"))
 
@@ -220,7 +220,7 @@ var _ = Describe("RabbitMq webhook", func() {
 			}
 
 			// Webhook should preserve QueueType from existing CR
-			freshRabbitMq.Default()
+			freshRabbitMq.Default(k8sClient)
 			Expect(freshRabbitMq.Spec.QueueType).NotTo(BeNil())
 			Expect(*freshRabbitMq.Spec.QueueType).To(Equal("Quorum"), "QueueType should be preserved from existing CR")
 		})

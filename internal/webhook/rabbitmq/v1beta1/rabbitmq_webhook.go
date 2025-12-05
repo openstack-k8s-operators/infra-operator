@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -38,11 +39,11 @@ var rabbitmqlog = logf.Log.WithName("rabbitmq-resource")
 func SetupRabbitMqWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&rabbitmqv1beta1.RabbitMq{}).
 		WithValidator(&RabbitMqCustomValidator{}).
-		WithDefaulter(&RabbitMqCustomDefaulter{}).
+		WithDefaulter(&RabbitMqCustomDefaulter{
+			Client: mgr.GetClient(),
+		}).
 		Complete()
 }
-
-// TODO(user): EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 
 // +kubebuilder:webhook:path=/mutate-rabbitmq-openstack-org-v1beta1-rabbitmq,mutating=true,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=create;update,versions=v1beta1,name=mrabbitmq-v1beta1.kb.io,admissionReviewVersions=v1
 
@@ -51,8 +52,9 @@ func SetupRabbitMqWebhookWithManager(mgr ctrl.Manager) error {
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
+// +kubebuilder:object:generate=false
 type RabbitMqCustomDefaulter struct {
-	// TODO(user): Add more fields as needed for defaulting
+	Client client.Client
 }
 
 var _ webhook.CustomDefaulter = &RabbitMqCustomDefaulter{}
@@ -66,7 +68,7 @@ func (d *RabbitMqCustomDefaulter) Default(_ context.Context, obj runtime.Object)
 	}
 	rabbitmqlog.Info("Defaulting for RabbitMq", "name", rabbitmq.GetName())
 
-	rabbitmq.Default()
+	rabbitmq.Default(d.Client)
 
 	return nil
 }
@@ -81,6 +83,7 @@ func (d *RabbitMqCustomDefaulter) Default(_ context.Context, obj runtime.Object)
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
+// +kubebuilder:object:generate=false
 type RabbitMqCustomValidator struct {
 	// TODO(user): Add more fields as needed for validation
 }
