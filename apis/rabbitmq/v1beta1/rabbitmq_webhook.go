@@ -42,27 +42,23 @@ var rabbitMqDefaults RabbitMqDefaults
 // log is for logging in this package.
 var rabbitmqlog = logf.Log.WithName("rabbitmq-resource")
 
-// webhookClient is the client used by the webhook to query for RabbitMQCluster resources
-var webhookClient client.Client
-
 // SetupRabbitMqDefaults - initialize RabbitMq spec defaults for use with either internal or external webhooks
 func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 	rabbitMqDefaults = defaults
 	rabbitmqlog.Info("RabbitMq defaults initialized", "defaults", defaults)
 }
 
-var _ webhook.Defaulter = &RabbitMq{}
-
-// Default implements webhook.Defaulter so a webhook will be registered for the type
-func (r *RabbitMq) Default() {
+// Default sets default values for the RabbitMq using the provided Kubernetes client
+// to check if the cluster already exists
+func (r *RabbitMq) Default(k8sClient client.Client) {
 	rabbitmqlog.Info("default", "name", r.Name)
 
 	isNew := true
 
-	if webhookClient != nil {
+	if k8sClient != nil {
 		// First check if existing RabbitMq CR has QueueType set - preserve it across updates
 		existingRabbitMq := &RabbitMq{}
-		err := webhookClient.Get(context.Background(), types.NamespacedName{
+		err := k8sClient.Get(context.Background(), types.NamespacedName{
 			Name: r.Name, Namespace: r.Namespace,
 		}, existingRabbitMq)
 
@@ -79,7 +75,7 @@ func (r *RabbitMq) Default() {
 		} else {
 			// Check if RabbitMQCluster exists (upgrade scenario: cluster exists but CR is new)
 			cluster := &rabbitmqv2.RabbitmqCluster{}
-			err = webhookClient.Get(context.Background(), types.NamespacedName{
+			err = k8sClient.Get(context.Background(), types.NamespacedName{
 				Name: r.Name, Namespace: r.Namespace,
 			}, cluster)
 
@@ -197,7 +193,7 @@ func (spec *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace str
 }
 
 // ValidateUpdate performs validation when updating an existing RabbitMqSpecCore.
-func (spec *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
+func (spec *RabbitMqSpecCore) ValidateUpdate(_ RabbitMqSpecCore, basePath *field.Path, namespace string) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
 	var allWarn []string
 
