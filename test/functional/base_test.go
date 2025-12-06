@@ -1103,3 +1103,81 @@ func CreateCertSecret(name types.NamespacedName) *corev1.Secret {
 
 	return s
 }
+
+func CreateRabbitMQVhost(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMQVhost",
+		"metadata": map[string]any{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+	return th.CreateUnstructured(raw)
+}
+
+func CreateRabbitMQUser(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMQUser",
+		"metadata": map[string]any{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+	return th.CreateUnstructured(raw)
+}
+
+func GetRabbitMQVhost(name types.NamespacedName) *rabbitmqv1.RabbitMQVhost {
+	instance := &rabbitmqv1.RabbitMQVhost{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func GetRabbitMQUser(name types.NamespacedName) *rabbitmqv1.RabbitMQUser {
+	instance := &rabbitmqv1.RabbitMQUser{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func RabbitMQVhostConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetRabbitMQVhost(name)
+	return instance.Status.Conditions
+}
+
+func RabbitMQUserConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetRabbitMQUser(name)
+	return instance.Status.Conditions
+}
+
+func CreateRabbitMQPolicy(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMQPolicy",
+		"metadata": map[string]any{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+	return th.CreateUnstructured(raw)
+}
+
+func GetRabbitMQPolicy(name types.NamespacedName) *rabbitmqv1.RabbitMQPolicy {
+	instance := &rabbitmqv1.RabbitMQPolicy{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func RabbitMQPolicyConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetRabbitMQPolicy(name)
+	return instance.Status.Conditions
+}
