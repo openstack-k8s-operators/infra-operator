@@ -40,3 +40,8 @@ go.work.sum
 
 # python virtual environment
 .venv
+
+# python test artifacts
+.coverage
+__pycache__/
+*.pyc
