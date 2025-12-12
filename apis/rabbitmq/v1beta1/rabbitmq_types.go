@@ -43,6 +43,14 @@ const (
 	CrMaxLengthCorrection   = 11
 	errInvalidOverride      = "invalid spec override (%s)"
 	warnOverrideStatefulSet = "%s: is deprecated and will be removed in a future API version"
+
+	// Queue types
+	// QueueTypeMirrored - mirrored queue type
+	QueueTypeMirrored = "Mirrored"
+	// QueueTypeQuorum - quorum queue type
+	QueueTypeQuorum = "Quorum"
+	// QueueTypeNone - no special queue type
+	QueueTypeNone = "None"
 )
 
 // PodOverride defines per-pod service configurations
@@ -200,7 +208,7 @@ func (instance *RabbitMqSpecCore) ValidateTopology(
 // ValidateOverride validates the override section of RabbitMqSpecCore.
 func (instance *RabbitMqSpecCore) ValidateOverride(
 	basePath *field.Path,
-	namespace string,
+	_ string,
 ) (admission.Warnings, field.ErrorList) {
 	var allErrs field.ErrorList
 	var allWarn admission.Warnings

@@ -1,0 +1,23 @@
+#
+# Check for:
+#
+# - 1 RabbitMQPolicy CR
+#
+
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQPolicy
+metadata:
+  name: rabbitmqpolicy-sample
+spec:
+  rabbitmqClusterName: rabbitmq
+  vhostRef: rabbitmqvhost-sample
+  name: "queue-limits"
+  pattern: ".*"
+  priority: 0
+  applyTo: "all"
+status:
+  conditions:
+  - status: "True"
+    type: Ready
+  - status: "True"
+    type: RabbitMQPolicyReady

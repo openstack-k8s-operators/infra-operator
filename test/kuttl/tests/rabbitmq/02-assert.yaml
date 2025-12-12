@@ -1,0 +1,19 @@
+#
+# Check for:
+#
+# - 1 RabbitMQVhost CR
+#
+
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQVhost
+metadata:
+  name: rabbitmqvhost-sample
+spec:
+  rabbitmqClusterName: rabbitmq
+  name: "openstack"
+status:
+  conditions:
+  - status: "True"
+    type: Ready
+  - status: "True"
+    type: RabbitMQVhostReady
