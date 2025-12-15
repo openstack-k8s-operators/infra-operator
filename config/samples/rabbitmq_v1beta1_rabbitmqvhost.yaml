@@ -1,0 +1,7 @@
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQVhost
+metadata:
+  name: rabbitmqvhost-sample
+spec:
+  rabbitmqClusterName: rabbitmq
+  name: "openstack"

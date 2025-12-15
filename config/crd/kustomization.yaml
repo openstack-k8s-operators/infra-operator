@@ -14,6 +14,9 @@ resources:
 - bases/topology.openstack.org_topologies.yaml
 - bases/network.openstack.org_bgpconfigurations.yaml
 - bases/rabbitmq.openstack.org_rabbitmqs.yaml
+- bases/rabbitmq.openstack.org_rabbitmqvhosts.yaml
+- bases/rabbitmq.openstack.org_rabbitmqusers.yaml
+- bases/rabbitmq.openstack.org_rabbitmqpolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

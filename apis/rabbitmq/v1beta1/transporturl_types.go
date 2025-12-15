@@ -26,6 +26,18 @@ type TransportURLSpec struct {
 	// +kubebuilder:validation:Required
 	// RabbitmqClusterName the name of the Rabbitmq cluster which to configure the transport URL
 	RabbitmqClusterName string `json:"rabbitmqClusterName"`
+
+	// +kubebuilder:validation:Optional
+	// UserRef - reference to a RabbitMQUser resource. If not specified, Username will be used to create a RabbitMQUser on-demand
+	UserRef string `json:"userRef,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Username - RabbitMQ username. If UserRef is not specified, a RabbitMQUser will be created with this username
+	Username string `json:"username,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Vhost - RabbitMQ vhost name. If specified and vhost doesn't exist, a RabbitMQVhost will be created. Defaults to "/" if not specified
+	Vhost string `json:"vhost,omitempty"`
 }
 
 // TransportURLStatus defines the observed state of TransportURL
@@ -39,6 +51,12 @@ type TransportURLStatus struct {
 
 	// QueueType - the queue type from the associated RabbitMq instance
 	QueueType string `json:"queueType,omitempty"`
+
+	// RabbitmqUsername - the actual username used for the RabbitMQ user
+	RabbitmqUsername string `json:"rabbitmqUsername,omitempty"`
+
+	// RabbitmqVhost - the actual vhost name used
+	RabbitmqVhost string `json:"rabbitmqVhost,omitempty"`
 
 	// ObservedGeneration - the most recent generation observed for this
 	// service. If the observed generation is less than the spec generation,

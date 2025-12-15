@@ -23,6 +23,9 @@ import (
 const (
 	// TransportURLReadyCondition Status=True condition which indicates if TransportURL is configured and operational
 	TransportURLReadyCondition condition.Type = "TransportURLReady"
+
+	// TransportURLFinalizer - finalizer to add to RabbitMQUsers owned by TransportURL
+	TransportURLFinalizer = "transporturl.rabbitmq.openstack.org/finalizer"
 )
 
 // TransportURL Reasons used by API objects.

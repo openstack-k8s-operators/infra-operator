@@ -1,0 +1,15 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+delete:
+- apiVersion: rabbitmq.openstack.org/v1beta1
+  kind: RabbitMQPolicy
+  name: rabbitmqpolicy-sample
+- apiVersion: rabbitmq.openstack.org/v1beta1
+  kind: RabbitMQUser
+  name: rabbitmquser-sample
+- apiVersion: rabbitmq.openstack.org/v1beta1
+  kind: RabbitMQVhost
+  name: rabbitmqvhost-sample
+- apiVersion: rabbitmq.openstack.org/v1beta1
+  kind: TransportURL
+  name: transporturl
