@@ -2,7 +2,13 @@
 package bgp
 
 import (
+	"context"
 	"net"
+
+	corev1 "k8s.io/api/core/v1"
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
@@ -64,4 +70,22 @@ func GetNodesRunningPods(podNetworkDetailList []PodDetail) []string {
 	}
 
 	return nodes
+}
+
+// OpenShiftFRRNamespace is the FRR namespace used in OpenShift 4.20+
+const OpenShiftFRRNamespace = "openshift-frr-k8s"
+
+// GetFRRConfigurationNamespace checks whether migrationNamespace exists and returns it,
+// otherwise falls back to defaultNamespace.
+func GetFRRConfigurationNamespace(ctx context.Context, c client.Client, migrationNamespace, defaultNamespace string) (string, error) {
+	ns := &corev1.Namespace{}
+	err := c.Get(ctx, types.NamespacedName{Name: migrationNamespace}, ns)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			return defaultNamespace, nil
+		}
+		return "", err
+	}
+
+	return migrationNamespace, nil
 }
