@@ -25,4 +25,28 @@ type RabbitMqConfig struct {
 	// +kubebuilder:validation:Optional
 	// Vhost - RabbitMQ vhost name
 	Vhost string `json:"vhost,omitempty"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// Name of the cluster
+	Cluster string `json:"cluster"`
+}
+
+// DefaultRabbitMqConfig sets default values for RabbitMqConfig if not specified.
+// This function should be called from service operators' webhooks to automatically
+// populate the Cluster from the legacy rabbitmqClusterName field, making
+// RabbitMqConfig the authoritative source for transportCreateOrUpdate.
+//
+// Example usage in a service operator's webhook:
+//
+//	func (r *Cinder) Default() {
+//	    rabbitmqv1beta1.DefaultRabbitMqConfig(
+//	        &r.Spec.RabbitMqConfig,
+//	        r.Spec.RabbitmqClusterName,
+//	    )
+//	}
+func DefaultRabbitMqConfig(config *RabbitMqConfig, defaultClusterName string) {
+	if config.Cluster == "" && defaultClusterName != "" {
+		config.Cluster = defaultClusterName
+	}
 }
