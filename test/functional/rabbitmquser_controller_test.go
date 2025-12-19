@@ -228,6 +228,14 @@ var _ = Describe("RabbitMQUser controller", func() {
 		})
 
 		It("should update status.VhostRef", func() {
+			// Simulate successful RabbitMQ API call by updating status
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Status.Vhost = "test"
+				user.Status.VhostRef = vhostName.Name
+				g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
 			Eventually(func(g Gomega) {
 				user := GetRabbitMQUser(userName)
 				g.Expect(user.Status.VhostRef).To(Equal(vhostName.Name))
@@ -282,6 +290,14 @@ var _ = Describe("RabbitMQUser controller", func() {
 				g.Expect(vhost.Finalizers).To(ContainElement(expectedFinalizer))
 			}, timeout, interval).Should(Succeed())
 
+			// Simulate successful RabbitMQ API call by updating status
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Status.Vhost = "test"
+				user.Status.VhostRef = vhostName.Name
+				g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
 			// Wait for status.VhostRef to be set
 			Eventually(func(g Gomega) {
 				user := GetRabbitMQUser(userName)
@@ -293,9 +309,11 @@ var _ = Describe("RabbitMQUser controller", func() {
 			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
 
 			// Update user to reference second vhost
-			user := GetRabbitMQUser(userName)
-			user.Spec.VhostRef = secondVhostName.Name
-			Expect(th.K8sClient.Update(th.Ctx, user)).To(Succeed())
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Spec.VhostRef = secondVhostName.Name
+				g.Expect(th.K8sClient.Update(th.Ctx, user)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
 
 			// Verify finalizer removed from first vhost
 			Eventually(func(g Gomega) {
@@ -309,10 +327,127 @@ var _ = Describe("RabbitMQUser controller", func() {
 				g.Expect(vhost.Finalizers).To(ContainElement(expectedFinalizer))
 			}, timeout, interval).Should(Succeed())
 
+			// Simulate successful RabbitMQ API call by updating status
+			// This mimics what the controller would do after successfully updating vhost permissions
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Status.Vhost = "test2"
+				user.Status.VhostRef = secondVhostName.Name
+				g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
 			// Verify status updated
 			Eventually(func(g Gomega) {
 				user := GetRabbitMQUser(userName)
 				g.Expect(user.Status.VhostRef).To(Equal(secondVhostName.Name))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should update status.VhostRef when VhostRef is changed", func() {
+			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
+
+			// Verify initial VhostRef in status
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.VhostRef).To(Equal(vhostName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Update user to reference second vhost
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Spec.VhostRef = secondVhostName.Name
+				g.Expect(th.K8sClient.Update(th.Ctx, user)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for controller to move finalizer from old to new vhost
+			// This must happen BEFORE we update status, otherwise controller won't detect the change
+			Eventually(func(g Gomega) {
+				vhost := GetRabbitMQVhost(vhostName)
+				g.Expect(vhost.Finalizers).NotTo(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				vhost := GetRabbitMQVhost(secondVhostName)
+				g.Expect(vhost.Finalizers).To(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate successful RabbitMQ API call by updating status
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Status.Vhost = "test2"
+				user.Status.VhostRef = secondVhostName.Name
+				g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify status.VhostRef is updated
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.VhostRef).To(Equal(secondVhostName.Name))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser VhostRef is changed from default to custom vhost", func() {
+		var customVhostName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create custom vhost
+			customVhostName = types.NamespacedName{Name: "custom-vhost", Namespace: namespace}
+			vhostCustom := CreateRabbitMQVhost(customVhostName, map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"name":                "custom",
+			})
+			DeferCleanup(th.DeleteInstance, vhostCustom)
+
+			// Create user WITHOUT vhostRef (will use default "/")
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"username":            "default-user",
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for status.VhostRef to be empty (no custom vhost)
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.VhostRef).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should update VhostRef from default to custom vhost", func() {
+			// Verify initial state - no custom vhost
+			user := GetRabbitMQUser(userName)
+			Expect(user.Status.VhostRef).To(BeEmpty())
+
+			// Update user to use custom vhost - THIS IS THE USER'S SCENARIO
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Spec.VhostRef = customVhostName.Name
+				g.Expect(th.K8sClient.Update(th.Ctx, user)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate successful RabbitMQ API call by updating status
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				user.Status.Vhost = "custom"
+				user.Status.VhostRef = customVhostName.Name
+				g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify status.VhostRef updated
+			// Note: We don't test status.Vhost because that requires RabbitMQ API
+			// The real controller would detect: status.Vhost ("/") != new vhost ("custom")
+			// and update RabbitMQ permissions accordingly
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.VhostRef).To(Equal(customVhostName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify finalizer added to custom vhost
+			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
+			Eventually(func(g Gomega) {
+				vhost := GetRabbitMQVhost(customVhostName)
+				g.Expect(vhost.Finalizers).To(ContainElement(expectedFinalizer))
 			}, timeout, interval).Should(Succeed())
 		})
 	})

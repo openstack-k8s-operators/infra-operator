@@ -277,15 +277,13 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 					Name:      vhostRef,
 					Namespace: instance.Namespace,
 				},
-				Spec: rabbitmqv1.RabbitMQVhostSpec{RabbitmqClusterName: instance.Spec.RabbitmqClusterName, Name: vhostName},
 			}
 			// Note: During normal reconciliation (not deletion), we return errors rather than
 			// just logging them, as we need these operations to succeed for correct functionality.
-			if err := controllerutil.SetControllerReference(instance, vhost, r.Scheme); err != nil {
-				instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
-			}
 			if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, vhost, func() error {
+				if err := controllerutil.SetControllerReference(instance, vhost, r.Scheme); err != nil {
+					return err
+				}
 				// AddFinalizer is idempotent - safe to call even if finalizer already exists
 				controllerutil.AddFinalizer(vhost, rabbitmqv1.TransportURLFinalizer)
 				vhost.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
@@ -304,18 +302,21 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 				Name:      userRef,
 				Namespace: instance.Namespace,
 			},
-			Spec: rabbitmqv1.RabbitMQUserSpec{RabbitmqClusterName: instance.Spec.RabbitmqClusterName, Username: instance.Spec.Username, VhostRef: vhostRef},
-		}
-		if err := controllerutil.SetControllerReference(instance, user, r.Scheme); err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
 		}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, user, func() error {
+			if err := controllerutil.SetControllerReference(instance, user, r.Scheme); err != nil {
+				return err
+			}
 			// Add TransportURL finalizer to protect user while in use
 			controllerutil.AddFinalizer(user, rabbitmqv1.TransportURLFinalizer)
 			user.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
 			user.Spec.Username = instance.Spec.Username
 			user.Spec.VhostRef = vhostRef
+			user.Spec.Permissions = rabbitmqv1.RabbitMQUserPermissions{
+				Configure: ".*",
+				Read:      ".*",
+				Write:     ".*",
+			}
 			return nil
 		}); err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.TransportURLReadyErrorMessage, err.Error()))
@@ -334,7 +335,36 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 				if isOwned && oldUser.Name != userRef {
 					if controllerutil.RemoveFinalizer(oldUser, rabbitmqv1.TransportURLFinalizer) {
 						if err := r.Update(ctx, oldUser); err != nil {
-							Log.Error(err, "Failed to remove TransportURL finalizer from old user", "user", oldUser.Name)
+							if !k8s_errors.IsNotFound(err) {
+								Log.Error(err, "Failed to remove TransportURL finalizer from old user", "user", oldUser.Name)
+								return ctrl.Result{}, err
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Remove TransportURL finalizer from owned vhosts that are being deleted
+		// but only if they're no longer referenced in the TransportURL spec
+		// This handles vhost removal when the vhost definition is removed from the spec
+		vhostList := &rabbitmqv1.RabbitMQVhostList{}
+		if err := r.List(ctx, vhostList, client.InNamespace(instance.Namespace)); err == nil {
+			for i := range vhostList.Items {
+				oldVhost := &vhostList.Items[i]
+				// Check if this vhost is owned by this TransportURL and being deleted
+				isOwned := object.CheckOwnerRefExist(instance.GetUID(), oldVhost.GetOwnerReferences())
+				if isOwned && !oldVhost.DeletionTimestamp.IsZero() {
+					// Only remove finalizer if this vhost is not the current one (vhostRef)
+					// i.e., it's an orphaned vhost from a previous spec
+					if oldVhost.Name != vhostRef {
+						if controllerutil.RemoveFinalizer(oldVhost, rabbitmqv1.TransportURLFinalizer) {
+							if err := r.Update(ctx, oldVhost); err != nil {
+								if !k8s_errors.IsNotFound(err) {
+									Log.Error(err, "Failed to remove TransportURL finalizer from old vhost", "vhost", oldVhost.Name)
+									return ctrl.Result{}, err
+								}
+							}
 						}
 					}
 				}
@@ -357,6 +387,13 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		if rabbitUser.Status.SecretName == "" {
 			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.RequestedReason, condition.SeverityInfo, rabbitmqv1.TransportURLInProgressMessage))
 			Log.Info(fmt.Sprintf("RabbitMQUser %s not ready yet (no secret created)", userRef))
+			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+		}
+		// Wait for vhost status to match spec when a custom vhost is specified
+		// This handles both initial creation (status is empty) and updates (status has old value)
+		if instance.Spec.Vhost != "" && instance.Spec.Vhost != rabbitUser.Status.Vhost {
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.TransportURLReadyCondition, condition.RequestedReason, condition.SeverityInfo, rabbitmqv1.TransportURLInProgressMessage))
+			Log.Info(fmt.Sprintf("RabbitMQUser %s vhost status (%s) doesn't match spec (%s), waiting for update", userRef, rabbitUser.Status.Vhost, instance.Spec.Vhost))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 		}
 
@@ -581,6 +618,8 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.TransportURL{}).
 		Owns(&corev1.Secret{}).
+		Owns(&rabbitmqv1.RabbitMQUser{}).
+		Owns(&rabbitmqv1.RabbitMQVhost{}).
 		Watches(
 			&rabbitmqclusterv2.RabbitmqCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),

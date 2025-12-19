@@ -380,6 +380,43 @@ func SimulateRabbitMQVhostReady(name types.NamespacedName) {
 	th.Logger.Info("Simulated RabbitMQVhost ready", "on", name)
 }
 
+func SimulateRabbitMQUserReady(name types.NamespacedName, vhost string) {
+	Eventually(func(g Gomega) {
+		user := GetRabbitMQUser(name)
+		g.Expect(user).ToNot(BeNil())
+
+		// Create a secret for the user credentials if it doesn't exist
+		// Match the controller's secret naming format: "rabbitmq-user-<instance.Name>"
+		secretName := fmt.Sprintf("rabbitmq-user-%s", name.Name)
+		userSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: name.Namespace,
+			},
+			StringData: map[string]string{
+				"username": user.Spec.Username,
+				"password": "simulated-password-12345",
+			},
+		}
+		err := k8sClient.Create(th.Ctx, userSecret)
+		if err != nil && !k8s_errors.IsAlreadyExists(err) {
+			g.Expect(err).ShouldNot(HaveOccurred())
+		}
+
+		// Update user status
+		user.Status.SecretName = secretName
+		user.Status.Username = user.Spec.Username
+		user.Status.Vhost = vhost
+		user.Status.VhostRef = user.Spec.VhostRef
+		user.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, "Simulated ready for testing")
+		user.Status.Conditions.MarkTrue(condition.ReadyCondition, "Simulated ready for testing")
+		user.Status.ObservedGeneration = user.Generation
+
+		g.Expect(k8sClient.Status().Update(th.Ctx, user)).Should(Succeed())
+	}, th.Timeout, th.Interval).Should(Succeed())
+	th.Logger.Info("Simulated RabbitMQUser ready", "on", name)
+}
+
 func GetDNSMasq(name types.NamespacedName) *networkv1.DNSMasq {
 	instance := &networkv1.DNSMasq{}
 	Eventually(func(g Gomega) {
