@@ -376,7 +376,7 @@ def _server_evacuate_future(connection, server):
     return result
 
 
-def nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name):
+def nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name, region_name):
     try:
         loader = loading.get_plugin_loader("password")
         auth = loader.load_from_options(
@@ -389,7 +389,7 @@ def nova_login(username, password, projectname, auth_url, user_domain_name, proj
         )
 
         session = ksc_session.Session(auth=auth)
-        nova = client.Client("2.59", session=session)
+        nova = client.Client("2.59", session=session, region_name=region_name)
         nova.versions.get_current()
     except DiscoveryFailure as e:
         logging.error("Nova login failed: Discovery Failure: %s" % e)
@@ -756,9 +756,10 @@ def process_service(service, reserved_hosts, resume):
     user_domain_name = clouds[CLOUD]["auth"]["user_domain_name"]
     project_domain_name = clouds[CLOUD]["auth"]["project_domain_name"]
     password = secure[CLOUD]["auth"]["password"]
+    region_name = clouds[CLOUD]["region_name"]
 
     try:
-        conn = nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name)
+        conn = nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name, region_name)
 
     except Exception as e:
         logging.error("Failed: Unable to connect to Nova: " + str(e))
@@ -860,12 +861,13 @@ def main():
         user_domain_name = clouds[CLOUD]["auth"]["user_domain_name"]
         project_domain_name = clouds[CLOUD]["auth"]["project_domain_name"]
         password = secure[CLOUD]["auth"]["password"]
+        region_name = clouds[CLOUD]["region_name"]
     except Exception as e:
         logging.error("Could not find valid data for Cloud: %s" % CLOUD)
         sys.exit(1)
 
     try:
-        conn = nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name)
+        conn = nova_login(username, password, projectname, auth_url, user_domain_name, project_domain_name, region_name)
 
     except Exception as e:
         logging.error("Failed: Unable to connect to Nova: " + str(e))
