@@ -106,6 +106,23 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 		)
 	}
 
+	// Validate vhost reference if specified
+	if r.Spec.VhostRef != "" {
+		vhost := &RabbitMQVhost{}
+		if err := k8sClient.Get(context.TODO(),
+			client.ObjectKey{Name: r.Spec.VhostRef, Namespace: r.Namespace},
+			vhost); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "vhostRef"), r.Spec.VhostRef,
+						fmt.Sprintf("referenced vhost does not exist: %v", err)),
+				},
+			)
+		}
+	}
+
 	return nil, r.validateUniqueUsername(k8sClient)
 }
 

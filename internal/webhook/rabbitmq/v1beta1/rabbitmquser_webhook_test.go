@@ -185,5 +185,34 @@ var _ = Describe("RabbitMQUser webhook", func() {
 			_, err := newUser.ValidateUpdate(k8sClient, oldUser)
 			Expect(err).NotTo(HaveOccurred())
 		})
+
+		It("should reject updates with non-existent VhostRef", func() {
+			oldUser := &rabbitmqv1beta1.RabbitMQUser{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-user",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMQUserSpec{
+					RabbitmqClusterName: "test-cluster",
+					Username:            "my-username",
+				},
+			}
+
+			newUser := &rabbitmqv1beta1.RabbitMQUser{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-user",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMQUserSpec{
+					RabbitmqClusterName: "test-cluster",
+					Username:            "my-username",
+					VhostRef:            "non-existent-vhost",
+				},
+			}
+
+			_, err := newUser.ValidateUpdate(k8sClient, oldUser)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("referenced vhost does not exist"))
+		})
 	})
 })
