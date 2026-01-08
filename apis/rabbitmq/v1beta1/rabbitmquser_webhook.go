@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"regexp"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -39,11 +40,31 @@ var rabbitMQVarNameFmtRegexp = regexp.MustCompile("^" + rabbitMQVarNameFmt + "$"
 //+kubebuilder:webhook:path=/mutate-rabbitmq-openstack-org-v1beta1-rabbitmquser,mutating=true,failurePolicy=fail,sideEffects=None,groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=create;update,versions=v1beta1,name=mrabbitmquser.kb.io,admissionReviewVersions=v1
 
 // Default implements defaulting for RabbitMQUser
-func (r *RabbitMQUser) Default(_ client.Client) {
+func (r *RabbitMQUser) Default(k8sClient client.Client) {
 	rabbitmquserlog.Info("default", "name", r.Name)
 
-	// Default the username to the CR name if not specified
-	if r.Spec.Username == "" {
+	// Default credential selectors if not provided
+	if r.Spec.CredentialSelectors == nil {
+		r.Spec.CredentialSelectors = &CredentialSelectors{
+			Username: "username",
+			Password: "password",
+		}
+	}
+
+	// If using a secret, extract and set username from secret
+	if r.Spec.Secret != nil && *r.Spec.Secret != "" {
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(context.TODO(),
+			client.ObjectKey{Name: *r.Spec.Secret, Namespace: r.Namespace},
+			secret); err == nil {
+			// Extract username from secret and set in spec
+			usernameKey := r.Spec.CredentialSelectors.Username
+			if usernameBytes, ok := secret.Data[usernameKey]; ok {
+				r.Spec.Username = string(usernameBytes)
+			}
+		}
+	} else if r.Spec.Username == "" {
+		// No secret - default username to CR name
 		r.Spec.Username = r.Name
 	}
 }
@@ -54,13 +75,82 @@ func (r *RabbitMQUser) Default(_ client.Client) {
 func (r *RabbitMQUser) ValidateCreate(k8sClient client.Client) (admission.Warnings, error) {
 	rabbitmquserlog.Info("validate create", "name", r.Name)
 
-	// Validate username
-	if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
-		return nil, apierrors.NewInvalid(
-			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
-			r.Name,
-			field.ErrorList{field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error())},
-		)
+	// If Secret is specified, validate it
+	if r.Spec.Secret != nil && *r.Spec.Secret != "" {
+		secretName := *r.Spec.Secret
+
+		// Validate secret name doesn't use reserved pattern
+		reservedPattern := fmt.Sprintf("rabbitmq-user-%s", r.Name)
+		if secretName == reservedPattern {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "secret"), secretName,
+						fmt.Sprintf("secret name %q is reserved for auto-generated secrets", secretName)),
+				},
+			)
+		}
+
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(context.TODO(),
+			client.ObjectKey{Name: secretName, Namespace: r.Namespace},
+			secret); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "secret"), secretName,
+						fmt.Sprintf("referenced secret does not exist: %v", err)),
+				},
+			)
+		}
+
+		// Validate username and password keys exist
+		usernameKey := r.Spec.CredentialSelectors.Username
+		passwordKey := r.Spec.CredentialSelectors.Password
+
+		if _, ok := secret.Data[usernameKey]; !ok {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "credentialSelectors", "username"),
+						usernameKey,
+						fmt.Sprintf("key %q not found in secret %s", usernameKey, secretName)),
+				},
+			)
+		}
+
+		if _, ok := secret.Data[passwordKey]; !ok {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "credentialSelectors", "password"),
+						passwordKey,
+						fmt.Sprintf("key %q not found in secret %s", passwordKey, secretName)),
+				},
+			)
+		}
+
+		// Validate username format (username should already be set by Default webhook)
+		if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{field.Invalid(field.NewPath("spec", "secret"), r.Spec.Username, err.Error())},
+			)
+		}
+	} else {
+		// When not using a secret, validate the username directly
+		if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error())},
+			)
+		}
 	}
 
 	// Validate vhost reference if specified
@@ -80,7 +170,7 @@ func (r *RabbitMQUser) ValidateCreate(k8sClient client.Client) (admission.Warnin
 		}
 	}
 
-	return nil, r.validateUniqueUsername(k8sClient)
+	return nil, r.validateUniqueUsername(k8sClient, r.Spec.Username)
 }
 
 // ValidateUpdate validates the RabbitMQUser on update
@@ -92,15 +182,100 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 		return nil, fmt.Errorf("expected RabbitMQUser but got %T", old)
 	}
 
+	// If Secret is specified, validate it and extract username
+	if r.Spec.Secret != nil && *r.Spec.Secret != "" {
+		secretName := *r.Spec.Secret
+
+		// Validate secret name doesn't use reserved pattern
+		reservedPattern := fmt.Sprintf("rabbitmq-user-%s", r.Name)
+		if secretName == reservedPattern {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "secret"), secretName,
+						fmt.Sprintf("secret name %q is reserved for auto-generated secrets", secretName)),
+				},
+			)
+		}
+
+		secret := &corev1.Secret{}
+		if err := k8sClient.Get(context.TODO(),
+			client.ObjectKey{Name: secretName, Namespace: r.Namespace},
+			secret); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "secret"), secretName,
+						fmt.Sprintf("referenced secret does not exist: %v", err)),
+				},
+			)
+		}
+
+		// Validate username and password keys exist
+		usernameKey := r.Spec.CredentialSelectors.Username
+		passwordKey := r.Spec.CredentialSelectors.Password
+
+		if _, ok := secret.Data[usernameKey]; !ok {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "credentialSelectors", "username"),
+						usernameKey,
+						fmt.Sprintf("key %q not found in secret %s", usernameKey, secretName)),
+				},
+			)
+		}
+
+		if _, ok := secret.Data[passwordKey]; !ok {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{
+					field.Invalid(field.NewPath("spec", "credentialSelectors", "password"),
+						passwordKey,
+						fmt.Sprintf("key %q not found in secret %s", passwordKey, secretName)),
+				},
+			)
+		}
+
+		// Validate username format (username should already be set by Default webhook)
+		if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{field.Invalid(field.NewPath("spec", "secret"), r.Spec.Username, err.Error())},
+			)
+		}
+	} else {
+		// When not using a secret, validate the username directly
+		if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+			return nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+				r.Name,
+				field.ErrorList{field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error())},
+			)
+		}
+	}
+
 	// Prevent changing the username after creation
-	if r.Spec.Username != oldUser.Spec.Username {
+	// Check against status.Username if available (ground truth from RabbitMQ),
+	// otherwise fall back to spec.Username
+	oldUsername := oldUser.Status.Username
+	if oldUsername == "" {
+		oldUsername = oldUser.Spec.Username
+	}
+
+	if r.Spec.Username != oldUsername {
 		return nil, apierrors.NewInvalid(
 			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
 			r.Name,
 			field.ErrorList{
 				field.Forbidden(
 					field.NewPath("spec", "username"),
-					"username cannot be changed after creation",
+					fmt.Sprintf("username cannot be changed (was %q, now %q)", oldUsername, r.Spec.Username),
 				),
 			},
 		)
@@ -123,7 +298,7 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 		}
 	}
 
-	return nil, r.validateUniqueUsername(k8sClient)
+	return nil, r.validateUniqueUsername(k8sClient, r.Spec.Username)
 }
 
 // ValidateDelete validates the RabbitMQUser on deletion
@@ -132,7 +307,7 @@ func (r *RabbitMQUser) ValidateDelete(client.Client) (admission.Warnings, error)
 }
 
 // validateUniqueUsername checks that no other RabbitMQUser exists with the same username, vhost, and cluster
-func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
+func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client, username string) error {
 	// List all RabbitMQUsers in the same namespace
 	userList := &RabbitMQUserList{}
 	if err := k8sClient.List(context.TODO(), userList, client.InNamespace(r.Namespace)); err != nil {
@@ -156,8 +331,12 @@ func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 			continue
 		}
 
+		// Get the other user's username from spec.Username
+		// (webhook ensures spec.Username is always populated, either from user input or from secret)
+		otherUsername := user.Spec.Username
+
 		// If usernames match, reject
-		if r.Spec.Username == user.Spec.Username {
+		if username == otherUsername {
 			return apierrors.NewInvalid(
 				schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
 				r.Name,
@@ -165,7 +344,7 @@ func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 					field.Duplicate(
 						field.NewPath("spec", "username"),
 						fmt.Sprintf("username %q already exists in vhost %q on cluster %q (existing RabbitMQUser: %s)",
-							r.Spec.Username, r.Spec.VhostRef, r.Spec.RabbitmqClusterName, user.Name),
+							username, r.Spec.VhostRef, r.Spec.RabbitmqClusterName, user.Name),
 					),
 				},
 			)
