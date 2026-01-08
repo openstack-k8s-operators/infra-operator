@@ -14,4 +14,15 @@ commands:
       # there should be only a single pod accessible from the redis service
       oc -n $NAMESPACE get endpoints redis -o json | jq '.subsets[0].addresses | length'
       # the first pod should no longer be the master after the failover
-      echo "$SENTINELDATA" | grep address | grep -v redis-redis-0
+      # Check that the master address does NOT contain redis-redis-0
+      # Using sentinel's MASTER command for more reliable check
+      MASTER_INFO=$(oc rsh -n $NAMESPACE -c sentinel redis-redis-0 redis-cli -p 26379 SENTINEL master mymaster)
+      MASTER_IP=$(echo "$MASTER_INFO" | grep -A1 "^ip$" | tail -n1)
+      # Get the IP of redis-redis-0 to compare
+      POD_0_IP=$(oc get pod redis-redis-0 -n $NAMESPACE -o jsonpath='{.status.podIP}')
+      # Failover successful if master IP is different from redis-redis-0 IP
+      if [ "$MASTER_IP" = "$POD_0_IP" ]; then
+        echo "FAIL: redis-redis-0 ($POD_0_IP) is still the master, failover did not complete"
+        exit 1
+      fi
+      echo "SUCCESS: Master is now at $MASTER_IP (redis-redis-0 is at $POD_0_IP)"
