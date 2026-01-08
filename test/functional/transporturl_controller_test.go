@@ -27,7 +27,6 @@ import (
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 )
@@ -370,6 +369,19 @@ var _ = Describe("TransportURL controller", func() {
 			// Now simulate it as ready
 			SimulateRabbitMQVhostReady(vhostCRName)
 
+			// Wait for RabbitMQUser to be created
+			userCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-nova-user-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate RabbitMQUser being ready with the custom vhost
+			SimulateRabbitMQUserReady(userCRName, vhostName)
+
 			// Simulate RabbitMq CR being ready with ServiceHostnames
 			Eventually(func(g Gomega) {
 				rabbitmq := GetRabbitMQ(rabbitmqName)
@@ -384,37 +396,23 @@ var _ = Describe("TransportURL controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, rabbitmq)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			// Wait for RabbitMQUser to be created and ready
-			var userPassword string
-			Eventually(func(g Gomega) {
-				userList := &rabbitmqv1.RabbitMQUserList{}
-				g.Expect(k8sClient.List(ctx, userList, client.InNamespace(namespace))).Should(Succeed())
-				g.Expect(userList.Items).ToNot(BeEmpty())
+			// Verify RabbitMQUser permissions are set to ".*"
+			user := GetRabbitMQUser(userCRName)
+			Expect(user.Spec.Permissions.Configure).To(Equal(".*"), "Configure permission should be .*")
+			Expect(user.Spec.Permissions.Read).To(Equal(".*"), "Read permission should be .*")
+			Expect(user.Spec.Permissions.Write).To(Equal(".*"), "Write permission should be .*")
 
-				// Find the user created by this TransportURL
-				var user *rabbitmqv1.RabbitMQUser
-				for i := range userList.Items {
-					if userList.Items[i].Spec.Username == "nova-user" {
-						user = &userList.Items[i]
-						break
-					}
-				}
-				g.Expect(user).ToNot(BeNil(), "nova-user should be created")
-
-				// Wait for the user secret to be created by the controller
-				g.Expect(user.Status.SecretName).ToNot(BeEmpty(), "User secret should be created")
-
-				// Get the user secret to extract the actual password
-				userSecret := &corev1.Secret{}
-				secretName := types.NamespacedName{
-					Name:      user.Status.SecretName,
-					Namespace: namespace,
-				}
-				g.Expect(k8sClient.Get(ctx, secretName, userSecret)).Should(Succeed())
-				g.Expect(userSecret.Data).To(HaveKey("password"))
-				userPassword = string(userSecret.Data["password"])
-				g.Expect(userPassword).ToNot(BeEmpty())
-			}, timeout, interval).Should(Succeed())
+			// Get the user password from the secret
+			Expect(user.Status.SecretName).ToNot(BeEmpty(), "User secret should be created")
+			userSecret := &corev1.Secret{}
+			secretName := types.NamespacedName{
+				Name:      user.Status.SecretName,
+				Namespace: namespace,
+			}
+			Expect(k8sClient.Get(ctx, secretName, userSecret)).Should(Succeed())
+			Expect(userSecret.Data).To(HaveKey("password"))
+			userPassword := string(userSecret.Data["password"])
+			Expect(userPassword).ToNot(BeEmpty())
 
 			// Verify transport URL contains all three hosts with custom vhost and actual credentials
 			Eventually(func(g Gomega) {
@@ -443,6 +441,343 @@ var _ = Describe("TransportURL controller", func() {
 			Expect(tr.Status.RabbitmqUsername).To(Equal("nova-user"))
 			// Vhost in status is stored without leading slash but used with slash in the URL
 			Expect(tr.Status.RabbitmqVhost).To(Or(Equal("nova"), Equal("/nova")))
+		})
+	})
+
+	When("TransportURL vhost and username are updated after creation", func() {
+		var rabbitmqName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-update-test",
+				Namespace: namespace,
+			}
+
+			// Create RabbitMQCluster first
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			// Create RabbitMq CR
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create TransportURL with initial vhost and username
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+				"username":            "initial-user",
+				"vhost":               "initial-vhost",
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, tuSpec))
+		})
+
+		It("should update the secret when vhost is changed", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial RabbitMQVhost to be created
+			initialVhostCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-initial-vhost-vhost", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(k8sClient.Get(ctx, initialVhostCRName, vhost)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate initial vhost being ready
+			SimulateRabbitMQVhostReady(initialVhostCRName)
+
+			// Wait for initial RabbitMQUser to be created
+			initialUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-initial-user-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			var initialUserPassword string
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("initial-user"))
+				g.Expect(user.Spec.VhostRef).To(Equal(initialVhostCRName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready with credentials
+			SimulateRabbitMQUserReady(initialUserCRName, "initial-vhost")
+
+			// Get the initial user password from the secret
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Status.SecretName).ToNot(BeEmpty())
+
+				userSecret := &corev1.Secret{}
+				secretName := types.NamespacedName{
+					Name:      user.Status.SecretName,
+					Namespace: namespace,
+				}
+				g.Expect(k8sClient.Get(ctx, secretName, userSecret)).Should(Succeed())
+				g.Expect(userSecret.Data).To(HaveKey("password"))
+				initialUserPassword = string(userSecret.Data["password"])
+				g.Expect(initialUserPassword).ToNot(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify initial transport URL secret contains initial vhost
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(transportURLSecretName)
+				g.Expect(s.Data).To(HaveKey("transport_url"))
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring("initial-user"))
+				g.Expect(transportURL).To(ContainSubstring("/initial-vhost?ssl=0"))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify initial TransportURL status
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("initial-user"))
+				g.Expect(tr.Status.RabbitmqVhost).To(Or(Equal("initial-vhost"), Equal("/initial-vhost")))
+			}, timeout, interval).Should(Succeed())
+
+			// Update the TransportURL spec with new vhost
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				tr.Spec.Vhost = "updated-vhost"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new RabbitMQVhost to be created
+			updatedVhostCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-updated-vhost-vhost", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(k8sClient.Get(ctx, updatedVhostCRName, vhost)).Should(Succeed())
+				g.Expect(vhost.Spec.Name).To(Equal("updated-vhost"))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate updated vhost being ready
+			SimulateRabbitMQVhostReady(updatedVhostCRName)
+
+			// Wait for RabbitMQUser to be updated with new vhost
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.VhostRef).To(Equal(updatedVhostCRName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready with updated vhost
+			SimulateRabbitMQUserReady(initialUserCRName, "updated-vhost")
+
+			// Verify transport URL secret is updated with new vhost
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(transportURLSecretName)
+				g.Expect(s.Data).To(HaveKey("transport_url"))
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring("initial-user"))
+				g.Expect(transportURL).To(ContainSubstring("/updated-vhost?ssl=0"))
+				g.Expect(transportURL).ToNot(ContainSubstring("/initial-vhost"))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify updated TransportURL status
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("initial-user"))
+				g.Expect(tr.Status.RabbitmqVhost).To(Or(Equal("updated-vhost"), Equal("/updated-vhost")))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should update the secret when vhost is added after creation", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Create TransportURL WITHOUT vhost initially (will use default "/")
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+				"username":            "test-user",
+			}
+			transportURLNoVhost := types.NamespacedName{
+				Name:      "foo-no-vhost",
+				Namespace: namespace,
+			}
+			secretNameNoVhost := types.NamespacedName{
+				Name:      "rabbitmq-transport-url-foo-no-vhost",
+				Namespace: namespace,
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLNoVhost, tuSpec))
+
+			// Wait for RabbitMQUser to be created (no vhost, so no RabbitMQVhost CR)
+			initialUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-test-user-user", transportURLNoVhost.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.VhostRef).To(BeEmpty(), "Should have no vhost ref initially")
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready with default vhost "/"
+			SimulateRabbitMQUserReady(initialUserCRName, "/")
+
+			// Verify initial transport URL uses default vhost "/"
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(secretNameNoVhost)
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring("test-user"))
+				// Default vhost "/" should appear in the URL
+				g.Expect(transportURL).To(MatchRegexp(`/\?ssl=0$`), "Should use default vhost /")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify initial TransportURL status shows default vhost
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLNoVhost)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("test-user"))
+				g.Expect(tr.Status.RabbitmqVhost).To(Equal("/"))
+			}, timeout, interval).Should(Succeed())
+
+			// NOW ADD A VHOST - this is the user's scenario!
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLNoVhost)
+				tr.Spec.Vhost = "new-vhost"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for RabbitMQVhost to be created
+			newVhostCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-new-vhost-vhost", transportURLNoVhost.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(k8sClient.Get(ctx, newVhostCRName, vhost)).Should(Succeed())
+				g.Expect(vhost.Spec.Name).To(Equal("new-vhost"))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate new vhost being ready
+			SimulateRabbitMQVhostReady(newVhostCRName)
+
+			// Wait for RabbitMQUser to be updated with new vhost reference
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.VhostRef).To(Equal(newVhostCRName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready with NEW vhost
+			SimulateRabbitMQUserReady(initialUserCRName, "new-vhost")
+
+			// Verify transport URL secret is UPDATED with new vhost
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(secretNameNoVhost)
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring("test-user"))
+				g.Expect(transportURL).To(ContainSubstring("/new-vhost?ssl=0"))
+				// Ensure it's NOT using the default vhost anymore
+				g.Expect(transportURL).ToNot(MatchRegexp(`/\?ssl=0$`))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify updated TransportURL status
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLNoVhost)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("test-user"))
+				g.Expect(tr.Status.RabbitmqVhost).To(Or(Equal("new-vhost"), Equal("/new-vhost")))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should update the secret when username is changed", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial RabbitMQVhost to be created
+			vhostCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-initial-vhost-vhost", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(k8sClient.Get(ctx, vhostCRName, vhost)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate vhost being ready
+			SimulateRabbitMQVhostReady(vhostCRName)
+
+			// Wait for initial RabbitMQUser to be created
+			initialUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-initial-user-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate initial user being ready
+			SimulateRabbitMQUserReady(initialUserCRName, "initial-vhost")
+
+			// Verify initial transport URL
+			var initialPassword string
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, initialUserCRName, user)).Should(Succeed())
+				g.Expect(user.Status.SecretName).ToNot(BeEmpty())
+
+				userSecret := &corev1.Secret{}
+				secretName := types.NamespacedName{
+					Name:      user.Status.SecretName,
+					Namespace: namespace,
+				}
+				g.Expect(k8sClient.Get(ctx, secretName, userSecret)).Should(Succeed())
+				initialPassword = string(userSecret.Data["password"])
+
+				s := th.GetSecret(transportURLSecretName)
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring(fmt.Sprintf("initial-user:%s", initialPassword)))
+			}, timeout, interval).Should(Succeed())
+
+			// Update the TransportURL spec with new username
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				tr.Spec.Username = "updated-user"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new RabbitMQUser to be created
+			updatedUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-updated-user-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, updatedUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("updated-user"))
+				g.Expect(user.Spec.VhostRef).To(Equal(vhostCRName.Name))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate updated user being ready
+			SimulateRabbitMQUserReady(updatedUserCRName, "initial-vhost")
+
+			// Verify transport URL secret is updated with new username
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, updatedUserCRName, user)).Should(Succeed())
+				g.Expect(user.Status.SecretName).ToNot(BeEmpty())
+
+				userSecret := &corev1.Secret{}
+				secretName := types.NamespacedName{
+					Name:      user.Status.SecretName,
+					Namespace: namespace,
+				}
+				g.Expect(k8sClient.Get(ctx, secretName, userSecret)).Should(Succeed())
+				updatedPassword := string(userSecret.Data["password"])
+
+				s := th.GetSecret(transportURLSecretName)
+				transportURL := string(s.Data["transport_url"])
+				g.Expect(transportURL).To(ContainSubstring(fmt.Sprintf("updated-user:%s", updatedPassword)))
+				g.Expect(transportURL).ToNot(ContainSubstring(fmt.Sprintf("initial-user:%s", initialPassword)))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify updated TransportURL status
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("updated-user"))
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 })
