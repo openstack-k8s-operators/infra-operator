@@ -21,6 +21,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// CredentialSelectors defines selectors for username and password in a secret
+type CredentialSelectors struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="username"
+	// Username - key name for username in the secret (default "username")
+	Username string `json:"username"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="password"
+	// Password - key name for password in the secret (default "password")
+	Password string `json:"password"`
+}
+
 // RabbitMQUserPermissions defines permissions for a user on a vhost.
 // Design note: this implementation uses a default of ".*" (allow all).
 // To explicitly deny permissions, set the field to an empty string "".
@@ -56,6 +69,16 @@ type RabbitMQUserSpec struct {
 	// +kubebuilder:validation:Optional
 	// Username - the username in RabbitMQ (defaults to CR name)
 	Username string `json:"username,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// Secret - name of secret containing user credentials (username and password)
+	// If specified, credentials will be read from this secret instead of being auto-generated
+	Secret *string `json:"secret,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// CredentialSelectors - selectors to identify username and password keys in the secret
+	// Defaults to {username: "username", password: "password"} when not specified
+	CredentialSelectors *CredentialSelectors `json:"credentialSelectors,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// Permissions - user permissions on the vhost
