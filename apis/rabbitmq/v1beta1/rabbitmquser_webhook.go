@@ -54,13 +54,9 @@ func (r *RabbitMQUser) Default(_ client.Client) {
 func (r *RabbitMQUser) ValidateCreate(k8sClient client.Client) (admission.Warnings, error) {
 	rabbitmquserlog.Info("validate create", "name", r.Name)
 
-	// Validate username
-	if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
-		return nil, apierrors.NewInvalid(
-			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
-			r.Name,
-			field.ErrorList{field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error())},
-		)
+	// Validate username format and length
+	if err := r.validateUsername(); err != nil {
+		return nil, err
 	}
 
 	// Validate vhost reference if specified
@@ -106,6 +102,12 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 		)
 	}
 
+	// Defensive validation: even though username can't change, validate format and length
+	// This protects against bypasses or bugs in the immutability check
+	if err := r.validateUsername(); err != nil {
+		return nil, err
+	}
+
 	// Validate vhost reference if specified
 	if r.Spec.VhostRef != "" {
 		vhost := &RabbitMQVhost{}
@@ -129,6 +131,38 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 // ValidateDelete validates the RabbitMQUser on deletion
 func (r *RabbitMQUser) ValidateDelete(client.Client) (admission.Warnings, error) {
 	return nil, nil
+}
+
+// validateUsername validates the username format and length
+func (r *RabbitMQUser) validateUsername() error {
+	var allErrs field.ErrorList
+
+	// Validate username format
+	if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error()))
+	}
+
+	// Validate username length to ensure it fits within vhost finalizer length limits
+	// The username will be used in the vhost finalizer: UserVhostFinalizerPrefix + username
+	// Maximum username length = 63 (k8s finalizer limit) - len(prefix)
+	maxUsernameLength := 63 - len(UserVhostFinalizerPrefix)
+	if len(r.Spec.Username) > maxUsernameLength {
+		allErrs = append(allErrs, field.TooLong(
+			field.NewPath("spec", "username"),
+			r.Spec.Username,
+			maxUsernameLength,
+		))
+	}
+
+	if len(allErrs) != 0 {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+			r.Name,
+			allErrs,
+		)
+	}
+
+	return nil
 }
 
 // validateUniqueUsername checks that no other RabbitMQUser exists with the same username, vhost, and cluster

@@ -164,7 +164,7 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 	}
 
 	// Wait for user-managed finalizers to be removed before deleting vhost
-	// These follow the pattern: rabbitmquser.rabbitmq.openstack.org/user-<name>
+	// These follow the pattern: rmquser.openstack.org/u-<username>
 	// The RabbitMQUser controller removes these finalizers during user deletion.
 	// Note: If a user is force-deleted (finalizers manually removed), the vhost may remain
 	// stuck with an orphaned finalizer. In such cases, manually remove the finalizer from
@@ -172,32 +172,41 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 	for _, finalizer := range instance.Finalizers {
 		if len(finalizer) > len(rabbitmqv1.UserVhostFinalizerPrefix) &&
 			finalizer[:len(rabbitmqv1.UserVhostFinalizerPrefix)] == rabbitmqv1.UserVhostFinalizerPrefix {
-			// Extract user name from finalizer
-			userName := finalizer[len(rabbitmqv1.UserVhostFinalizerPrefix):]
+			// Extract username from finalizer
+			username := finalizer[len(rabbitmqv1.UserVhostFinalizerPrefix):]
 
-			// Check if user still exists
-			user := &rabbitmqv1.RabbitMQUser{}
-			err := r.Get(ctx, types.NamespacedName{Name: userName, Namespace: instance.Namespace}, user)
-			if err != nil {
-				// If user lookup fails (other than NotFound), requeue
-				if !k8s_errors.IsNotFound(err) {
-					return ctrl.Result{}, err
-				}
+			// Use field index to efficiently find users with this username
+			userList := &rabbitmqv1.RabbitMQUserList{}
+			if err := r.List(ctx, userList,
+				client.InNamespace(instance.Namespace),
+				client.MatchingFields{"spec.username": username}); err != nil {
+				Log.Error(err, "Failed to list users while checking vhost finalizers")
+				return ctrl.Result{}, err
+			}
+
+			// Check if any users with this username still exist
+			// (already filtered by field index above, so just check if we got any results)
+			var matchingUser *rabbitmqv1.RabbitMQUser
+			if len(userList.Items) > 0 {
+				matchingUser = &userList.Items[0]
+			}
+
+			if matchingUser == nil {
 				// User not found - this shouldn't happen in normal flow
 				// User controller should have removed the finalizer before deletion
 				// If we get here, the user was likely force-deleted
-				Log.Info("User not found but finalizer remains on vhost", "vhost", instance.Name, "user", userName, "finalizer", finalizer)
+				Log.Info("User not found but finalizer remains on vhost", "vhost", instance.Name, "username", username, "finalizer", finalizer)
 				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 			}
 
 			// User exists - check if it's being deleted
-			if user.DeletionTimestamp.IsZero() {
+			if matchingUser.DeletionTimestamp.IsZero() {
 				// Active user still references this vhost - wait
-				Log.Info("Vhost deletion blocked by active user", "vhost", instance.Name, "user", userName)
+				Log.Info("Vhost deletion blocked by active user", "vhost", instance.Name, "user", matchingUser.Name, "username", username)
 				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 			}
 			// User is being deleted - wait for it to remove its finalizer
-			Log.Info("Vhost deletion waiting for user deletion to complete", "vhost", instance.Name, "user", userName)
+			Log.Info("Vhost deletion waiting for user deletion to complete", "vhost", instance.Name, "user", matchingUser.Name, "username", username)
 			return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 		}
 	}
@@ -257,6 +266,15 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQVhostReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index RabbitMQUsers by username for efficient lookup
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &rabbitmqv1.RabbitMQUser{}, "spec.username",
+		func(obj client.Object) []string {
+			user := obj.(*rabbitmqv1.RabbitMQUser)
+			return []string{user.Spec.Username}
+		}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.RabbitMQVhost{}).
 		Complete(r)

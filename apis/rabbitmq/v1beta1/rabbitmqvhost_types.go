@@ -83,8 +83,9 @@ const (
 	VhostFinalizer = "rabbitmqvhost.rabbitmq.openstack.org/finalizer"
 
 	// UserVhostFinalizerPrefix - prefix for per-user finalizers added to vhosts by RabbitMQUser controller
-	// Full finalizer format: rabbitmquser.rabbitmq.openstack.org/user-<username>
-	UserVhostFinalizerPrefix = "rabbitmquser.rabbitmq.openstack.org/user-"
+	// Full finalizer format: rmquser.openstack.org/u-<username>
+	// The short prefix allows for usernames up to 38 chars (63 - 25 = 38)
+	UserVhostFinalizerPrefix = "rmquser.openstack.org/u-"
 
 	// RabbitMQVhostReadyCondition indicates that the vhost is ready
 	RabbitMQVhostReadyCondition condition.Type = "RabbitMQVhostReady"

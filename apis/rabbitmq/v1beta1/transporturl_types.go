@@ -58,6 +58,10 @@ type TransportURLStatus struct {
 	// RabbitmqVhost - the actual vhost name used
 	RabbitmqVhost string `json:"rabbitmqVhost,omitempty"`
 
+	// RabbitmqUserRef - the name of the RabbitMQUser CR that was created or referenced by this TransportURL.
+	// Empty if using default cluster admin credentials (no dedicated RabbitMQUser CR)
+	RabbitmqUserRef string `json:"rabbitmqUserRef,omitempty"`
+
 	// ObservedGeneration - the most recent generation observed for this
 	// service. If the observed generation is less than the spec generation,
 	// then the controller has not processed the latest changes injected by

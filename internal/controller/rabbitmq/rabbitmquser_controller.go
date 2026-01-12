@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -136,7 +137,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// Handle VhostRef changes - remove finalizer from old vhost if changed
 	// We track the previous vhost CR name in status.VhostRef to detect changes
-	userFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + instance.Name
+	userFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + username
 	if instance.Status.VhostRef != "" && instance.Status.VhostRef != instance.Spec.VhostRef {
 		// VhostRef changed - remove finalizer from old vhost
 		oldVhost := &rabbitmqv1.RabbitMQVhost{}
@@ -313,8 +314,46 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	// If TransportURL finalizer exists, wait for TransportURL to remove it
 	// The TransportURL controller manages this finalizer and removes it when switching users
 	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.TransportURLFinalizer) {
+		instance.Status.Conditions.MarkFalse(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.DeletingReason,
+			condition.SeverityInfo,
+			"Waiting for TransportURL to release user (finalizer: %s)",
+			rabbitmqv1.TransportURLFinalizer,
+		)
 		return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 	}
+
+	// Check for external finalizers (not managed by this controller)
+	// Wait for all external finalizers to be removed before proceeding with cleanup
+	// This ensures other controllers (e.g., dataplane) finish using this user before deletion
+	externalFinalizers := []string{}
+	for _, finalizer := range instance.GetFinalizers() {
+		if !rabbitmqv1.IsInternalFinalizer(finalizer) {
+			externalFinalizers = append(externalFinalizers, finalizer)
+		}
+	}
+
+	if len(externalFinalizers) > 0 {
+		Log.Info("Waiting for external finalizers to be removed before deleting user",
+			"user", instance.Name,
+			"finalizers", strings.Join(externalFinalizers, ", "))
+
+		instance.Status.Conditions.MarkFalse(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.DeletingReason,
+			condition.SeverityInfo,
+			"Waiting for external finalizers to be removed: %s",
+			strings.Join(externalFinalizers, ", "),
+		)
+		return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
+	}
+
+	// All external finalizers removed, mark as ready for deletion
+	instance.Status.Conditions.MarkTrue(
+		rabbitmqv1.RabbitMQUserReadyCondition,
+		"RabbitMQ user ready for deletion",
+	)
 
 	// Remove per-user finalizer from vhost if it exists
 	// Use VhostRef from status (current) or spec (fallback) to find the vhost
@@ -323,7 +362,7 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 		vhostRef = instance.Spec.VhostRef
 	}
 	if vhostRef != "" {
-		userFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + instance.Name
+		userFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + instance.Spec.Username
 		vhost := &rabbitmqv1.RabbitMQVhost{}
 		if err := r.Get(ctx, types.NamespacedName{Name: vhostRef, Namespace: instance.Namespace}, vhost); err == nil {
 			if controllerutil.RemoveFinalizer(vhost, userFinalizer) {
@@ -373,6 +412,16 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 
 	if k8s_errors.IsNotFound(err) || !rabbit.DeletionTimestamp.IsZero() {
 		// Cluster doesn't exist or is being deleted - nothing to clean up
+		Log.Info("RabbitMQ cluster not found or being deleted, skipping user cleanup",
+			"cluster", instance.Spec.RabbitmqClusterName,
+			"notFound", k8s_errors.IsNotFound(err),
+			"beingDeleted", !rabbit.DeletionTimestamp.IsZero())
+
+		instance.Status.Conditions.MarkTrue(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			"RabbitMQ cluster deleted, skipping user cleanup",
+		)
+
 		controllerutil.RemoveFinalizer(instance, userFinalizer)
 		return ctrl.Result{}, nil
 	}
