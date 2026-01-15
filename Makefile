@@ -122,10 +122,14 @@ PROCS?=$(shell expr $(shell nproc --ignore 2) / 2)
 PROC_CMD = --procs ${PROCS}
 
 .PHONY: test
-test: manifests generate gowork fmt vet envtest ginkgo ## Run tests.
+test: manifests generate gowork fmt vet envtest ginkgo test-instanceha ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" \
 	OPERATOR_TEMPLATES="$(PWD)/templates" \
 	$(GINKGO) --trace --cover --coverpkg=./pkg/...,./internal/...,./apis/network/v1beta1/...,./apis/rabbitmq/v1beta1/... --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/... ./apis/network/... ./apis/rabbitmq/... ./internal/webhook/...
+
+.PHONY: test-instanceha
+test-instanceha: ## Run instanceha tests.
+	/bin/bash test/instanceha/run_tests.sh
 
 ##@ Build
 
