@@ -66,6 +66,7 @@ rules:
   - placement.openstack.org
   - swift.openstack.org
   - telemetry.openstack.org
+  - watcher.openstack.org
   resources:
   - '*'
   verbs:

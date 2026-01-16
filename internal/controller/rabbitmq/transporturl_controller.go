@@ -76,6 +76,20 @@ func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
 	return log.FromContext(ctx).WithName("Controllers").WithName("TransportURL")
 }
 
+// Constants for old user cleanup
+const (
+	// Grace period after removing TransportURL finalizer before deleting user.
+	// This ensures the owner service has time to reconcile with new credentials
+	// before the old user is removed from RabbitMQ.
+	userCleanupGracePeriod = 30 * time.Second
+
+	// Requeue interval when waiting for owner service to be ready
+	ownerReadinessCheckInterval = 10 * time.Second
+
+	// Annotation key for tracking when the TransportURL finalizer was removed
+	finalizerRemovedAtAnnotation = "rabbitmq.openstack.org/finalizer-removed-at"
+)
+
 // isOwnerServiceReady checks if the owner service (Cinder, Nova, etc.) that owns this TransportURL is ready.
 // Returns:
 //   - ready: true if the owner is ready, false if not ready
@@ -104,8 +118,7 @@ func (r *TransportURLReconciler) isOwnerServiceReady(ctx context.Context, instan
 	// Parse the APIVersion to extract group and version
 	gv, err := schema.ParseGroupVersion(ownerRef.APIVersion)
 	if err != nil {
-		Log.Error(err, "Failed to parse owner APIVersion", "apiVersion", ownerRef.APIVersion)
-		return false, 0, err
+		return false, 0, fmt.Errorf("failed to parse owner APIVersion %s: %w", ownerRef.APIVersion, err)
 	}
 
 	// Fetch the owner resource using unstructured client
@@ -127,9 +140,8 @@ func (r *TransportURLReconciler) isOwnerServiceReady(ctx context.Context, instan
 			Log.Info("Owner resource not found", "kind", ownerRef.Kind, "name", ownerRef.Name)
 			return true, 0, nil
 		}
-		// Unexpected error, log and return error
-		Log.Error(err, "Failed to fetch owner resource", "kind", ownerRef.Kind, "name", ownerRef.Name)
-		return false, 0, err
+		// Unexpected error, return error
+		return false, 0, fmt.Errorf("failed to fetch owner resource %s/%s: %w", ownerRef.Kind, ownerRef.Name, err)
 	}
 
 	// Check status.conditions for Ready condition
@@ -192,138 +204,196 @@ func (r *TransportURLReconciler) isOwnerServiceReady(ctx context.Context, instan
 
 // cleanupOldUser handles the cleanup of an old RabbitMQUser when credentials are rotated.
 // It removes the TransportURL finalizer and deletes the user after the owner service has reconciled.
+//
+// State machine:
+//  1. Owner service not ready → wait and requeue
+//  2. Has TransportURL finalizer → remove finalizer, set timestamp, requeue
+//  3. Grace period not elapsed → wait for remaining time
+//  4. External finalizers present → skip deletion (let external controller handle it)
+//  5. Grace period elapsed → delete user
+//
 // Returns the requeue duration (0 if no requeue needed) and any error encountered.
 func (r *TransportURLReconciler) cleanupOldUser(
 	ctx context.Context,
 	instance *rabbitmqv1.TransportURL,
-	oldUser *rabbitmqv1.RabbitMQUser,
+	oldUserName types.NamespacedName,
 ) (requeueAfter time.Duration, err error) {
 	Log := r.GetLogger(ctx)
 
-	// Check if owner service (Cinder, Nova, etc.) is ready with new credentials
-	// We only remove our finalizer after the owner has switched to the new user
-	hasTransportURLFinalizer := controllerutil.ContainsFinalizer(oldUser, rabbitmqv1.TransportURLFinalizer)
+	// Always fetch fresh user data from API server
+	// The oldUserName comes from a List operation which may be stale
+	user := &rabbitmqv1.RabbitMQUser{}
+	if err := r.Get(ctx, oldUserName, user); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			// User was already deleted - success
+			Log.Info("Old user already deleted", "user", oldUserName.Name)
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to get user %s for cleanup: %w", oldUserName.Name, err)
+	}
+
+	// Check if owner service is ready with new credentials
+	// We only proceed with cleanup after the owner has switched to the new user
+	ownerReady, _, err := r.isOwnerServiceReady(ctx, instance)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check owner service readiness for user %s: %w", user.Name, err)
+	}
+	if !ownerReady {
+		Log.Info("Waiting for owner service to be ready before cleanup", "user", user.Name)
+		return ownerReadinessCheckInterval, nil
+	}
+
+	// State machine based on whether TransportURL finalizer is present
+	hasTransportURLFinalizer := controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)
+
 	if hasTransportURLFinalizer {
-		// Check if owner service is ready before removing our finalizer
-		ownerReady, _, err := r.isOwnerServiceReady(ctx, instance)
-		if err != nil {
-			Log.Error(err, "Failed to check owner service readiness", "user", oldUser.Name)
-			return 0, err
-		}
+		// Phase 1: Remove finalizer and start grace period
+		return r.startUserCleanupGracePeriod(ctx, user)
+	}
 
-		if !ownerReady {
-			Log.Info("Waiting for owner service to be ready before removing TransportURL finalizer", "user", oldUser.Name)
-			return 10 * time.Second, nil
-		}
+	// Phase 2: Wait for grace period, then delete
+	return r.deleteUserAfterGracePeriod(ctx, instance, user)
+}
 
-		// Owner service is ready with new credentials - remove finalizer and set grace period
-		controllerutil.RemoveFinalizer(oldUser, rabbitmqv1.TransportURLFinalizer)
-		if oldUser.Annotations == nil {
-			oldUser.Annotations = make(map[string]string)
+// startUserCleanupGracePeriod removes the TransportURL finalizer and marks the timestamp
+// when cleanup started. Returns the requeue duration (grace period) and any error.
+func (r *TransportURLReconciler) startUserCleanupGracePeriod(
+	ctx context.Context,
+	user *rabbitmqv1.RabbitMQUser,
+) (time.Duration, error) {
+	Log := r.GetLogger(ctx)
+
+	// Remove TransportURL finalizer
+	controllerutil.RemoveFinalizer(user, rabbitmqv1.TransportURLFinalizer)
+
+	// Set timestamp annotation to track when grace period started
+	if user.Annotations == nil {
+		user.Annotations = make(map[string]string)
+	}
+	user.Annotations[finalizerRemovedAtAnnotation] = time.Now().UTC().Format(time.RFC3339)
+
+	// Update the user
+	if err := r.Update(ctx, user); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			// User was deleted before we could update - that's fine
+			Log.Info("User deleted before finalizer could be removed", "user", user.Name)
+			return 0, nil
 		}
-		// Store timestamp when we removed the finalizer to enforce grace period
-		oldUser.Annotations["rabbitmq.openstack.org/finalizer-removed-at"] = time.Now().UTC().Format(time.RFC3339)
-		if err := r.Update(ctx, oldUser); err != nil {
-			if !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "Failed to remove TransportURL finalizer from old user", "user", oldUser.Name)
-				return 0, err
-			}
-		}
-		Log.Info("Owner service is ready, removed TransportURL finalizer - starting grace period before deletion",
-			"user", oldUser.Name)
-		// Return to trigger next reconciliation
+		return 0, fmt.Errorf("failed to remove TransportURL finalizer from user %s: %w", user.Name, err)
+	}
+
+	Log.Info("Removed TransportURL finalizer, starting grace period",
+		"user", user.Name,
+		"gracePeriod", userCleanupGracePeriod)
+
+	// Requeue after the grace period
+	return userCleanupGracePeriod, nil
+}
+
+// deleteUserAfterGracePeriod checks if the grace period has elapsed and deletes the user.
+// Returns the requeue duration (remaining grace period) or 0 if deletion succeeded.
+func (r *TransportURLReconciler) deleteUserAfterGracePeriod(
+	ctx context.Context,
+	instance *rabbitmqv1.TransportURL,
+	user *rabbitmqv1.RabbitMQUser,
+) (time.Duration, error) {
+	Log := r.GetLogger(ctx)
+
+	// Check for external finalizers - if present, we can't delete
+	if hasExternalFinalizers(user) {
+		Log.Info("External finalizers present, skipping deletion",
+			"user", user.Name,
+			"finalizers", user.GetFinalizers())
 		return 0, nil
 	}
 
-	// Finalizer was already removed in a previous reconcile
-	// Refresh the user object from API server to get latest state
-	freshUser := &rabbitmqv1.RabbitMQUser{}
-	if err := r.Get(ctx, types.NamespacedName{Name: oldUser.Name, Namespace: oldUser.Namespace}, freshUser); err != nil {
+	// Check if grace period has elapsed
+	remaining, hasTimestamp := r.checkGracePeriod(user)
+
+	if !hasTimestamp {
+		// Finalizer was removed but no timestamp set (shouldn't happen, but handle it)
+		// Set timestamp now and requeue
+		Log.Info("Finalizer removed but no timestamp found, setting it now", "user", user.Name)
+		return r.startUserCleanupGracePeriod(ctx, user)
+	}
+
+	if remaining > 0 {
+		// Still in grace period - wait
+		Log.Info("Waiting for grace period before deletion",
+			"user", user.Name,
+			"remaining", remaining.Round(time.Second))
+		return remaining, nil
+	}
+
+	// Grace period elapsed - re-verify owner is still ready before deletion
+	// This ensures we don't delete the user if owner becomes not-ready during grace period
+	ownerReady, _, err := r.isOwnerServiceReady(ctx, instance)
+	if err != nil {
+		return 0, fmt.Errorf("failed to check owner service readiness before deletion for user %s: %w", user.Name, err)
+	}
+	if !ownerReady {
+		Log.Info("Owner service no longer ready, waiting before deletion", "user", user.Name)
+		return ownerReadinessCheckInterval, nil
+	}
+
+	// Grace period elapsed and owner is ready - delete the user
+	Log.Info("Grace period elapsed, deleting old user",
+		"user", user.Name,
+		"gracePeriod", userCleanupGracePeriod)
+
+	if err := r.Delete(ctx, user); err != nil {
 		if k8s_errors.IsNotFound(err) {
-			// User was already deleted, nothing to do
-			Log.Info("Old user was already deleted", "user", oldUser.Name)
+			// Already deleted - success
+			Log.Info("User already deleted", "user", user.Name)
 			return 0, nil
 		}
-		Log.Error(err, "Failed to refresh user object", "user", oldUser.Name)
-		return 0, err
+		return 0, fmt.Errorf("failed to delete user %s: %w", user.Name, err)
 	}
 
-	// Check for external finalizers that would block deletion
-	hasExternalFinalizer := false
-	for _, finalizer := range freshUser.GetFinalizers() {
-		if !rabbitmqv1.IsInternalFinalizer(finalizer) {
-			hasExternalFinalizer = true
-			Log.Info("External finalizer present, skipping deletion", "user", freshUser.Name, "finalizer", finalizer)
-			break
-		}
-	}
-
-	// Only delete if no external finalizers present
-	if !hasExternalFinalizer {
-		// Verify owner service is still ready before deletion
-		ownerReady, _, err := r.isOwnerServiceReady(ctx, instance)
-		if err != nil {
-			Log.Error(err, "Failed to check owner service readiness before deletion", "user", freshUser.Name)
-			return 0, err
-		}
-
-		if !ownerReady {
-			Log.Info("Owner service no longer ready, waiting before deletion", "user", freshUser.Name)
-			return 10 * time.Second, nil
-		}
-
-		// Check grace period after finalizer removal
-		// Grace period ensures owner service has time to reconcile and update its configuration
-		const gracePeriodSeconds = 30
-
-		timestampStr, hasTimestamp := freshUser.Annotations["rabbitmq.openstack.org/finalizer-removed-at"]
-		if !hasTimestamp {
-			// Finalizer was removed but no timestamp set - set it now
-			if freshUser.Annotations == nil {
-				freshUser.Annotations = make(map[string]string)
-			}
-			freshUser.Annotations["rabbitmq.openstack.org/finalizer-removed-at"] = time.Now().UTC().Format(time.RFC3339)
-			if err := r.Update(ctx, freshUser); err != nil {
-				if !k8s_errors.IsNotFound(err) {
-					Log.Error(err, "Failed to set finalizer removal timestamp", "user", freshUser.Name)
-					return 0, err
-				}
-			}
-			Log.Info("Finalizer was already removed, set timestamp and starting grace period", "user", freshUser.Name)
-			return gracePeriodSeconds * time.Second, nil
-		}
-
-		// Parse the stored timestamp
-		removedAt, err := time.Parse(time.RFC3339, timestampStr)
-		if err != nil {
-			Log.Error(err, "Failed to parse finalizer removal timestamp", "user", freshUser.Name, "timestamp", timestampStr)
-			// If we can't parse it, treat it as if grace period has elapsed (fail open)
-		} else {
-			elapsed := time.Since(removedAt)
-			if elapsed < gracePeriodSeconds*time.Second {
-				remaining := gracePeriodSeconds*time.Second - elapsed
-				Log.Info("Waiting for grace period before deleting old user",
-					"user", freshUser.Name,
-					"elapsed", elapsed.Round(time.Second),
-					"remaining", remaining.Round(time.Second))
-				// Requeue after the remaining time
-				return remaining, nil
-			}
-			Log.Info("Grace period elapsed, proceeding with deletion",
-				"user", freshUser.Name,
-				"elapsed", elapsed.Round(time.Second))
-		}
-
-		Log.Info("Owner service ready and no external finalizers, deleting old user", "user", freshUser.Name)
-		if err := r.Delete(ctx, freshUser); err != nil {
-			if !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "Failed to delete orphaned user", "user", freshUser.Name)
-				return 0, err
-			}
-		}
-	}
-
+	Log.Info("Successfully deleted old user", "user", user.Name)
 	return 0, nil
+}
+
+// checkGracePeriod checks if the grace period has elapsed based on the annotation timestamp.
+// Returns:
+//   - remaining: time remaining in grace period (0 if elapsed or parse error)
+//   - hasTimestamp: whether a valid timestamp annotation exists
+func (r *TransportURLReconciler) checkGracePeriod(user *rabbitmqv1.RabbitMQUser) (remaining time.Duration, hasTimestamp bool) {
+	Log := r.GetLogger(context.Background())
+
+	timestampStr, ok := user.Annotations[finalizerRemovedAtAnnotation]
+	if !ok {
+		return 0, false
+	}
+
+	// Parse the timestamp
+	removedAt, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		// Can't parse timestamp - fail open (allow deletion)
+		Log.Error(err, "Failed to parse grace period timestamp, allowing deletion",
+			"user", user.Name,
+			"timestamp", timestampStr)
+		return 0, true
+	}
+
+	// Calculate remaining time
+	elapsed := time.Since(removedAt)
+	if elapsed >= userCleanupGracePeriod {
+		return 0, true // Grace period elapsed
+	}
+
+	return userCleanupGracePeriod - elapsed, true
+}
+
+// hasExternalFinalizers returns true if the user has any non-internal finalizers.
+// External finalizers indicate that another controller needs to perform cleanup.
+func hasExternalFinalizers(user *rabbitmqv1.RabbitMQUser) bool {
+	for _, finalizer := range user.GetFinalizers() {
+		if !rabbitmqv1.IsInternalFinalizer(finalizer) {
+			return true
+		}
+	}
+	return false
 }
 
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=transporturls,verbs=get;list;watch;create;update;patch;delete
@@ -333,7 +403,7 @@ func (r *TransportURLReconciler) cleanupOldUser(
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts,verbs=get;list;watch;create;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
-//+kubebuilder:rbac:groups=cinder.openstack.org;glance.openstack.org;heat.openstack.org;horizon.openstack.org;ironic.openstack.org;keystone.openstack.org;manila.openstack.org;neutron.openstack.org;nova.openstack.org;octavia.openstack.org;ovn.openstack.org;placement.openstack.org;swift.openstack.org;telemetry.openstack.org;designate.openstack.org;barbican.openstack.org,resources=*,verbs=get;list
+//+kubebuilder:rbac:groups=cinder.openstack.org;glance.openstack.org;heat.openstack.org;horizon.openstack.org;ironic.openstack.org;keystone.openstack.org;manila.openstack.org;neutron.openstack.org;nova.openstack.org;octavia.openstack.org;ovn.openstack.org;placement.openstack.org;swift.openstack.org;telemetry.openstack.org;designate.openstack.org;barbican.openstack.org;watcher.openstack.org,resources=*,verbs=get;list
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete;
 
 // Reconcile - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
@@ -515,7 +585,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// Determine credentials and vhost
 	var finalUsername, finalPassword, vhostName string
-	var userRef string
+	var userRef, vhostRef string
 
 	if instance.Spec.UserRef != "" {
 		userRef = instance.Spec.UserRef
@@ -525,7 +595,6 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		if vhostName == "" {
 			vhostName = "/"
 		}
-		var vhostRef string
 		if vhostName != "/" {
 			vhostRef = fmt.Sprintf("%s-%s-vhost", instance.Name, vhostName)
 			vhost := &rabbitmqv1.RabbitMQVhost{
@@ -579,51 +648,67 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			return ctrl.Result{}, err
 		}
 
-		// Remove TransportURL finalizer from previously used users that are no longer referenced
-		// This handles credential rotation and rollback scenarios
-		userList := &rabbitmqv1.RabbitMQUserList{}
-		if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
-			for i := range userList.Items {
-				oldUser := &userList.Items[i]
-				// Check if this user is owned by this TransportURL
-				isOwned := object.CheckOwnerRefExist(instance.GetUID(), oldUser.GetOwnerReferences())
-				// If owned by this TransportURL but not the current userRef, handle cleanup
-				if isOwned && oldUser.Name != userRef {
-					// Use helper function to handle cleanup
-					userRequeueAfter, err := r.cleanupOldUser(ctx, instance, oldUser)
-					if err != nil {
-						return ctrl.Result{}, err
-					}
-					if userRequeueAfter > 0 && (requeueAfter == 0 || userRequeueAfter < requeueAfter) {
-						requeueAfter = userRequeueAfter
-					}
+	}
+
+	// Remove TransportURL finalizer from previously used users that are no longer referenced
+	// This handles credential rotation, rollback scenarios, and removal of custom users
+	// This cleanup runs unconditionally to handle the case where a custom user is removed
+	// from the spec and the TransportURL switches to default admin credentials
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
+		for i := range userList.Items {
+			oldUser := &userList.Items[i]
+			isOwned := object.CheckOwnerRefExist(instance.GetUID(), oldUser.GetOwnerReferences())
+
+			// If owned by this TransportURL but not the current user, handle cleanup
+			// When userRef is empty (using default credentials), all owned users should be cleaned up
+			if isOwned && oldUser.Name != userRef {
+				// Clean up old user - pass NamespacedName instead of full object
+				// This ensures we always fetch fresh data inside cleanupOldUser
+				oldUserName := types.NamespacedName{Name: oldUser.Name, Namespace: oldUser.Namespace}
+				userRequeueAfter, err := r.cleanupOldUser(ctx, instance, oldUserName)
+				if err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to cleanup old user %s: %w", oldUser.Name, err)
+				}
+				if userRequeueAfter > 0 && (requeueAfter == 0 || userRequeueAfter < requeueAfter) {
+					requeueAfter = userRequeueAfter
 				}
 			}
 		}
+	}
 
-		// Remove TransportURL finalizer from owned vhosts that are being deleted
-		// but only if they're no longer referenced in the TransportURL spec
-		// This handles vhost removal when the vhost definition is removed from the spec
-		vhostList := &rabbitmqv1.RabbitMQVhostList{}
-		if err := r.List(ctx, vhostList, client.InNamespace(instance.Namespace)); err == nil {
-			for i := range vhostList.Items {
-				oldVhost := &vhostList.Items[i]
-				// Check if this vhost is owned by this TransportURL and being deleted
-				isOwned := object.CheckOwnerRefExist(instance.GetUID(), oldVhost.GetOwnerReferences())
-				if isOwned && !oldVhost.DeletionTimestamp.IsZero() {
-					// Only remove finalizer if this vhost is not the current one (vhostRef)
-					// i.e., it's an orphaned vhost from a previous spec
-					if oldVhost.Name != vhostRef {
-						if controllerutil.RemoveFinalizer(oldVhost, rabbitmqv1.TransportURLFinalizer) {
-							if err := r.Update(ctx, oldVhost); err != nil {
-								if !k8s_errors.IsNotFound(err) {
-									Log.Error(err, "Failed to remove TransportURL finalizer from old vhost", "vhost", oldVhost.Name)
-									return ctrl.Result{}, err
-								}
-							}
-						}
-					}
-				}
+	// Remove TransportURL finalizer from owned vhosts that are being deleted
+	// but only if they're no longer referenced in the TransportURL spec
+	// This handles vhost removal when the vhost definition is removed from the spec
+	vhostList := &rabbitmqv1.RabbitMQVhostList{}
+	if err := r.List(ctx, vhostList, client.InNamespace(instance.Namespace)); err == nil {
+		for i := range vhostList.Items {
+			oldVhost := &vhostList.Items[i]
+
+			// Skip vhosts not owned by this TransportURL
+			isOwned := object.CheckOwnerRefExist(instance.GetUID(), oldVhost.GetOwnerReferences())
+			if !isOwned {
+				continue
+			}
+
+			// Skip vhosts that are not being deleted
+			if oldVhost.DeletionTimestamp.IsZero() {
+				continue
+			}
+
+			// Skip the current vhost - only clean up orphaned vhosts from previous specs
+			if oldVhost.Name == vhostRef {
+				continue
+			}
+
+			// Remove finalizer if present
+			if !controllerutil.RemoveFinalizer(oldVhost, rabbitmqv1.TransportURLFinalizer) {
+				continue
+			}
+
+			// Update the vhost
+			if err := r.Update(ctx, oldVhost); err != nil && !k8s_errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to remove TransportURL finalizer from old vhost %s: %w", oldVhost.Name, err)
 			}
 		}
 	}
@@ -831,8 +916,7 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 			if isOwned {
 				if controllerutil.RemoveFinalizer(user, rabbitmqv1.TransportURLFinalizer) {
 					if err := r.Update(ctx, user); err != nil {
-						Log.Error(err, "Failed to remove TransportURL finalizer from user", "user", user.Name)
-						return ctrl.Result{}, err
+						return ctrl.Result{}, fmt.Errorf("failed to remove TransportURL finalizer from user %s: %w", user.Name, err)
 					}
 				}
 			}
@@ -848,8 +932,7 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 			if isOwned {
 				if controllerutil.RemoveFinalizer(vhost, rabbitmqv1.TransportURLFinalizer) {
 					if err := r.Update(ctx, vhost); err != nil {
-						Log.Error(err, "Failed to remove TransportURL finalizer from vhost", "vhost", vhost.Name)
-						return ctrl.Result{}, err
+						return ctrl.Result{}, fmt.Errorf("failed to remove TransportURL finalizer from vhost %s: %w", vhost.Name, err)
 					}
 				}
 			}

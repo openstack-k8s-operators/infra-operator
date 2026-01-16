@@ -18,12 +18,15 @@ package rabbitmq
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	rabbitmqapi "github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/api"
@@ -37,7 +40,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const vhostFinalizer = "rabbitmqvhost.openstack.org/finalizer"
+const (
+	vhostFinalizer = "rabbitmqvhost.openstack.org/finalizer"
+
+	// orphanedFinalizerTimeout is how long to wait before automatically removing
+	// orphaned user finalizers (e.g., when user was force-deleted)
+	orphanedFinalizerTimeout = 10 * time.Minute
+)
 
 // RabbitMQVhostReconciler reconciles a RabbitMQVhost object
 //
@@ -159,8 +168,9 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 
 	// If TransportURL finalizer exists, wait for TransportURL to remove it
 	// The TransportURL controller manages this finalizer
+	// The watch on TransportURL will trigger reconciliation when the finalizer is removed
 	if controllerutil.ContainsFinalizer(instance, rabbitmqv1.TransportURLFinalizer) {
-		return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
+		return ctrl.Result{}, nil
 	}
 
 	// Wait for user-managed finalizers to be removed before deleting vhost
@@ -169,46 +179,84 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 	// Note: If a user is force-deleted (finalizers manually removed), the vhost may remain
 	// stuck with an orphaned finalizer. In such cases, manually remove the finalizer from
 	// the vhost using: kubectl patch rabbitmqvhost <name> --type json -p='[{"op": "remove", "path": "/metadata/finalizers/<index>"}]'
+
+	// List all users once and build a map for efficient lookup
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to list users while checking vhost finalizers: %w", err)
+	}
+
+	// Build a map of username -> users for efficient lookup
+	usersByUsername := make(map[string][]*rabbitmqv1.RabbitMQUser)
+	for i := range userList.Items {
+		user := &userList.Items[i]
+		username := user.Spec.Username
+		usersByUsername[username] = append(usersByUsername[username], user)
+	}
+
+	// Process all user finalizers in a single pass
+	var finalizersToRemove []string
 	for _, finalizer := range instance.Finalizers {
 		if len(finalizer) > len(rabbitmqv1.UserVhostFinalizerPrefix) &&
 			finalizer[:len(rabbitmqv1.UserVhostFinalizerPrefix)] == rabbitmqv1.UserVhostFinalizerPrefix {
 			// Extract username from finalizer
 			username := finalizer[len(rabbitmqv1.UserVhostFinalizerPrefix):]
 
-			// Use field index to efficiently find users with this username
-			userList := &rabbitmqv1.RabbitMQUserList{}
-			if err := r.List(ctx, userList,
-				client.InNamespace(instance.Namespace),
-				client.MatchingFields{"spec.username": username}); err != nil {
-				Log.Error(err, "Failed to list users while checking vhost finalizers")
-				return ctrl.Result{}, err
-			}
-
-			// Check if any users with this username still exist
-			// (already filtered by field index above, so just check if we got any results)
+			// Look up users with this username from our pre-built map
+			users := usersByUsername[username]
 			var matchingUser *rabbitmqv1.RabbitMQUser
-			if len(userList.Items) > 0 {
-				matchingUser = &userList.Items[0]
+			if len(users) > 0 {
+				matchingUser = users[0]
 			}
 
 			if matchingUser == nil {
 				// User not found - this shouldn't happen in normal flow
 				// User controller should have removed the finalizer before deletion
 				// If we get here, the user was likely force-deleted
-				Log.Info("User not found but finalizer remains on vhost", "vhost", instance.Name, "username", username, "finalizer", finalizer)
+				// Check if this finalizer has been orphaned for too long
+				if !instance.DeletionTimestamp.IsZero() && time.Since(instance.DeletionTimestamp.Time) > orphanedFinalizerTimeout {
+					Log.Info("Orphaned user finalizer ready for removal after timeout - user was likely force-deleted",
+						"vhost", instance.Name,
+						"username", username,
+						"finalizer", finalizer,
+						"deletionAge", time.Since(instance.DeletionTimestamp.Time).Round(time.Second))
+					finalizersToRemove = append(finalizersToRemove, finalizer)
+					continue
+				}
+				Log.Info("User not found but finalizer remains on vhost, waiting for timeout",
+					"vhost", instance.Name,
+					"username", username,
+					"finalizer", finalizer,
+					"deletionAge", time.Since(instance.DeletionTimestamp.Time).Round(time.Second),
+					"timeout", orphanedFinalizerTimeout)
 				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 			}
 
 			// User exists - check if it's being deleted
 			if matchingUser.DeletionTimestamp.IsZero() {
 				// Active user still references this vhost - wait
+				// The watch on RabbitMQUser will trigger reconciliation when the user is deleted
 				Log.Info("Vhost deletion blocked by active user", "vhost", instance.Name, "user", matchingUser.Name, "username", username)
-				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
+				return ctrl.Result{}, nil
 			}
 			// User is being deleted - wait for it to remove its finalizer
+			// The watch on RabbitMQUser will trigger reconciliation when the user deletion completes
 			Log.Info("Vhost deletion waiting for user deletion to complete", "vhost", instance.Name, "user", matchingUser.Name, "username", username)
-			return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
+			return ctrl.Result{}, nil
 		}
+	}
+
+	// Remove all orphaned finalizers in a single update
+	if len(finalizersToRemove) > 0 {
+		Log.Info("Removing orphaned user finalizers in batch", "vhost", instance.Name, "count", len(finalizersToRemove))
+		for _, finalizer := range finalizersToRemove {
+			controllerutil.RemoveFinalizer(instance, finalizer)
+		}
+		if err := r.Update(ctx, instance); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to remove %d orphaned finalizer(s) from vhost %s: %w", len(finalizersToRemove), instance.Name, err)
+		}
+		// Requeue to check for remaining finalizers
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Get RabbitMQ cluster
@@ -255,13 +303,51 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 		// DeleteVhost already treats 404 as success
 		if err := apiClient.DeleteVhost(vhostName); err != nil {
 			// Return error to trigger retry - see rabbitmqpolicy_controller.go for detailed rationale
-			Log.Error(err, "Failed to delete vhost from RabbitMQ, will retry", "vhost", vhostName)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to delete vhost %s from RabbitMQ: %w", vhostName, err)
 		}
 	}
 
 	controllerutil.RemoveFinalizer(instance, vhostFinalizer)
 	return ctrl.Result{}, nil
+}
+
+// userToVhostMapFunc maps user changes to vhost reconciliation requests
+// This allows the vhost controller to react when a user is deleted, eliminating
+// the need to poll when waiting for user deletion to complete
+func (r *RabbitMQVhostReconciler) userToVhostMapFunc(_ context.Context, obj client.Object) []reconcile.Request {
+	user := obj.(*rabbitmqv1.RabbitMQUser)
+	if user.Spec.VhostRef == "" {
+		return []reconcile.Request{}
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      user.Spec.VhostRef,
+			Namespace: user.Namespace,
+		},
+	}}
+}
+
+// transportURLToVhostMapFunc maps TransportURL changes to vhost reconciliation requests
+// This allows the vhost controller to react when a TransportURL is deleted or changes,
+// eliminating the need to poll when waiting for TransportURL finalizers to be removed
+func (r *RabbitMQVhostReconciler) transportURLToVhostMapFunc(_ context.Context, obj client.Object) []reconcile.Request {
+	turl := obj.(*rabbitmqv1.TransportURL)
+
+	// Reconcile the vhost if it's specified in the spec or tracked in the status
+	requests := []reconcile.Request{}
+	vhostName := turl.Spec.Vhost
+	if vhostName == "" {
+		vhostName = turl.Status.RabbitmqVhost
+	}
+	if vhostName != "" && vhostName != "/" {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      vhostName,
+				Namespace: turl.Namespace,
+			},
+		})
+	}
+	return requests
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -277,5 +363,9 @@ func (r *RabbitMQVhostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.RabbitMQVhost{}).
+		Watches(&rabbitmqv1.RabbitMQUser{},
+			handler.EnqueueRequestsFromMapFunc(r.userToVhostMapFunc)).
+		Watches(&rabbitmqv1.TransportURL{},
+			handler.EnqueueRequestsFromMapFunc(r.transportURLToVhostMapFunc)).
 		Complete(r)
 }

@@ -1163,4 +1163,504 @@ var _ = Describe("TransportURL controller", func() {
 			}, time.Second*45, interval).Should(Succeed())
 		})
 	})
+
+	When("username is changed but owner service is not ready", func() {
+		var rabbitmqName types.NamespacedName
+		var transportURLName types.NamespacedName
+		var ownerName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-owner-notready",
+				Namespace: namespace,
+			}
+			transportURLName = types.NamespacedName{
+				Name:      "transporturl-owner-notready",
+				Namespace: namespace,
+			}
+			ownerName = types.NamespacedName{
+				Name:      "owner-notready-deployment",
+				Namespace: namespace,
+			}
+
+			// Create RabbitMQCluster first
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			// Create RabbitMq CR
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create a fake owner service (StatefulSet)
+			owner := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "apps/v1",
+					"kind":       "StatefulSet",
+					"metadata": map[string]any{
+						"name":      ownerName.Name,
+						"namespace": ownerName.Namespace,
+					},
+					"spec": map[string]any{
+						"replicas": int64(1),
+						"selector": map[string]any{
+							"matchLabels": map[string]any{
+								"app": "test",
+							},
+						},
+						"template": map[string]any{
+							"metadata": map[string]any{
+								"labels": map[string]any{
+									"app": "test",
+								},
+							},
+							"spec": map[string]any{
+								"containers": []any{
+									map[string]any{
+										"name":  "test",
+										"image": "test:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			owner.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "apps",
+				Version: "v1",
+				Kind:    "StatefulSet",
+			})
+			Expect(k8sClient.Create(ctx, owner)).Should(Succeed())
+			DeferCleanup(k8sClient.Delete, owner)
+
+			// Set owner status with Ready=True initially
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, ownerName, owner)).Should(Succeed())
+				g.Expect(unstructured.SetNestedField(owner.Object, int64(1), "metadata", "generation")).Should(Succeed())
+				g.Expect(unstructured.SetNestedField(owner.Object, int64(1), "status", "observedGeneration")).Should(Succeed())
+
+				conditions := []any{
+					map[string]any{
+						"type":   "Ready",
+						"status": "True",
+					},
+				}
+				g.Expect(unstructured.SetNestedSlice(owner.Object, conditions, "status", "conditions")).Should(Succeed())
+				g.Expect(k8sClient.Status().Update(ctx, owner)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Create TransportURL with owner reference
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      transportURLName.Name,
+					Namespace: transportURLName.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "StatefulSet",
+							Name:       ownerName.Name,
+							UID:        owner.GetUID(),
+							Controller: func() *bool { b := true; return &b }(),
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "notready-olduser",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+		})
+
+		It("should wait for owner to be ready before removing finalizer", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial RabbitMQUser to be created
+			oldUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-notready-olduser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("notready-olduser"))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready
+			SimulateRabbitMQUserReady(oldUserCRName, "/")
+
+			// Verify old user has the TransportURL finalizer
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Set owner to NOT ready
+			Eventually(func(g Gomega) {
+				owner := &unstructured.Unstructured{}
+				owner.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "apps",
+					Version: "v1",
+					Kind:    "StatefulSet",
+				})
+				g.Expect(k8sClient.Get(ctx, ownerName, owner)).Should(Succeed())
+
+				conditions := []any{
+					map[string]any{
+						"type":   "Ready",
+						"status": "False",
+						"reason": "Reconciling",
+					},
+				}
+				g.Expect(unstructured.SetNestedSlice(owner.Object, conditions, "status", "conditions")).Should(Succeed())
+				g.Expect(k8sClient.Status().Update(ctx, owner)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Change username
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				tr.Spec.Username = "notready-newuser"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new RabbitMQUser to be created
+			newUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-notready-newuser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, newUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate new user being ready
+			SimulateRabbitMQUserReady(newUserCRName, "/")
+
+			// Verify old user finalizer is NOT removed (owner not ready)
+			Consistently(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeTrue(),
+					"TransportURL finalizer should NOT be removed while owner is not ready")
+			}, time.Second*5, interval).Should(Succeed())
+
+			// Set owner to Ready
+			Eventually(func(g Gomega) {
+				owner := &unstructured.Unstructured{}
+				owner.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "apps",
+					Version: "v1",
+					Kind:    "StatefulSet",
+				})
+				g.Expect(k8sClient.Get(ctx, ownerName, owner)).Should(Succeed())
+
+				conditions := []any{
+					map[string]any{
+						"type":   "Ready",
+						"status": "True",
+					},
+				}
+				g.Expect(unstructured.SetNestedSlice(owner.Object, conditions, "status", "conditions")).Should(Succeed())
+				g.Expect(k8sClient.Status().Update(ctx, owner)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Now verify finalizer is removed
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeFalse(),
+					"TransportURL finalizer should be removed after owner becomes ready")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("username is changed and owner service is deleted", func() {
+		var rabbitmqName types.NamespacedName
+		var transportURLName types.NamespacedName
+		var ownerName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-owner-deleted",
+				Namespace: namespace,
+			}
+			transportURLName = types.NamespacedName{
+				Name:      "transporturl-owner-deleted",
+				Namespace: namespace,
+			}
+			ownerName = types.NamespacedName{
+				Name:      "owner-deleted-deployment",
+				Namespace: namespace,
+			}
+
+			// Create RabbitMQCluster first
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			// Create RabbitMq CR
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create a fake owner service (StatefulSet)
+			owner := &unstructured.Unstructured{
+				Object: map[string]any{
+					"apiVersion": "apps/v1",
+					"kind":       "StatefulSet",
+					"metadata": map[string]any{
+						"name":      ownerName.Name,
+						"namespace": ownerName.Namespace,
+					},
+					"spec": map[string]any{
+						"replicas": int64(1),
+						"selector": map[string]any{
+							"matchLabels": map[string]any{
+								"app": "test",
+							},
+						},
+						"template": map[string]any{
+							"metadata": map[string]any{
+								"labels": map[string]any{
+									"app": "test",
+								},
+							},
+							"spec": map[string]any{
+								"containers": []any{
+									map[string]any{
+										"name":  "test",
+										"image": "test:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			owner.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "apps",
+				Version: "v1",
+				Kind:    "StatefulSet",
+			})
+			Expect(k8sClient.Create(ctx, owner)).Should(Succeed())
+
+			// Set owner status with Ready=True
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, ownerName, owner)).Should(Succeed())
+				g.Expect(unstructured.SetNestedField(owner.Object, int64(1), "metadata", "generation")).Should(Succeed())
+				g.Expect(unstructured.SetNestedField(owner.Object, int64(1), "status", "observedGeneration")).Should(Succeed())
+
+				conditions := []any{
+					map[string]any{
+						"type":   "Ready",
+						"status": "True",
+					},
+				}
+				g.Expect(unstructured.SetNestedSlice(owner.Object, conditions, "status", "conditions")).Should(Succeed())
+				g.Expect(k8sClient.Status().Update(ctx, owner)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Create TransportURL with owner reference
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      transportURLName.Name,
+					Namespace: transportURLName.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "StatefulSet",
+							Name:       ownerName.Name,
+							UID:        owner.GetUID(),
+							Controller: func() *bool { b := true; return &b }(),
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "deleted-olduser",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+		})
+
+		It("should proceed with cleanup when owner is deleted", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial RabbitMQUser to be created
+			oldUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-deleted-olduser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready
+			SimulateRabbitMQUserReady(oldUserCRName, "/")
+
+			// Change username
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				tr.Spec.Username = "deleted-newuser"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new RabbitMQUser to be created
+			newUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-deleted-newuser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, newUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate new user being ready
+			SimulateRabbitMQUserReady(newUserCRName, "/")
+
+			// Delete the owner service
+			Eventually(func(g Gomega) {
+				owner := &unstructured.Unstructured{}
+				owner.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "apps",
+					Version: "v1",
+					Kind:    "StatefulSet",
+				})
+				g.Expect(k8sClient.Get(ctx, ownerName, owner)).Should(Succeed())
+				g.Expect(k8sClient.Delete(ctx, owner)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify owner is deleted
+			Eventually(func(g Gomega) {
+				owner := &unstructured.Unstructured{}
+				owner.SetGroupVersionKind(schema.GroupVersionKind{
+					Group:   "apps",
+					Version: "v1",
+					Kind:    "StatefulSet",
+				})
+				err := k8sClient.Get(ctx, ownerName, owner)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(), "Owner should be deleted")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify old user's TransportURL finalizer is removed (cleanup proceeds)
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				// User might still exist but should not have the TransportURL finalizer
+				if err == nil {
+					g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeFalse(),
+						"TransportURL finalizer should be removed even when owner is deleted")
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("username is changed for standalone TransportURL without owner", func() {
+		var rabbitmqName types.NamespacedName
+		var transportURLName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-no-owner",
+				Namespace: namespace,
+			}
+			transportURLName = types.NamespacedName{
+				Name:      "transporturl-no-owner",
+				Namespace: namespace,
+			}
+
+			// Create RabbitMQCluster first
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			// Create RabbitMq CR
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create TransportURL WITHOUT owner reference (standalone)
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      transportURLName.Name,
+					Namespace: transportURLName.Namespace,
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "noowner-olduser",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+		})
+
+		It("should proceed with cleanup immediately when there is no owner", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial RabbitMQUser to be created
+			oldUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-noowner-olduser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate user being ready
+			SimulateRabbitMQUserReady(oldUserCRName, "/")
+
+			// Verify TransportURL has NO owner references
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				g.Expect(tr.GetOwnerReferences()).To(BeEmpty(), "TransportURL should have no owner references")
+			}, timeout, interval).Should(Succeed())
+
+			// Change username
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(transportURLName)
+				tr.Spec.Username = "noowner-newuser"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new RabbitMQUser to be created
+			newUserCRName := types.NamespacedName{
+				Name:      fmt.Sprintf("%s-noowner-newuser-user", transportURLName.Name),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, newUserCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate new user being ready
+			SimulateRabbitMQUserReady(newUserCRName, "/")
+
+			// Verify old user's TransportURL finalizer is removed promptly (no owner to wait for)
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				// User might still exist but should not have the TransportURL finalizer
+				if err == nil {
+					g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeFalse(),
+						"TransportURL finalizer should be removed immediately when there is no owner")
+				}
+			}, timeout, interval).Should(Succeed())
+
+			// Verify cleanup proceeds and user is eventually deleted
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				// Either NotFound or has DeletionTimestamp set
+				if err == nil {
+					g.Expect(user.DeletionTimestamp.IsZero()).To(BeFalse(), "Old user should have DeletionTimestamp set")
+				} else {
+					g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(), "Old user should be NotFound")
+				}
+			}, time.Second*45, interval).Should(Succeed())
+		})
+	})
 })

@@ -84,8 +84,15 @@ const (
 
 	// UserVhostFinalizerPrefix - prefix for per-user finalizers added to vhosts by RabbitMQUser controller
 	// Full finalizer format: rmquser.openstack.org/u-<username>
-	// The short prefix allows for usernames up to 38 chars (63 - 25 = 38)
+	// The short prefix allows for usernames up to MaxUsernameLength chars
 	UserVhostFinalizerPrefix = "rmquser.openstack.org/u-"
+
+	// MaxFinalizerLength is the Kubernetes limit for finalizer names
+	MaxFinalizerLength = 63
+
+	// MaxUsernameLength is the maximum allowed username length to ensure it fits in the vhost finalizer
+	// Calculation: 63 (k8s limit) - 25 (len of UserVhostFinalizerPrefix) = 38
+	MaxUsernameLength = MaxFinalizerLength - len(UserVhostFinalizerPrefix)
 
 	// RabbitMQVhostReadyCondition indicates that the vhost is ready
 	RabbitMQVhostReadyCondition condition.Type = "RabbitMQVhostReady"

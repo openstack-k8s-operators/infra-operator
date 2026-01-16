@@ -29,7 +29,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	rabbitmqapi "github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/api"
@@ -120,10 +122,34 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return r.reconcileDelete(ctx, instance, h)
 	}
 
-	// Add finalizer if not being deleted
+	// Two-phase finalizer addition:
+	// 1. Add user finalizer first - prevents user deletion before vhost finalizer is added
+	// 2. Add vhost finalizer second - ensures user is protected during vhost finalizer addition
+	//
+	// If deletion occurs between phases, reconcileDelete handles it with best-effort cleanup
 	if controllerutil.AddFinalizer(instance, userFinalizer) {
-		// Finalizer was added, update will trigger reconcile
+		Log.Info("Added user finalizer, will reconcile again to add vhost finalizer")
 		return ctrl.Result{}, nil
+	}
+
+	// Add vhost finalizer after user finalizer exists
+	if instance.Spec.VhostRef != "" {
+		username := instance.Spec.Username
+		vhostFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + username
+
+		vhost := &rabbitmqv1.RabbitMQVhost{}
+		if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
+		}
+
+		// Add per-user finalizer to vhost to prevent deletion while this user exists
+		if controllerutil.AddFinalizer(vhost, vhostFinalizer) {
+			if err := r.Update(ctx, vhost); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to add finalizer %s to vhost %s: %w", vhostFinalizer, instance.Spec.VhostRef, err)
+			}
+			Log.Info("Added finalizer to vhost", "vhost", instance.Spec.VhostRef, "finalizer", vhostFinalizer)
+		}
 	}
 
 	return r.reconcileNormal(ctx, instance, h)
@@ -145,14 +171,12 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 			if controllerutil.RemoveFinalizer(oldVhost, userFinalizer) {
 				if err := r.Update(ctx, oldVhost); err != nil {
 					// Requeue to retry - this is important for VhostRef changes
-					Log.Error(err, "Failed to remove finalizer from old vhost, requeueing", "vhost", instance.Status.VhostRef, "finalizer", userFinalizer)
-					return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, err
+					return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, fmt.Errorf("failed to remove finalizer %s from old vhost %s: %w", userFinalizer, instance.Status.VhostRef, err)
 				}
 			}
 		} else if !k8s_errors.IsNotFound(err) {
 			// If we get an error other than NotFound, return it to requeue
-			Log.Error(err, "Failed to get old vhost for finalizer removal", "vhost", instance.Status.VhostRef)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("failed to get old vhost %s for finalizer removal: %w", instance.Status.VhostRef, err)
 		}
 	}
 
@@ -174,8 +198,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		if controllerutil.AddFinalizer(vhost, userFinalizer) {
 			if err := r.Update(ctx, vhost); err != nil {
 				// Requeue to retry - this ensures the finalizer is eventually added
-				Log.Error(err, "Failed to add finalizer to vhost, requeueing", "vhost", instance.Spec.VhostRef, "finalizer", userFinalizer)
-				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, err
+				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, fmt.Errorf("failed to add finalizer %s to vhost %s: %w", userFinalizer, instance.Spec.VhostRef, err)
 			}
 		}
 	}
@@ -290,20 +313,26 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 
 	instance.Status.SecretName = secretName
 	instance.Status.Username = username
-	// Only update status.Vhost if old permissions were successfully deleted
-	// This ensures we keep track of the old vhost and retry cleanup on next reconciliation
-	if oldPermissionsDeleted {
-		instance.Status.Vhost = vhostName
-	}
 	instance.Status.VhostRef = instance.Spec.VhostRef // Track the vhost CR name for finalizer management
+
+	// If old permissions weren't deleted, don't mark as Ready
+	// The watch on RabbitMQVhost will trigger reconciliation when permissions are cleaned up
+	if !oldPermissionsDeleted {
+		Log.Info("Old vhost permissions not deleted, waiting to mark Ready", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName)
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			"Cleaning up permissions from old vhost %s",
+			instance.Status.Vhost,
+		))
+		return ctrl.Result{}, nil
+	}
+
+	// Only update status.Vhost after old permissions are successfully deleted
+	instance.Status.Vhost = vhostName
 	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, rabbitmqv1.RabbitMQUserReadyMessage)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
-
-	// If old permissions weren't deleted, requeue after 10 seconds to retry cleanup
-	if !oldPermissionsDeleted {
-		Log.Info("Old vhost permissions not deleted, will retry", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName)
-		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
-	}
 
 	return ctrl.Result{}, nil
 }
@@ -361,22 +390,40 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	if vhostRef == "" {
 		vhostRef = instance.Spec.VhostRef
 	}
+
+	// Remove per-user finalizer from vhost if it exists
+	// We retry on transient errors, but skip when vhost is already being deleted
 	if vhostRef != "" {
 		userFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + instance.Spec.Username
 		vhost := &rabbitmqv1.RabbitMQVhost{}
-		if err := r.Get(ctx, types.NamespacedName{Name: vhostRef, Namespace: instance.Namespace}, vhost); err == nil {
+		err := r.Get(ctx, types.NamespacedName{Name: vhostRef, Namespace: instance.Namespace}, vhost)
+
+		// Check for context cancellation (e.g., pod shutdown)
+		if ctx.Err() != nil {
+			return ctrl.Result{}, ctx.Err()
+		}
+
+		if err == nil {
+			// Vhost exists - try to remove our finalizer (even if vhost is being deleted)
 			if controllerutil.RemoveFinalizer(vhost, userFinalizer) {
 				if err := r.Update(ctx, vhost); err != nil {
-					// Requeue to retry - we want to clean up the vhost finalizer
-					Log.Error(err, "Failed to remove finalizer from vhost during user deletion, requeueing", "vhost", vhostRef, "finalizer", userFinalizer)
-					return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, err
+					if k8s_errors.IsNotFound(err) {
+						// Vhost was deleted between Get and Update - that's fine
+						Log.Info("Vhost was deleted before finalizer could be removed", "vhost", vhostRef)
+					} else {
+						// Failed to update vhost - retry with exponential backoff
+						return ctrl.Result{}, fmt.Errorf("failed to remove finalizer %s from vhost %s: %w", userFinalizer, vhostRef, err)
+					}
+				} else {
+					Log.Info("Successfully removed finalizer from vhost", "vhost", vhostRef, "finalizer", userFinalizer)
 				}
 			}
-		} else if !k8s_errors.IsNotFound(err) {
-			// If we get an error other than NotFound, return it to requeue
-			// This prevents us from potentially deleting permissions from wrong vhost
-			Log.Error(err, "Failed to get vhost for finalizer removal during user deletion", "vhost", vhostRef)
-			return ctrl.Result{}, err
+		} else if k8s_errors.IsNotFound(err) {
+			// Vhost doesn't exist - nothing to clean up
+			Log.Info("Vhost not found during user deletion", "vhost", vhostRef)
+		} else {
+			// Failed to get vhost (other error) - retry
+			return ctrl.Result{}, fmt.Errorf("failed to get vhost %s for finalizer removal: %w", vhostRef, err)
 		}
 	}
 
@@ -386,16 +433,22 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 		username = instance.Spec.Username
 	}
 
-	// Get vhost - default to "/" if VhostRef is empty
+	// Get vhost name - priority order:
+	// 1. From status.Vhost (the actual vhost name, stored during normal reconciliation)
+	// 2. From the vhost CR if it still exists
+	// 3. Default to "/" if VhostRef is empty
 	vhostName := "/"
-	if instance.Spec.VhostRef != "" {
+	if instance.Status.Vhost != "" {
+		// Use the vhost name from status - this is the most reliable source during deletion
+		vhostName = instance.Status.Vhost
+	} else if instance.Spec.VhostRef != "" {
+		// Try to get vhost CR to determine the vhost name
 		vhost := &rabbitmqv1.RabbitMQVhost{}
 		err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost)
 		if err != nil && !k8s_errors.IsNotFound(err) {
 			// Log non-NotFound errors but continue with deletion
-			log.FromContext(ctx).Error(err, "Failed to get vhost", "vhost", instance.Spec.VhostRef)
-		}
-		if vhost.Spec.Name != "" {
+			Log.Error(err, "Failed to get vhost", "vhost", instance.Spec.VhostRef)
+		} else if err == nil && vhost.Spec.Name != "" {
 			vhostName = vhost.Spec.Name
 		}
 	}
@@ -411,16 +464,21 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	}
 
 	if k8s_errors.IsNotFound(err) || !rabbit.DeletionTimestamp.IsZero() {
-		// Cluster doesn't exist or is being deleted - nothing to clean up
-		Log.Info("RabbitMQ cluster not found or being deleted, skipping user cleanup",
+		// Cluster doesn't exist or is being deleted - skip RabbitMQ cleanup
+		Log.Info("RabbitMQ cluster not found or being deleted, skipping RabbitMQ cleanup",
 			"cluster", instance.Spec.RabbitmqClusterName,
 			"notFound", k8s_errors.IsNotFound(err),
-			"beingDeleted", !rabbit.DeletionTimestamp.IsZero())
+			"beingDeleted", !rabbit.DeletionTimestamp.IsZero(),
+			"vhostRef", vhostRef)
 
 		instance.Status.Conditions.MarkTrue(
 			rabbitmqv1.RabbitMQUserReadyCondition,
-			"RabbitMQ cluster deleted, skipping user cleanup",
+			"RabbitMQ cluster deleted, skipping RabbitMQ cleanup",
 		)
+
+		// Vhost finalizer removal was already attempted above (best effort)
+		// We don't block user deletion even if it failed - the vhost controller
+		// will clean up any orphaned finalizers after 10 minutes.
 
 		controllerutil.RemoveFinalizer(instance, userFinalizer)
 		return ctrl.Result{}, nil
@@ -448,14 +506,12 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	// The Delete methods already treat 404 as success
 	if err := apiClient.DeletePermissions(vhostName, username); err != nil {
 		// Return error to trigger retry - see rabbitmqpolicy_controller.go for detailed rationale
-		Log.Error(err, "Failed to delete permissions from RabbitMQ, will retry", "user", username, "vhost", vhostName)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to delete permissions for user %s from vhost %s in RabbitMQ: %w", username, vhostName, err)
 	}
 
 	if err := apiClient.DeleteUser(username); err != nil {
 		// Return error to trigger retry - see rabbitmqpolicy_controller.go for detailed rationale
-		Log.Error(err, "Failed to delete user from RabbitMQ, will retry", "user", username)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to delete user %s from RabbitMQ: %w", username, err)
 	}
 
 	// Delete secret (use CR name, same as in reconcileNormal)
@@ -474,10 +530,38 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 	return ctrl.Result{}, nil
 }
 
+// vhostToUserMapFunc maps vhost changes to user reconciliation requests
+// This allows the user controller to react when a vhost changes, eliminating
+// the need to poll when waiting for old vhost permissions to be deleted
+func (r *RabbitMQUserReconciler) vhostToUserMapFunc(ctx context.Context, obj client.Object) []reconcile.Request {
+	vhost := obj.(*rabbitmqv1.RabbitMQVhost)
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(vhost.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list users for vhost watch", "vhost", vhost.Name)
+		return []reconcile.Request{}
+	}
+
+	requests := []reconcile.Request{}
+	for _, user := range userList.Items {
+		// Reconcile users that reference this vhost (either current or old)
+		if user.Spec.VhostRef == vhost.Name || user.Status.Vhost == vhost.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      user.Name,
+					Namespace: user.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.RabbitMQUser{}).
 		Owns(&corev1.Secret{}).
+		Watches(&rabbitmqv1.RabbitMQVhost{},
+			handler.EnqueueRequestsFromMapFunc(r.vhostToUserMapFunc)).
 		Complete(r)
 }
