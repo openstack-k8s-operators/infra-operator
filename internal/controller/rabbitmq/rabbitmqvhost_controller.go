@@ -37,7 +37,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const vhostFinalizer = "rabbitmqvhost.openstack.org/finalizer"
+const (
+	vhostFinalizer = "rabbitmqvhost.openstack.org/finalizer"
+
+	// orphanedFinalizerTimeout is how long to wait before automatically removing
+	// orphaned user finalizers (e.g., when user was force-deleted)
+	orphanedFinalizerTimeout = 10 * time.Minute
+)
 
 // RabbitMQVhostReconciler reconciles a RabbitMQVhost object
 //
@@ -195,7 +201,28 @@ func (r *RabbitMQVhostReconciler) reconcileDelete(ctx context.Context, instance 
 				// User not found - this shouldn't happen in normal flow
 				// User controller should have removed the finalizer before deletion
 				// If we get here, the user was likely force-deleted
-				Log.Info("User not found but finalizer remains on vhost", "vhost", instance.Name, "username", username, "finalizer", finalizer)
+				// Check if this finalizer has been orphaned for too long
+				if !instance.DeletionTimestamp.IsZero() && time.Since(instance.DeletionTimestamp.Time) > orphanedFinalizerTimeout {
+					Log.Info("Removing orphaned user finalizer after timeout - user was likely force-deleted",
+						"vhost", instance.Name,
+						"username", username,
+						"finalizer", finalizer,
+						"deletionAge", time.Since(instance.DeletionTimestamp.Time).Round(time.Second))
+					if controllerutil.RemoveFinalizer(instance, finalizer) {
+						if err := r.Update(ctx, instance); err != nil {
+							Log.Error(err, "Failed to remove orphaned finalizer")
+							return ctrl.Result{}, err
+						}
+					}
+					// Requeue to check for more finalizers
+					return ctrl.Result{Requeue: true}, nil
+				}
+				Log.Info("User not found but finalizer remains on vhost, waiting for timeout",
+					"vhost", instance.Name,
+					"username", username,
+					"finalizer", finalizer,
+					"deletionAge", time.Since(instance.DeletionTimestamp.Time).Round(time.Second),
+					"timeout", orphanedFinalizerTimeout)
 				return ctrl.Result{RequeueAfter: time.Duration(2) * time.Second}, nil
 			}
 

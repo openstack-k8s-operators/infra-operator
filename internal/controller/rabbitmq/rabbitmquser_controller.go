@@ -290,20 +290,25 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 
 	instance.Status.SecretName = secretName
 	instance.Status.Username = username
-	// Only update status.Vhost if old permissions were successfully deleted
-	// This ensures we keep track of the old vhost and retry cleanup on next reconciliation
-	if oldPermissionsDeleted {
-		instance.Status.Vhost = vhostName
-	}
 	instance.Status.VhostRef = instance.Spec.VhostRef // Track the vhost CR name for finalizer management
-	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, rabbitmqv1.RabbitMQUserReadyMessage)
-	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
-	// If old permissions weren't deleted, requeue after 10 seconds to retry cleanup
+	// If old permissions weren't deleted, don't mark as Ready and requeue
 	if !oldPermissionsDeleted {
-		Log.Info("Old vhost permissions not deleted, will retry", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName)
+		Log.Info("Old vhost permissions not deleted, waiting to mark Ready", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName)
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			"Cleaning up permissions from old vhost %s",
+			instance.Status.Vhost,
+		))
 		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
+
+	// Only update status.Vhost after old permissions are successfully deleted
+	instance.Status.Vhost = vhostName
+	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, rabbitmqv1.RabbitMQUserReadyMessage)
+	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
 	return ctrl.Result{}, nil
 }

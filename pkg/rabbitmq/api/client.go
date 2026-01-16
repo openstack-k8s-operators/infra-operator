@@ -39,6 +39,16 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// Timeout constants for RabbitMQ Management API operations
+const (
+	// DefaultAPITimeout is the default timeout for most API operations
+	DefaultAPITimeout = 30 * time.Second
+
+	// DeleteTimeout is the timeout for delete operations which may take longer
+	// (e.g., deleting vhosts with many queues)
+	DeleteTimeout = 60 * time.Second
+)
+
 // User represents a RabbitMQ user
 type User struct {
 	Name     string   `json:"name"`
@@ -71,7 +81,7 @@ type Policy struct {
 // NewClient creates a new RabbitMQ Management API client
 func NewClient(baseURL, username, password string, tlsEnabled bool, caCert []byte) *Client {
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: DefaultAPITimeout,
 	}
 
 	if tlsEnabled {
@@ -100,8 +110,13 @@ func NewClient(baseURL, username, password string, tlsEnabled bool, caCert []byt
 	}
 }
 
-// doRequest performs an HTTP request with authentication
+// doRequest performs an HTTP request with authentication using the default timeout
 func (c *Client) doRequest(method, path string, body interface{}) (*http.Response, error) {
+	return c.doRequestWithTimeout(method, path, body, DefaultAPITimeout)
+}
+
+// doRequestWithTimeout performs an HTTP request with authentication using a custom timeout
+func (c *Client) doRequestWithTimeout(method, path string, body interface{}, timeout time.Duration) (*http.Response, error) {
 	var reqBody io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -120,7 +135,13 @@ func (c *Client) doRequest(method, path string, body interface{}) (*http.Respons
 	req.SetBasicAuth(c.username, c.password)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	// Create a client with custom timeout for this request
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: c.httpClient.Transport,
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -160,7 +181,7 @@ func (c *Client) CreateOrUpdateUser(name, password string, tags []string) error 
 // DeleteUser deletes a RabbitMQ user
 func (c *Client) DeleteUser(name string) error {
 	encodedName := url.PathEscape(name)
-	resp, err := c.doRequest("DELETE", fmt.Sprintf("/api/users/%s", encodedName), nil)
+	resp, err := c.doRequestWithTimeout("DELETE", fmt.Sprintf("/api/users/%s", encodedName), nil, DeleteTimeout)
 	if err != nil {
 		return err
 	}
@@ -202,7 +223,7 @@ func (c *Client) CreateOrUpdateVhost(name string) error {
 // DeleteVhost deletes a RabbitMQ vhost
 func (c *Client) DeleteVhost(name string) error {
 	encodedName := url.PathEscape(name)
-	resp, err := c.doRequest("DELETE", fmt.Sprintf("/api/vhosts/%s", encodedName), nil)
+	resp, err := c.doRequestWithTimeout("DELETE", fmt.Sprintf("/api/vhosts/%s", encodedName), nil, DeleteTimeout)
 	if err != nil {
 		return err
 	}
@@ -251,7 +272,7 @@ func (c *Client) SetPermissions(vhost, user, configure, write, read string) erro
 func (c *Client) DeletePermissions(vhost, user string) error {
 	encodedVhost := url.PathEscape(vhost)
 	encodedUser := url.PathEscape(user)
-	resp, err := c.doRequest("DELETE", fmt.Sprintf("/api/permissions/%s/%s", encodedVhost, encodedUser), nil)
+	resp, err := c.doRequestWithTimeout("DELETE", fmt.Sprintf("/api/permissions/%s/%s", encodedVhost, encodedUser), nil, DeleteTimeout)
 	if err != nil {
 		return err
 	}
@@ -302,7 +323,7 @@ func (c *Client) CreateOrUpdatePolicy(vhost, name, pattern string, definition ma
 func (c *Client) DeletePolicy(vhost, name string) error {
 	encodedVhost := url.PathEscape(vhost)
 	encodedName := url.PathEscape(name)
-	resp, err := c.doRequest("DELETE", fmt.Sprintf("/api/policies/%s/%s", encodedVhost, encodedName), nil)
+	resp, err := c.doRequestWithTimeout("DELETE", fmt.Sprintf("/api/policies/%s/%s", encodedVhost, encodedName), nil, DeleteTimeout)
 	if err != nil {
 		return err
 	}
