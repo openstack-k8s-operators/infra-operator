@@ -141,4 +141,15 @@ const (
 
 	// RabbitMQUserReadyErrorMessage is the message format for the RabbitMQUserReady condition when an error occurs
 	RabbitMQUserReadyErrorMessage = "RabbitMQ user error occurred %s"
+
+	// Internal controller finalizer (from rabbitmquser_controller.go)
+	userControllerFinalizer = "rabbitmquser.openstack.org/finalizer"
 )
+
+// IsInternalFinalizer returns true if the finalizer is managed by RabbitMQ controllers
+// (as opposed to external controllers like dataplane)
+func IsInternalFinalizer(finalizer string) bool {
+	return finalizer == UserFinalizer ||
+		finalizer == TransportURLFinalizer ||
+		finalizer == userControllerFinalizer
+}
