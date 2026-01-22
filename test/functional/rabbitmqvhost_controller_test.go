@@ -178,6 +178,7 @@ var _ = Describe("RabbitMQVhost controller", func() {
 			DeferCleanup(th.DeleteInstance, user)
 
 			// Wait for user finalizer to be added to vhost
+			// Username defaults to CR name via webhook
 			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userRefName.Name
 			Eventually(func(g Gomega) {
 				v := &rabbitmqv1.RabbitMQVhost{}

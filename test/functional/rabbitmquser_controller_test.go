@@ -20,7 +20,9 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -243,6 +245,8 @@ var _ = Describe("RabbitMQUser controller", func() {
 		})
 
 		It("should remove finalizer when user is deleted", func() {
+			// Get user to compute finalizer
+			user := GetRabbitMQUser(userName)
 			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
 
 			// Verify finalizer was added
@@ -252,7 +256,6 @@ var _ = Describe("RabbitMQUser controller", func() {
 			}, timeout, interval).Should(Succeed())
 
 			// Delete user
-			user := GetRabbitMQUser(userName)
 			Expect(th.K8sClient.Delete(th.Ctx, user)).To(Succeed())
 
 			// Verify finalizer was removed from vhost
@@ -444,7 +447,8 @@ var _ = Describe("RabbitMQUser controller", func() {
 			}, timeout, interval).Should(Succeed())
 
 			// Verify finalizer added to custom vhost
-			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
+			// User was created with username: "default-user"
+			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + "default-user"
 			Eventually(func(g Gomega) {
 				vhost := GetRabbitMQVhost(customVhostName)
 				g.Expect(vhost.Finalizers).To(ContainElement(expectedFinalizer))
@@ -490,7 +494,7 @@ var _ = Describe("RabbitMQUser controller", func() {
 			finalizer1 := rabbitmqv1.UserVhostFinalizerPrefix + userName.Name
 			finalizer2 := rabbitmqv1.UserVhostFinalizerPrefix + user2Name.Name
 
-			// Wait for both finalizers
+			// Wait for both finalizers to be added
 			Eventually(func(g Gomega) {
 				vhost := GetRabbitMQVhost(vhostName)
 				g.Expect(vhost.Finalizers).To(ContainElement(finalizer1))
@@ -593,6 +597,376 @@ var _ = Describe("RabbitMQUser controller", func() {
 						g.Expect(th.K8sClient.Update(th.Ctx, vhost)).To(Succeed())
 					}
 				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser deletion status conditions", func() {
+		It("should show TransportURL finalizer blocking deletion in status", func() {
+			// Create TransportURL which owns a user
+			transportURLName := types.NamespacedName{Name: "test-transport-status", Namespace: namespace}
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"username":            "testuser-status",
+			}
+			transportURL := CreateTransportURL(transportURLName, spec)
+			DeferCleanup(th.DeleteInstance, transportURL)
+
+			// Wait for user to be created by TransportURL
+			ownedUserName := types.NamespacedName{Name: transportURLName.Name + "-testuser-status-user", Namespace: namespace}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(th.K8sClient.Get(th.Ctx, ownedUserName, user)).To(Succeed())
+				g.Expect(user.Finalizers).To(ContainElement(rabbitmqv1.TransportURLFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Mark cluster for deletion to avoid RabbitMQ API call failures
+			cluster := GetRabbitMQCluster(rabbitmqClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Delete user
+			user := &rabbitmqv1.RabbitMQUser{}
+			Expect(th.K8sClient.Get(th.Ctx, ownedUserName, user)).To(Succeed())
+			Expect(th.K8sClient.Delete(th.Ctx, user)).To(Succeed())
+
+			// Verify status condition shows waiting for TransportURL
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(th.K8sClient.Get(th.Ctx, ownedUserName, u)).To(Succeed())
+				g.Expect(u.DeletionTimestamp).NotTo(BeNil())
+
+				cond := u.Status.Conditions.Get(rabbitmqv1.RabbitMQUserReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(corev1.ConditionFalse))
+				g.Expect(string(cond.Reason)).To(Equal(string(condition.DeletingReason)))
+				g.Expect(cond.Message).To(ContainSubstring("Waiting for TransportURL to release user"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should show external finalizer blocking deletion in status", func() {
+			// Create user
+			testUserName := types.NamespacedName{Name: "test-user-finalizer", Namespace: namespace}
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+			}
+			user := CreateRabbitMQUser(testUserName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user to exist and have finalizers
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				g.Expect(u.Finalizers).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Add external finalizer
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				u.Finalizers = append(u.Finalizers, "external.example.com/test-finalizer")
+				g.Expect(th.K8sClient.Update(th.Ctx, u)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Mark cluster for deletion to avoid RabbitMQ API call failures
+			cluster := GetRabbitMQCluster(rabbitmqClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Delete user
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				g.Expect(th.K8sClient.Delete(th.Ctx, u)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify status condition shows waiting for external finalizer
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testUserName, u)).To(Succeed())
+				g.Expect(u.DeletionTimestamp).NotTo(BeNil())
+
+				cond := u.Status.Conditions.Get(rabbitmqv1.RabbitMQUserReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(corev1.ConditionFalse))
+				g.Expect(string(cond.Reason)).To(Equal(string(condition.DeletingReason)))
+				g.Expect(cond.Message).To(ContainSubstring("Waiting for external finalizers to be removed"))
+				g.Expect(cond.Message).To(ContainSubstring("external.example.com/test-finalizer"))
+			}, timeout, interval).Should(Succeed())
+
+			// Clean up - remove external finalizer
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testUserName, u)).To(Succeed())
+				newFinalizers := []string{}
+				for _, f := range u.Finalizers {
+					if f != "external.example.com/test-finalizer" {
+						newFinalizers = append(newFinalizers, f)
+					}
+				}
+				u.Finalizers = newFinalizers
+				g.Expect(th.K8sClient.Update(th.Ctx, u)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should show cluster deleted status when cluster is deleted during user deletion", func() {
+			// Create a separate cluster and user for this test to avoid interference
+			testClusterName := types.NamespacedName{Name: "test-cluster-deleted", Namespace: namespace}
+			testUserName := types.NamespacedName{Name: "test-user-cluster-deleted", Namespace: namespace}
+
+			CreateRabbitMQCluster(testClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(testClusterName)
+			DeferCleanup(DeleteRabbitMQCluster, testClusterName)
+
+			// Create user
+			spec := map[string]any{
+				"rabbitmqClusterName": testClusterName.Name,
+			}
+			user := CreateRabbitMQUser(testUserName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user to exist and have finalizers
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				g.Expect(u.Finalizers).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Delete cluster first
+			cluster := GetRabbitMQCluster(testClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Delete user
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				g.Expect(th.K8sClient.Delete(th.Ctx, u)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify user is deleted (should proceed quickly since cluster is being deleted)
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				err := th.K8sClient.Get(th.Ctx, testUserName, u)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser is created and immediately deleted (race condition test)", func() {
+		It("should prevent vhost deletion by adding vhost finalizer before user finalizer", func() {
+			// This test verifies the fix for the race condition where:
+			// 1. User is created
+			// 2. User gets its own finalizer
+			// 3. User is deleted before vhost finalizer is added
+			// 4. Vhost can be deleted (BAD!)
+			//
+			// The fix ensures vhost finalizer is added BEFORE user finalizer,
+			// preventing the vhost from being deleted even if user is deleted immediately.
+
+			testUserName := types.NamespacedName{Name: "race-test-user", Namespace: namespace}
+			testVhostName := types.NamespacedName{Name: "race-test-vhost", Namespace: namespace}
+
+			// Create vhost
+			vhost := CreateRabbitMQVhost(testVhostName, map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"name":                "race-test",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+
+			// Create user
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            testVhostName.Name,
+				"username":            "race-user",
+			}
+			user := CreateRabbitMQUser(testUserName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Verify vhost finalizer is added quickly (should happen before or with user finalizer)
+			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + "race-user"
+			Eventually(func(g Gomega) {
+				vhostObj := GetRabbitMQVhost(testVhostName)
+				g.Expect(vhostObj.Finalizers).To(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Immediately try to delete the vhost
+			vhostObj := GetRabbitMQVhost(testVhostName)
+			Expect(th.K8sClient.Delete(th.Ctx, vhostObj)).To(Succeed())
+
+			// Verify vhost is NOT deleted (blocked by user's finalizer)
+			Consistently(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testVhostName, v)).To(Succeed())
+				g.Expect(v.DeletionTimestamp).NotTo(BeNil())
+				g.Expect(v.Finalizers).To(ContainElement(expectedFinalizer))
+			}, "3s", interval).Should(Succeed())
+
+			// Mark cluster for deletion to allow cleanup without RabbitMQ API calls
+			cluster := GetRabbitMQCluster(rabbitmqClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Delete user - this should unblock vhost deletion
+			userObj := GetRabbitMQUser(testUserName)
+			Expect(th.K8sClient.Delete(th.Ctx, userObj)).To(Succeed())
+
+			// Verify user's finalizer is removed from vhost OR vhost is deleted
+			// (both are acceptable outcomes - the important thing is the user cleaned up)
+			Eventually(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				err := th.K8sClient.Get(th.Ctx, testVhostName, v)
+				if err != nil {
+					// Vhost deleted - this is good, user cleaned up properly
+					return
+				}
+				// Vhost still exists - verify finalizer was removed
+				g.Expect(v.Finalizers).NotTo(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Both user and vhost should eventually be deleted
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				err := th.K8sClient.Get(th.Ctx, testUserName, u)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				err := th.K8sClient.Get(th.Ctx, testVhostName, v)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should handle user deletion during initialization without leaving vhost stuck", func() {
+			// This test simulates the exact scenario from the bug report:
+			// User is deleted BEFORE it completes initial reconciliation
+			// (before status.Vhost is set)
+
+			testUserName := types.NamespacedName{Name: "early-delete-user", Namespace: namespace}
+			testVhostName := types.NamespacedName{Name: "early-delete-vhost", Namespace: namespace}
+
+			// Create vhost
+			vhost := CreateRabbitMQVhost(testVhostName, map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"name":                "early-delete",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+
+			// Create user
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            testVhostName.Name,
+				"username":            "early-user",
+			}
+			user := CreateRabbitMQUser(testUserName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for vhost finalizer to be added (this is the critical fix)
+			expectedFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + "early-user"
+			Eventually(func(g Gomega) {
+				vhostObj := GetRabbitMQVhost(testVhostName)
+				g.Expect(vhostObj.Finalizers).To(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Delete user BEFORE status.Vhost is set (simulating early deletion)
+			// Don't wait for reconciliation to complete
+			userObj := GetRabbitMQUser(testUserName)
+			Expect(th.K8sClient.Delete(th.Ctx, userObj)).To(Succeed())
+
+			// Try to delete vhost
+			vhostObj := GetRabbitMQVhost(testVhostName)
+			Expect(th.K8sClient.Delete(th.Ctx, vhostObj)).To(Succeed())
+
+			// Vhost should be blocked from deletion by user's finalizer
+			Consistently(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testVhostName, v)).To(Succeed())
+				g.Expect(v.DeletionTimestamp).NotTo(BeNil())
+			}, "3s", interval).Should(Succeed())
+
+			// Mark cluster for deletion to allow cleanup without RabbitMQ API calls
+			cluster := GetRabbitMQCluster(rabbitmqClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// User should clean up its finalizer from vhost during deletion
+			Eventually(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testVhostName, v)).To(Succeed())
+				g.Expect(v.Finalizers).NotTo(ContainElement(expectedFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Both user and vhost should eventually be deleted
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				err := th.K8sClient.Get(th.Ctx, testUserName, u)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				err := th.K8sClient.Get(th.Ctx, testVhostName, v)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should handle vhost being deleted when user status.Vhost is not yet set", func() {
+			// This test verifies the controller can handle cleanup even when
+			// the vhost CR is gone and status.Vhost was never populated
+
+			testUserName := types.NamespacedName{Name: "orphan-user", Namespace: namespace}
+			testVhostName := types.NamespacedName{Name: "orphan-vhost", Namespace: namespace}
+
+			// Create vhost
+			vhost := CreateRabbitMQVhost(testVhostName, map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"name":                "orphan",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+
+			// Create user
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            testVhostName.Name,
+				"username":            "orphan-user",
+			}
+			user := CreateRabbitMQUser(testUserName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user finalizer to be added
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(testUserName)
+				g.Expect(u.Finalizers).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Mark cluster for deletion to allow vhost cleanup
+			cluster := GetRabbitMQCluster(rabbitmqClusterName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Force delete the vhost (simulating the race condition scenario)
+			// Remove all finalizers and delete
+			Eventually(func(g Gomega) {
+				vhostObj := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testVhostName, vhostObj)).To(Succeed())
+				vhostObj.Finalizers = []string{}
+				g.Expect(th.K8sClient.Update(th.Ctx, vhostObj)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				vhostObj := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(th.K8sClient.Get(th.Ctx, testVhostName, vhostObj)).To(Succeed())
+				g.Expect(th.K8sClient.Delete(th.Ctx, vhostObj)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify vhost is gone
+			Eventually(func(g Gomega) {
+				v := &rabbitmqv1.RabbitMQVhost{}
+				err := th.K8sClient.Get(th.Ctx, testVhostName, v)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+
+			// Now delete the user
+			userObj := GetRabbitMQUser(testUserName)
+			Expect(th.K8sClient.Delete(th.Ctx, userObj)).To(Succeed())
+
+			// User should be able to complete deletion despite missing vhost CR
+			// (it should handle the NotFound error gracefully)
+			Eventually(func(g Gomega) {
+				u := &rabbitmqv1.RabbitMQUser{}
+				err := th.K8sClient.Get(th.Ctx, testUserName, u)
+				g.Expect(err).To(HaveOccurred())
 			}, timeout, interval).Should(Succeed())
 		})
 	})

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,19 +55,24 @@ func (r *RabbitMQUser) Default(_ client.Client) {
 func (r *RabbitMQUser) ValidateCreate(k8sClient client.Client) (admission.Warnings, error) {
 	rabbitmquserlog.Info("validate create", "name", r.Name)
 
-	// Validate username
-	if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
-		return nil, apierrors.NewInvalid(
-			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
-			r.Name,
-			field.ErrorList{field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error())},
-		)
+	// Validate username format and length
+	if err := r.validateUsername(); err != nil {
+		return nil, err
+	}
+
+	// Validate permission regex patterns
+	if err := r.validatePermissions(); err != nil {
+		return nil, err
 	}
 
 	// Validate vhost reference if specified
 	if r.Spec.VhostRef != "" {
 		vhost := &RabbitMQVhost{}
-		if err := k8sClient.Get(context.TODO(),
+		// Use a timeout context to prevent webhook from hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := k8sClient.Get(ctx,
 			client.ObjectKey{Name: r.Spec.VhostRef, Namespace: r.Namespace},
 			vhost); err != nil {
 			return nil, apierrors.NewInvalid(
@@ -106,10 +112,40 @@ func (r *RabbitMQUser) ValidateUpdate(k8sClient client.Client, old runtime.Objec
 		)
 	}
 
-	// Validate vhost reference if specified
-	if r.Spec.VhostRef != "" {
+	// Prevent changing VhostRef during deletion to avoid race conditions with finalizer cleanup
+	if !r.DeletionTimestamp.IsZero() && r.Spec.VhostRef != oldUser.Spec.VhostRef {
+		return nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+			r.Name,
+			field.ErrorList{
+				field.Forbidden(
+					field.NewPath("spec", "vhostRef"),
+					"vhostRef cannot be changed while resource is being deleted",
+				),
+			},
+		)
+	}
+
+	// Defensive validation: even though username can't change, validate format and length
+	// This protects against bypasses or bugs in the immutability check
+	if err := r.validateUsername(); err != nil {
+		return nil, err
+	}
+
+	// Validate permission regex patterns
+	if err := r.validatePermissions(); err != nil {
+		return nil, err
+	}
+
+	// Validate vhost reference if specified (skip during deletion)
+	// During deletion, the vhost may already be deleted, and we don't need to validate it
+	if r.Spec.VhostRef != "" && r.DeletionTimestamp.IsZero() {
 		vhost := &RabbitMQVhost{}
-		if err := k8sClient.Get(context.TODO(),
+		// Use a timeout context to prevent webhook from hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := k8sClient.Get(ctx,
 			client.ObjectKey{Name: r.Spec.VhostRef, Namespace: r.Namespace},
 			vhost); err != nil {
 			return nil, apierrors.NewInvalid(
@@ -131,11 +167,45 @@ func (r *RabbitMQUser) ValidateDelete(client.Client) (admission.Warnings, error)
 	return nil, nil
 }
 
+// validateUsername validates the username format and length
+func (r *RabbitMQUser) validateUsername() error {
+	var allErrs field.ErrorList
+
+	// Validate username format
+	if err := validateRabbitMQName(r.Spec.Username, "username"); err != nil {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "username"), r.Spec.Username, err.Error()))
+	}
+
+	// Validate username length to ensure it fits within vhost finalizer length limits
+	// The username will be used in the vhost finalizer: UserVhostFinalizerPrefix + username
+	if len(r.Spec.Username) > MaxUsernameLength {
+		allErrs = append(allErrs, field.TooLong(
+			field.NewPath("spec", "username"),
+			r.Spec.Username,
+			MaxUsernameLength,
+		))
+	}
+
+	if len(allErrs) != 0 {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+			r.Name,
+			allErrs,
+		)
+	}
+
+	return nil
+}
+
 // validateUniqueUsername checks that no other RabbitMQUser exists with the same username, vhost, and cluster
 func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 	// List all RabbitMQUsers in the same namespace
+	// Use a timeout context to prevent webhook from hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	userList := &RabbitMQUserList{}
-	if err := k8sClient.List(context.TODO(), userList, client.InNamespace(r.Namespace)); err != nil {
+	if err := k8sClient.List(ctx, userList, client.InNamespace(r.Namespace)); err != nil {
 		return apierrors.NewInternalError(fmt.Errorf("failed to list RabbitMQUsers: %w", err))
 	}
 
@@ -170,6 +240,48 @@ func (r *RabbitMQUser) validateUniqueUsername(k8sClient client.Client) error {
 				},
 			)
 		}
+	}
+
+	return nil
+}
+
+// validatePermissions validates that permission regex patterns are valid
+func (r *RabbitMQUser) validatePermissions() error {
+	var allErrs field.ErrorList
+
+	// Validate configure permission regex
+	if _, err := regexp.Compile(r.Spec.Permissions.Configure); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "permissions", "configure"),
+			r.Spec.Permissions.Configure,
+			fmt.Sprintf("invalid regex pattern: %v", err),
+		))
+	}
+
+	// Validate write permission regex
+	if _, err := regexp.Compile(r.Spec.Permissions.Write); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "permissions", "write"),
+			r.Spec.Permissions.Write,
+			fmt.Sprintf("invalid regex pattern: %v", err),
+		))
+	}
+
+	// Validate read permission regex
+	if _, err := regexp.Compile(r.Spec.Permissions.Read); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			field.NewPath("spec", "permissions", "read"),
+			r.Spec.Permissions.Read,
+			fmt.Sprintf("invalid regex pattern: %v", err),
+		))
+	}
+
+	if len(allErrs) != 0 {
+		return apierrors.NewInvalid(
+			schema.GroupKind{Group: "rabbitmq.openstack.org", Kind: "RabbitMQUser"},
+			r.Name,
+			allErrs,
+		)
 	}
 
 	return nil
