@@ -25,12 +25,14 @@ import (
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 
 	//revive:disable-next-line:dot-imports
 
 	//. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -698,6 +700,485 @@ var _ = Describe("RabbitMQ Controller", func() {
 					g.Expect(svc.OwnerReferences[0].Name).To(Equal(rabbitmqDefaultName))
 				}
 			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQ version upgrade", func() {
+		When("RabbitMQ is created without version labels", func() {
+			BeforeEach(func() {
+				rabbitmq := CreateRabbitMQ(rabbitmqName, GetDefaultRabbitMQSpec())
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+			})
+
+			It("should default Status.CurrentVersion to 3.9", func() {
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ major version upgrade (3.9 to 4.0)", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Quorum"
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should require storage wipe and update Status.CurrentVersion after upgrade", func() {
+				// 3.9 -> 4.0 requires storage wipe (no direct path)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for upgrade to complete: cluster deleted, storage cleaned, cluster recreated
+				var newCluster *rabbitmqclusterv2.RabbitmqCluster
+				Eventually(func(g Gomega) {
+					newCluster = &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, newCluster)
+					g.Expect(err).ToNot(HaveOccurred())
+					// Cluster should exist and have been created
+					g.Expect(newCluster.Generation).To(BeNumerically(">", 0))
+				}, timeout, interval).Should(Succeed())
+
+				// Now simulate the new cluster as ready
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify Status.CurrentVersion is updated after cluster is ready
+				Eventually(func(g Gomega) {
+					updatedInstance := GetRabbitMQ(rabbitmqName)
+					g.Expect(updatedInstance.Status.CurrentVersion).To(Equal("4.0"))
+					g.Expect(updatedInstance.Labels["rabbitmq-version"]).To(Equal("4.0"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ patch version changes (3.9.0 to 3.9.1)", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should allow patch version changes without storage wipe", func() {
+				// Patch version changes don't require storage wipe
+				instance := GetRabbitMQ(rabbitmqName)
+				if instance.Labels == nil {
+					instance.Labels = make(map[string]string)
+				}
+				instance.Labels["rabbitmq-version"] = "3.9.1"
+				Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+
+				// Should NOT trigger storage wipe - Status.CurrentVersion should remain 3.9
+				Consistently(func(g Gomega) {
+					updatedInstance := GetRabbitMQ(rabbitmqName)
+					g.Expect(updatedInstance.Status.CurrentVersion).To(Equal("3.9"))
+				}, "5s", interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ version downgrade (4.0 to 3.9)", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Quorum"
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				// First upgrade to 4.0 to establish a 4.0 cluster
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for upgrade to complete
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+				}, timeout*2, interval).Should(Succeed())
+			})
+
+			It("should require storage wipe for downgrade", func() {
+				// 4.0 -> 3.9 is a downgrade and requires storage wipe
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "3.9"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for downgrade to complete: cluster deleted, storage cleaned, cluster recreated
+				var newCluster *rabbitmqclusterv2.RabbitmqCluster
+				Eventually(func(g Gomega) {
+					newCluster = &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, newCluster)
+					g.Expect(err).ToNot(HaveOccurred())
+					// Cluster should exist and have been created
+					g.Expect(newCluster.Generation).To(BeNumerically(">", 0))
+				}, timeout, interval).Should(Succeed())
+
+				// Simulate the new cluster as ready
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify Status.CurrentVersion is updated after cluster is ready
+				Eventually(func(g Gomega) {
+					updatedInstance := GetRabbitMQ(rabbitmqName)
+					g.Expect(updatedInstance.Status.CurrentVersion).To(Equal("3.9"))
+					g.Expect(updatedInstance.Labels["rabbitmq-version"]).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+	})
+
+	When("RabbitMQ mirrored queues and version compatibility", func() {
+		When("RabbitMQ 3.9 with Mirrored queues", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Mirrored"
+				spec["replicas"] = 2
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+			})
+
+			It("should apply mirrored queue policy on RabbitMQ 3.9", func() {
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify mirrored queue policy is applied
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+					g.Expect(instance.Status.QueueType).To(Equal(rabbitmqv1.QueueTypeMirrored))
+				}, timeout, interval).Should(Succeed())
+
+				// Verify policy CR is created
+				policyName := types.NamespacedName{
+					Name:      rabbitmqDefaultName + "-ha-all",
+					Namespace: namespace,
+				}
+				Eventually(func(g Gomega) {
+					policy := &rabbitmqv1.RabbitMQPolicy{}
+					err := k8sClient.Get(ctx, policyName, policy)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(policy.Spec.Name).To(Equal("ha-all"))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ 4.0 with Mirrored queues", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Mirrored"
+				spec["replicas"] = 2
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				// Wait for controller to set default version first (3.9)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+
+				// Trigger upgrade to 4.0 (webhook will auto-convert Mirrored to Quorum)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for new cluster to be recreated after storage wipe
+				Eventually(func(g Gomega) {
+					cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, cluster)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Generation).To(BeNumerically(">", 0))
+				}, timeout, interval).Should(Succeed())
+
+				// Simulate new cluster ready after upgrade
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Wait for upgrade to complete
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+				}, timeout*2, interval).Should(Succeed())
+			})
+
+			It("should skip mirrored queue policy on RabbitMQ 4.0+", func() {
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify mirrored queue policy is NOT applied (status should be cleared)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+					// Status should be empty since policy is not applied
+					g.Expect(instance.Status.QueueType).To(BeEmpty())
+				}, timeout, interval).Should(Succeed())
+
+				// Verify policy CR is NOT created
+				policyName := types.NamespacedName{
+					Name:      rabbitmqDefaultName + "-ha-all",
+					Namespace: namespace,
+				}
+				Consistently(func(g Gomega) {
+					policy := &rabbitmqv1.RabbitMQPolicy{}
+					err := k8sClient.Get(ctx, policyName, policy)
+					g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+				}, "5s", interval).Should(Succeed())
+			})
+
+			It("should override Mirrored to Quorum via webhook on updates", func() {
+				// Trigger an update to the CR (webhook should override Mirrored to Quorum)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					// Make a trivial change to trigger webhook defaulting
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["test-update"] = "trigger-webhook"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Verify webhook overrode queueType to Quorum
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Spec.QueueType).ToNot(BeNil())
+					g.Expect(*instance.Spec.QueueType).To(Equal(rabbitmqv1.QueueTypeQuorum))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ 3.9 with Mirrored queues upgrading to 4.0", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Mirrored"
+				spec["replicas"] = 2
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				// Wait for controller to initialize with default version 3.9
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.QueueType).To(Equal(rabbitmqv1.QueueTypeMirrored))
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should automatically migrate to Quorum queues and wipe cluster", func() {
+				// Trigger upgrade to 4.0
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Verify queueType is automatically changed to Quorum
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Spec.QueueType).ToNot(BeNil())
+					g.Expect(*instance.Spec.QueueType).To(Equal(rabbitmqv1.QueueTypeQuorum))
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for upgrade to complete: cluster deleted, storage cleaned, cluster recreated
+				var newCluster *rabbitmqclusterv2.RabbitmqCluster
+				Eventually(func(g Gomega) {
+					newCluster = &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, newCluster)
+					g.Expect(err).ToNot(HaveOccurred())
+					// Cluster should exist and have been created
+					g.Expect(newCluster.Generation).To(BeNumerically(">", 0))
+				}, timeout, interval).Should(Succeed())
+
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify Status.CurrentVersion is updated
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+				}, timeout, interval).Should(Succeed())
+
+				// Status.queueType should be updated to Quorum after migration
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.QueueType).To(Equal(rabbitmqv1.QueueTypeQuorum))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("RabbitMQ 4.0 with Quorum queues", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["queueType"] = "Quorum"
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				// Wait for default version initialization
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+
+				// Trigger upgrade to 4.0
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for new cluster to be recreated after storage wipe
+				Eventually(func(g Gomega) {
+					cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, cluster)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(cluster.Generation).To(BeNumerically(">", 0))
+				}, timeout, interval).Should(Succeed())
+
+				// Simulate new cluster ready after upgrade
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Wait for upgrade to complete
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+				}, timeout*2, interval).Should(Succeed())
+			})
+
+			It("should reject setting queueType to Mirrored", func() {
+				// Try to change queueType to Mirrored
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					mirrored := rabbitmqv1.QueueTypeMirrored
+					instance.Spec.QueueType = &mirrored
+					err := k8sClient.Update(ctx, instance)
+					g.Expect(err).To(HaveOccurred())
+					g.Expect(err.Error()).To(ContainSubstring("Mirrored queues are deprecated"))
+				}, timeout, interval).Should(Succeed())
+
+				// Verify queueType remains Quorum
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Spec.QueueType).ToNot(BeNil())
+					g.Expect(*instance.Spec.QueueType).To(Equal(rabbitmqv1.QueueTypeQuorum))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+	})
+
+	When("RabbitMQ TLS configuration", func() {
+		When("RabbitMQ 4.0 with TLS enabled", func() {
+			BeforeEach(func() {
+				spec := GetDefaultRabbitMQSpec()
+				spec["tls"] = map[string]any{
+					"secretName": "test-tls-secret",
+				}
+				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				DeferCleanup(th.DeleteInstance, rabbitmq)
+
+				// Create TLS secret
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-tls-secret",
+						Namespace: namespace,
+					},
+					Data: map[string][]byte{
+						"tls.crt": []byte("test-cert"),
+						"tls.key": []byte("test-key"),
+						"ca.crt":  []byte("test-ca"),
+					},
+				}
+				Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+				DeferCleanup(k8sClient.Delete, ctx, secret)
+
+				// Wait for default version initialization
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should enable TLS 1.3 after upgrade to 4.0", func() {
+				// Trigger upgrade to 4.0
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Labels == nil {
+						instance.Labels = make(map[string]string)
+					}
+					instance.Labels["rabbitmq-version"] = "4.0"
+					err := k8sClient.Update(ctx, instance)
+					g.Expect(err).ToNot(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for cluster recreation and upgrade completion
+				Eventually(func(g Gomega) {
+					cluster := GetRabbitMQCluster(rabbitmqName)
+					g.Expect(cluster).ToNot(BeNil())
+				}, timeout, interval).Should(Succeed())
+
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Verify Status.CurrentVersion is updated to 4.0
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+				}, timeout*2, interval).Should(Succeed())
+
+				// Verify TLS 1.3 is enabled in RabbitMQ 4.0
+				Eventually(func(g Gomega) {
+					cluster := GetRabbitMQCluster(rabbitmqName)
+					advancedConfig := cluster.Spec.Rabbitmq.AdvancedConfig
+
+					// RabbitMQ 4.0 should have TLS 1.2 and 1.3 enabled
+					g.Expect(advancedConfig).To(ContainSubstring("{ssl, [{protocol_version, ['tlsv1.2','tlsv1.3']}"))
+					g.Expect(strings.Count(advancedConfig, "{versions, ['tlsv1.2','tlsv1.3']}")).To(Equal(3))
+
+					// Verify inter_node_tls config also has TLS 1.3
+					configMapName := types.NamespacedName{
+						Name:      rabbitmqName.Name + "-config-data",
+						Namespace: namespace,
+					}
+					configMap := &corev1.ConfigMap{}
+					err := k8sClient.Get(ctx, configMapName, configMap)
+					g.Expect(err).ToNot(HaveOccurred())
+
+					interNodeConfig := configMap.Data["inter_node_tls.config"]
+					g.Expect(strings.Count(interNodeConfig, "{versions, ['tlsv1.2','tlsv1.3']}")).To(Equal(2))
+				}, timeout, interval).Should(Succeed())
+			})
 		})
 	})
 })

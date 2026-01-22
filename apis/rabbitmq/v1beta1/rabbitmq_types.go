@@ -133,6 +133,20 @@ type RabbitMqStatus struct {
 	// When populated, transport URLs use these hostnames instead of pod names.
 	// +listType=atomic
 	ServiceHostnames []string `json:"serviceHostnames,omitempty"`
+
+	// CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.0")
+	// This is controller-managed and reflects the actual running version.
+	// Users should use the rabbitmq-version label to request version changes.
+	CurrentVersion string `json:"currentVersion,omitempty"`
+
+	// UpgradePhase - tracks the current phase of a version upgrade or migration
+	// Valid values: "", "DeletingCluster", "DeletingStorage", "VerifyingCleanup", "Complete"
+	// This allows resuming upgrades that failed midway.
+	UpgradePhase string `json:"upgradePhase,omitempty"`
+
+	// StorageWipeStartedAt - timestamp when storage wipe process started
+	// Used to implement timeout protection against stuck PV/PVC deletions
+	StorageWipeStartedAt *metav1.Time `json:"storageWipeStartedAt,omitempty"`
 }
 
 //+kubebuilder:object:root=true
