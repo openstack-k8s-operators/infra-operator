@@ -7,7 +7,6 @@ aliases:
   openstack-approvers:
   - abays
   - dprince
-  - olliewalsh
   - stuggi
   infra-approvers:
   - dciabrin
