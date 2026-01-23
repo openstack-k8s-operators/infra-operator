@@ -6,6 +6,9 @@
     github-check:
       jobs:
         - openstack-k8s-operators-content-provider:
+            irrelevant-files:
+              - ^templates/instanceha/.*$
+              - ^test/instanceha/.*$
             vars:
               cifmw_install_yamls_sdk_version: v1.41.1
               cifmw_operator_build_golang_ct: "docker.io/library/golang:1.24"
