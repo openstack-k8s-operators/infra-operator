@@ -514,6 +514,11 @@ func (in *RabbitMqSpecCore) DeepCopyInto(out *RabbitMqSpecCore) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.Version != nil {
+		in, out := &in.Version, &out.Version
+		*out = new(string)
+		**out = **in
+	}
 	if in.PodOverride != nil {
 		in, out := &in.PodOverride, &out.PodOverride
 		*out = new(PodOverride)

@@ -19,16 +19,16 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// RabbitmqVersion represents a parsed RabbitMQ version
-type RabbitmqVersion struct {
+// Version represents a parsed RabbitMQ version
+type Version struct {
 	Major int
 	Minor int
 	Patch int
 }
 
 // ParseRabbitMQVersion parses a version string like "3.9", "3.13.1", "4.0" into components
-func ParseRabbitMQVersion(versionStr string) (RabbitmqVersion, error) {
-	var v RabbitmqVersion
+func ParseRabbitMQVersion(versionStr string) (Version, error) {
+	var v Version
 	parts := strings.Split(versionStr, ".")
 
 	if len(parts) < 2 {

@@ -20,56 +20,55 @@ limitations under the License.
 //
 // Steps to roll back a failed upgrade:
 //
-// 1. Stop the upgrade process:
-//    kubectl label rabbitmq <name> -n <namespace> rabbitmq-version-
+//  1. Stop the upgrade process by reverting spec.version to the original version:
+//     kubectl patch rabbitmq <name> -n <namespace> --type=merge -p '{"spec":{"version":"<original-version>"}}'
 //
-// 2. Check the current upgrade phase:
-//    kubectl get rabbitmq <name> -n <namespace> -o jsonpath='{.status.upgradePhase}'
+//  2. Check the current upgrade phase:
+//     kubectl get rabbitmq <name> -n <namespace> -o jsonpath='{.status.upgradePhase}'
 //
-// 3. For PVCs in deletion state (upgradePhase = "DeletingStorage"):
-//    # List PVCs
-//    kubectl get pvc -n <namespace> -l app.kubernetes.io/name=<name>
+//  3. For PVCs in deletion state (upgradePhase = "DeletingStorage"):
+//     # List PVCs
+//     kubectl get pvc -n <namespace> -l app.kubernetes.io/name=<name>
 //
-//    # Check finalizers
-//    kubectl get pvc -n <namespace> <pvc-name> -o jsonpath='{.metadata.finalizers}'
+//     # Check finalizers
+//     kubectl get pvc -n <namespace> <pvc-name> -o jsonpath='{.metadata.finalizers}'
 //
-//    # Remove finalizers (note: CSI driver cleanup will be bypassed)
-//    kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
+//     # Remove finalizers (note: CSI driver cleanup will be bypassed)
+//     kubectl patch pvc <pvc-name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
 //
-// 4. For PVs in deletion state:
-//    # List PVs
-//    kubectl get pv -o jsonpath='{.items[?(@.spec.claimRef.name=="persistence-<name>-0")].metadata.name}'
+//  4. For PVs in deletion state:
+//     # List PVs
+//     kubectl get pv -o jsonpath='{.items[?(@.spec.claimRef.name=="persistence-<name>-0")].metadata.name}'
 //
-//    # Check PV status and finalizers
-//    kubectl get pv <pv-name> -o yaml
+//     # Check PV status and finalizers
+//     kubectl get pv <pv-name> -o yaml
 //
-//    # Check storage backend logs (CSI driver, storage system)
+//     # Check storage backend logs (CSI driver, storage system)
 //
-//    # Remove PV finalizers (note: storage backend cleanup will be bypassed)
-//    kubectl patch pv <pv-name> -p '{"metadata":{"finalizers":null}}' --type=merge
+//     # Remove PV finalizers (note: storage backend cleanup will be bypassed)
+//     kubectl patch pv <pv-name> -p '{"metadata":{"finalizers":null}}' --type=merge
 //
-// 5. Clean up the RabbitMQ CR:
-//    kubectl delete rabbitmq <name> -n <namespace> --timeout=60s
+//  5. Clean up the RabbitMQ CR:
+//     kubectl delete rabbitmq <name> -n <namespace> --timeout=60s
 //
-//    # Force remove finalizers if deletion hangs
-//    kubectl patch rabbitmq <name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
+//     # Force remove finalizers if deletion hangs
+//     kubectl patch rabbitmq <name> -n <namespace> -p '{"metadata":{"finalizers":null}}' --type=merge
 //
-// 6. Clean remaining resources:
-//    kubectl delete rabbitmqcluster <name> -n <namespace>
-//    kubectl delete pvc -n <namespace> -l app.kubernetes.io/name=<name>
-//    kubectl delete service -n <namespace> -l app.kubernetes.io/name=<name>
+//  6. Clean remaining resources:
+//     kubectl delete rabbitmqcluster <name> -n <namespace>
+//     kubectl delete pvc -n <namespace> -l app.kubernetes.io/name=<name>
+//     kubectl delete service -n <namespace> -l app.kubernetes.io/name=<name>
 //
-// 7. Recreate the RabbitMQ CR with the original version:
-//    kubectl apply -f rabbitmq-original.yaml
+//  7. Recreate the RabbitMQ CR with the original version:
+//     kubectl apply -f rabbitmq-original.yaml
 //
-// 8. Restore data from backups:
-//    # Use backup/restore procedure for the deployment
+//  8. Restore data from backups:
+//     # Use backup/restore procedure for the deployment
 //
 // Notes:
 // - Removing finalizers bypasses CSI driver and storage backend cleanup
 // - Storage resources remain in the backend when PV finalizers are removed
 // - RabbitMQ data is deleted during storage wipe for version compatibility
-
 package rabbitmq
 
 import (
@@ -109,7 +108,7 @@ func (r *Reconciler) ensureDeleteReclaimPolicy(ctx context.Context, pvcList *cor
 		// This prevents failures from CSI drivers or other controllers updating PVs
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			pv := &corev1.PersistentVolume{}
-			if err := r.Client.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+			if err := r.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
 				if k8s_errors.IsNotFound(err) {
 					// PV already gone, that's fine
 					return nil
@@ -136,7 +135,7 @@ func (r *Reconciler) ensureDeleteReclaimPolicy(ctx context.Context, pvcList *cor
 				// and the storage backend will wipe the underlying storage
 				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
 
-				if err := r.Client.Update(ctx, pv); err != nil {
+				if err := r.Update(ctx, pv); err != nil {
 					return err
 				}
 
@@ -193,7 +192,7 @@ func removeProtectionFinalizer(pvc *corev1.PersistentVolumeClaim, log logr.Logge
 // Implements timeout protection (30 minutes) for PV deletion.
 func (r *Reconciler) verifyPVCleanupComplete(ctx context.Context, namespace, instanceName string, storageWipeStartedAt *time.Time, log logr.Logger) (bool, error) {
 	pvList := &corev1.PersistentVolumeList{}
-	if err := r.Client.List(ctx, pvList); err != nil {
+	if err := r.List(ctx, pvList); err != nil {
 		return false, fmt.Errorf("failed to list PVs during upgrade verification: %w. "+
 			"List PVs: kubectl get pv -A", err)
 	}
@@ -271,7 +270,7 @@ func (r *Reconciler) deletePVCsForUpgrade(ctx context.Context, pvcList *corev1.P
 		// Remove kubernetes.io/pvc-protection finalizer to allow deletion
 		// Other finalizers are preserved for CSI driver cleanup
 		if removeProtectionFinalizer(pvc, log) {
-			if err := r.Client.Update(ctx, pvc); err != nil {
+			if err := r.Update(ctx, pvc); err != nil {
 				return false, fmt.Errorf("failed to remove finalizer from PVC %s: %w. "+
 					"Check PVC: kubectl get pvc %s -n %s -o yaml",
 					pvc.Name, err, pvc.Name, pvc.Namespace)
@@ -280,7 +279,7 @@ func (r *Reconciler) deletePVCsForUpgrade(ctx context.Context, pvcList *corev1.P
 
 		// Delete the PVC
 		// The Delete reclaim policy on the PV triggers automatic storage cleanup
-		if err := r.Client.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
+		if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
 			return false, fmt.Errorf("failed to delete PVC %s: %w. "+
 				"Check PVC: kubectl describe pvc %s -n %s",
 				pvc.Name, err, pvc.Name, pvc.Namespace)
@@ -301,7 +300,7 @@ func (r *Reconciler) deletePVCsForUpgrade(ctx context.Context, pvcList *corev1.P
 // still writing to volumes.
 func (r *Reconciler) waitForPodsTermination(ctx context.Context, namespace, instanceName string, log logr.Logger) (ctrl.Result, bool, error) {
 	podList := &corev1.PodList{}
-	if err := r.Client.List(ctx, podList,
+	if err := r.List(ctx, podList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{"app.kubernetes.io/name": instanceName},
 	); err != nil {
@@ -320,7 +319,7 @@ func (r *Reconciler) waitForPodsTermination(ctx context.Context, namespace, inst
 // listPVCsForInstance lists all PVCs associated with the RabbitMQ instance.
 func (r *Reconciler) listPVCsForInstance(ctx context.Context, namespace, instanceName string) (*corev1.PersistentVolumeClaimList, error) {
 	pvcList := &corev1.PersistentVolumeClaimList{}
-	if err := r.Client.List(ctx, pvcList,
+	if err := r.List(ctx, pvcList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{"app.kubernetes.io/name": instanceName},
 	); err != nil {
@@ -447,7 +446,7 @@ func (r *Reconciler) performStorageWipe(
 	if err != nil {
 		log.Error(err, "Failed to verify PV cleanup")
 		return ctrl.Result{}, fmt.Errorf("PV cleanup verification failed: %w. "+
-			"Stop upgrade: kubectl label rabbitmq %s -n %s rabbitmq-version-. "+
+			"Stop upgrade: kubectl patch rabbitmq %s -n %s --type=merge -p '{\"spec\":{\"version\":\"<original-version>\"}}'"+
 			"Clean PVCs: kubectl delete pvc -n %s -l app.kubernetes.io/name=%s. "+
 			"Check PV finalizers: kubectl get pv -o jsonpath='{.items[*].metadata.finalizers}'. "+
 			"Remove finalizers: kubectl patch pv <pv-name> -p '{\"metadata\":{\"finalizers\":null}}' --type=merge. "+

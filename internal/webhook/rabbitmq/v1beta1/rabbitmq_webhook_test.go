@@ -286,13 +286,11 @@ var _ = Describe("RabbitMq webhook", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-rabbitmq",
 					Namespace: "default",
-					Labels: map[string]string{
-						"rabbitmq-current-version": "3.13",
-					},
 				},
 				Spec: rabbitmqv1beta1.RabbitMqSpec{
 					RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{
 						QueueType: ptr.To("Quorum"),
+						Version:   ptr.To("3.13"),
 					},
 				},
 			}

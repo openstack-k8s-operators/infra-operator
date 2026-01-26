@@ -89,6 +89,14 @@ type RabbitMqSpecCore struct {
 	QueueType *string `json:"queueType,omitempty"`
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Version - Desired RabbitMQ version (e.g., "3.9", "4.0").
+	// Changing this value triggers a version upgrade/downgrade process which requires storage wipe
+	// for major/minor version changes. Defaults to "4.0" for new instances and "3.9" for existing
+	// instances (backwards compatibility). This field should be set by openstack-operator to control
+	// the RabbitMQ version.
+	Version *string `json:"version,omitempty"`
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// PodOverride - Override configuration for per-pod services. When specified, individual LoadBalancer
 	// services will be created for each pod with the provided configuration, and the transport URL will be
 	// configured to use these per-pod services.
@@ -136,7 +144,7 @@ type RabbitMqStatus struct {
 
 	// CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.0")
 	// This is controller-managed and reflects the actual running version.
-	// Users should use the rabbitmq-version label to request version changes.
+	// Users should use spec.version to request version changes.
 	CurrentVersion string `json:"currentVersion,omitempty"`
 
 	// UpgradePhase - tracks the current phase of a version upgrade or migration

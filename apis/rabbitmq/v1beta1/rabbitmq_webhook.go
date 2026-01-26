@@ -91,7 +91,7 @@ func (r *RabbitMq) Default(k8sClient client.Client) {
 			// Check if we should override Mirrored to Quorum on RabbitMQ 4.0+
 			// Only override if the queueType is NOT being explicitly CHANGED to Mirrored
 			shouldOverride := false
-			if *existingRabbitMq.Spec.QueueType == "Mirrored" && r.Labels != nil {
+			if *existingRabbitMq.Spec.QueueType == "Mirrored" {
 				// Kubernetes fills in all spec fields during updates, so we need to detect
 				// if the user is explicitly CHANGING to Mirrored (from something else)
 				// vs just preserving the existing Mirrored value
@@ -101,17 +101,17 @@ func (r *RabbitMq) Default(k8sClient client.Client) {
 
 				if !userChangingToMirrored {
 					// User is not explicitly changing TO Mirrored, so we can auto-override
-					// Check the target version (rabbitmq-version label) to see if upgrading to 4.0+
-					if targetVersion, hasTarget := r.Labels["rabbitmq-version"]; hasTarget {
+					// Check the target version (spec.version) to see if upgrading to 4.0+
+					if r.Spec.Version != nil && *r.Spec.Version != "" {
 						// Parse version to check if major version is 4 or higher
-						majorVersion, err := parseVersionMajor(targetVersion)
+						majorVersion, err := parseVersionMajor(*r.Spec.Version)
 						if err == nil && majorVersion >= 4 {
 							shouldOverride = true
 							queueType := "Quorum"
 							r.Spec.QueueType = &queueType
 							rabbitmqlog.Info("overriding Mirrored to Quorum on RabbitMQ 4.0+",
 								"name", r.Name,
-								"targetVersion", targetVersion,
+								"targetVersion", *r.Spec.Version,
 								"queueType", "Quorum")
 						}
 					}
@@ -133,6 +133,15 @@ func (r *RabbitMq) Default(k8sClient client.Client) {
 						"newQueueType", *r.Spec.QueueType)
 				}
 			}
+
+			// Preserve existing version if not specified
+			if r.Spec.Version == nil || *r.Spec.Version == "" {
+				if existingRabbitMq.Spec.Version != nil && *existingRabbitMq.Spec.Version != "" {
+					r.Spec.Version = existingRabbitMq.Spec.Version
+					rabbitmqlog.Info("preserving Version from existing CR", "name", r.Name, "version", *r.Spec.Version)
+				}
+			}
+
 			isNew = false
 		} else {
 			// Check if RabbitMQCluster exists (upgrade scenario: cluster exists but CR is new)
@@ -167,6 +176,19 @@ func (spec *RabbitMqSpec) Default(isNew bool) {
 
 // Default - set defaults for this RabbitMqSpecCore
 func (spec *RabbitMqSpecCore) Default(isNew bool) {
+	// Default Version based on whether this is a new or existing instance
+	if spec.Version == nil || *spec.Version == "" {
+		if isNew {
+			// New instances default to RabbitMQ 4.0
+			version := "4.0"
+			spec.Version = &version
+		} else {
+			// Existing instances default to 3.9 (for backwards compatibility)
+			version := "3.9"
+			spec.Version = &version
+		}
+	}
+
 	if isNew && (spec.QueueType == nil || *spec.QueueType == "") {
 		queueType := "Quorum"
 		spec.QueueType = &queueType
@@ -267,12 +289,10 @@ func (r *RabbitMq) ValidateUpdate(old runtime.Object) (admission.Warnings, error
 				if err == nil && majorVersion == 3 {
 					// Check if there's a concurrent version upgrade to 4.x
 					isUpgradingTo4x := false
-					if r.Labels != nil {
-						if targetVersion, hasTarget := r.Labels["rabbitmq-version"]; hasTarget {
-							targetMajor, err := parseVersionMajor(targetVersion)
-							if err == nil && targetMajor >= 4 {
-								isUpgradingTo4x = true
-							}
+					if r.Spec.Version != nil && *r.Spec.Version != "" {
+						targetMajor, err := parseVersionMajor(*r.Spec.Version)
+						if err == nil && targetMajor >= 4 {
+							isUpgradingTo4x = true
 						}
 					}
 

@@ -19,8 +19,8 @@ package rabbitmq
 import (
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
+	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -362,7 +362,7 @@ var _ = Describe("Edge Cases", func() {
 		}
 
 		// All PVs should be patched to Delete policy before any PVC is deleted
-		Expect(len(pvcList.Items)).To(Equal(2))
+		Expect(pvcList.Items).To(HaveLen(2))
 	})
 })
 
