@@ -17,12 +17,15 @@ limitations under the License.
 package functional_test
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -967,6 +970,534 @@ var _ = Describe("RabbitMQUser controller", func() {
 				u := &rabbitmqv1.RabbitMQUser{}
 				err := th.K8sClient.Get(th.Ctx, testUserName, u)
 				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser with secret reference is created", func() {
+		var credentialSecretName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create credential secret first
+			credentialSecretName = types.NamespacedName{
+				Name:      "test-credentials",
+				Namespace: namespace,
+			}
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      credentialSecretName.Name,
+					Namespace: credentialSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("custom-user"),
+					"password": []byte("custom-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
+
+			// Create user with secret reference
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+				"secret":              credentialSecretName.Name,
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+		})
+
+		It("should use credentials from secret", func() {
+			// Webhook sets spec.Username from the secret
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Spec.Username).To(Equal("custom-user"))
+			}, timeout, interval).Should(Succeed())
+
+			// Controller sets status fields
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.Username).To(Equal("custom-user"))
+				g.Expect(user.Status.SecretName).To(Equal(credentialSecretName.Name))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser with custom credential selectors is created", func() {
+		BeforeEach(func() {
+			// Create secret with custom keys
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "custom-keys-secret",
+					Namespace: namespace,
+				},
+				Data: map[string][]byte{
+					"user": []byte("my-user"),
+					"pass": []byte("my-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
+
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+				"secret":              "custom-keys-secret",
+				"credentialSelectors": map[string]any{
+					"username": "user",
+					"password": "pass",
+				},
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+		})
+
+		It("should use custom selector keys", func() {
+			// Webhook sets spec.Username from the secret using custom selector
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Spec.Username).To(Equal("my-user"))
+			}, timeout, interval).Should(Succeed())
+
+			// Controller sets status fields
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.Username).To(Equal("my-user"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser references non-existent secret", func() {
+		It("should reject creation with validation error", func() {
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"secret":              "non-existent-secret",
+			}
+			raw := map[string]any{
+				"apiVersion": "rabbitmq.openstack.org/v1beta1",
+				"kind":       "RabbitMQUser",
+				"metadata": map[string]any{
+					"name":      "bad-secret-user",
+					"namespace": namespace,
+				},
+				"spec": spec,
+			}
+
+			unstructuredObj := &unstructured.Unstructured{Object: raw}
+			err := th.K8sClient.Create(th.Ctx, unstructuredObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("referenced secret does not exist"))
+		})
+	})
+
+	When("a RabbitMQUser references secret with missing password key", func() {
+		It("should reject creation with validation error", func() {
+			// Create incomplete secret
+			incompleteSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "incomplete-secret",
+					Namespace: namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("user-only"),
+					// missing password key
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, incompleteSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, incompleteSecret)
+
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"secret":              "incomplete-secret",
+			}
+			raw := map[string]any{
+				"apiVersion": "rabbitmq.openstack.org/v1beta1",
+				"kind":       "RabbitMQUser",
+				"metadata": map[string]any{
+					"name":      "incomplete-creds-user",
+					"namespace": namespace,
+				},
+				"spec": spec,
+			}
+
+			unstructuredObj := &unstructured.Unstructured{Object: raw}
+			err := th.K8sClient.Create(th.Ctx, unstructuredObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("password"))
+		})
+	})
+
+	When("a RabbitMQUser without secret uses auto-generation", func() {
+		It("should auto-generate credentials as before", func() {
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				// Should use auto-generated secret name
+				expectedSecretName := fmt.Sprintf("rabbitmq-user-%s", userName.Name)
+				g.Expect(user.Status.SecretName).To(Equal(expectedSecretName))
+
+				// Verify auto-generated secret exists
+				secret := &corev1.Secret{}
+				err := th.K8sClient.Get(th.Ctx,
+					types.NamespacedName{Name: expectedSecretName, Namespace: namespace},
+					secret)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(secret.Data).To(HaveKey("username"))
+				g.Expect(secret.Data).To(HaveKey("password"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("password in user-provided secret is changed", func() {
+		var credentialSecretName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create credential secret with initial password
+			credentialSecretName = types.NamespacedName{
+				Name:      "test-password-change",
+				Namespace: namespace,
+			}
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      credentialSecretName.Name,
+					Namespace: credentialSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("test-user"),
+					"password": []byte("initial-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
+
+			// Create user with secret reference
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+				"secret":              credentialSecretName.Name,
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user to be created with initial password
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Status.Username).To(Equal("test-user"))
+				g.Expect(user.Status.SecretName).To(Equal(credentialSecretName.Name))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should trigger reconciliation and handle password update", func() {
+			// Update the password in the secret
+			secret := &corev1.Secret{}
+			Expect(th.K8sClient.Get(th.Ctx, credentialSecretName, secret)).To(Succeed())
+
+			secret.Data["password"] = []byte("updated-password")
+			Expect(th.K8sClient.Update(th.Ctx, secret)).To(Succeed())
+
+			// Wait a bit for the watch to trigger reconciliation
+			// In a real cluster, password would be updated in RabbitMQ
+			// In test environment, we verify no errors occur and status remains healthy
+			Consistently(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				// Username should not change
+				g.Expect(user.Status.Username).To(Equal("test-user"))
+				// Secret reference should remain the same
+				g.Expect(user.Status.SecretName).To(Equal(credentialSecretName.Name))
+				// User should not have errors (status would be False if username changed)
+				// We can't directly verify password in RabbitMQ in test environment
+			}, "5s", interval).Should(Succeed())
+		})
+	})
+
+	When("username in user-provided secret is changed", func() {
+		It("should maintain original username despite secret change", func() {
+			// Create credential secret with initial username
+			credentialSecretName := types.NamespacedName{
+				Name:      "test-username-immutable",
+				Namespace: namespace,
+			}
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      credentialSecretName.Name,
+					Namespace: credentialSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("original-user"),
+					"password": []byte("test-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
+
+			// Create user with secret reference (no vhostRef to simplify cleanup)
+			immutableUserName := types.NamespacedName{Name: "immutable-user", Namespace: namespace}
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"secret":              credentialSecretName.Name,
+			}
+			testUser := CreateRabbitMQUser(immutableUserName, spec)
+
+			// Wait for user to be created with initial username
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(immutableUserName)
+				g.Expect(user.Spec.Username).To(Equal("original-user"))
+			}, timeout, interval).Should(Succeed())
+
+			// Change username in the secret
+			Eventually(func(g Gomega) {
+				secret := &corev1.Secret{}
+				g.Expect(th.K8sClient.Get(th.Ctx, credentialSecretName, secret)).To(Succeed())
+				secret.Data["username"] = []byte("changed-user")
+				g.Expect(th.K8sClient.Update(th.Ctx, secret)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Spec.Username should remain unchanged (set at creation time)
+			Consistently(func(g Gomega) {
+				user := GetRabbitMQUser(immutableUserName)
+				g.Expect(user.Spec.Username).To(Equal("original-user"))
+			}, "3s", interval).Should(Succeed())
+
+			// Clean up the test user
+			Expect(th.K8sClient.Delete(th.Ctx, testUser)).To(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser with auto-generated secret is deleted", func() {
+		It("should have ownership set on auto-generated secret", func() {
+			// Create a standalone user for this test
+			ownershipTestUserName := types.NamespacedName{Name: "ownership-test-user", Namespace: namespace}
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+			}
+			ownershipTestUser := CreateRabbitMQUser(ownershipTestUserName, spec)
+
+			// Wait for user and get UID
+			var userUID types.UID
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(ownershipTestUserName)
+				userUID = user.UID
+				g.Expect(userUID).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify auto-generated secret exists and has owner reference
+			expectedSecretName := fmt.Sprintf("rabbitmq-user-%s", ownershipTestUserName.Name)
+			Eventually(func(g Gomega) {
+				secret := &corev1.Secret{}
+				err := th.K8sClient.Get(th.Ctx,
+					types.NamespacedName{Name: expectedSecretName, Namespace: namespace},
+					secret)
+				g.Expect(err).NotTo(HaveOccurred())
+				// Verify it has owner reference to the RabbitMQUser
+				g.Expect(secret.OwnerReferences).NotTo(BeEmpty())
+				found := false
+				for _, ref := range secret.OwnerReferences {
+					if ref.UID == userUID {
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "Secret should have owner reference to RabbitMQUser")
+			}, timeout, interval).Should(Succeed())
+
+			// Clean up the test user
+			Expect(th.K8sClient.Delete(th.Ctx, ownershipTestUser)).To(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser uses reserved secret name pattern", func() {
+		It("should reject creation with validation error", func() {
+			// Try to create user with reserved secret name pattern
+			reservedSecretName := fmt.Sprintf("rabbitmq-user-%s", userName.Name)
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"secret":              reservedSecretName,
+			}
+			raw := map[string]any{
+				"apiVersion": "rabbitmq.openstack.org/v1beta1",
+				"kind":       "RabbitMQUser",
+				"metadata": map[string]any{
+					"name":      userName.Name,
+					"namespace": namespace,
+				},
+				"spec": spec,
+			}
+
+			unstructuredObj := &unstructured.Unstructured{Object: raw}
+			err := th.K8sClient.Create(th.Ctx, unstructuredObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("reserved"))
+		})
+	})
+
+	When("a RabbitMQUser changes to different secret with same username", func() {
+		var firstSecretName types.NamespacedName
+		var secondSecretName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create first secret
+			firstSecretName = types.NamespacedName{
+				Name:      "first-secret",
+				Namespace: namespace,
+			}
+			firstSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      firstSecretName.Name,
+					Namespace: firstSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("same-user"),
+					"password": []byte("first-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, firstSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, firstSecret)
+
+			// Create second secret with same username but different password
+			secondSecretName = types.NamespacedName{
+				Name:      "second-secret",
+				Namespace: namespace,
+			}
+			secondSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      secondSecretName.Name,
+					Namespace: secondSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("same-user"),
+					"password": []byte("second-password"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, secondSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, secondSecret)
+
+			// Create user with first secret
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"vhostRef":            vhostName.Name,
+				"secret":              firstSecretName.Name,
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user to be created
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Spec.Username).To(Equal("same-user"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should allow changing secret when username stays the same", func() {
+			// Update user to use second secret (same username, different password)
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				// Create a raw update to test webhook behavior
+				raw := map[string]any{
+					"apiVersion": "rabbitmq.openstack.org/v1beta1",
+					"kind":       "RabbitMQUser",
+					"metadata": map[string]any{
+						"name":            user.Name,
+						"namespace":       user.Namespace,
+						"resourceVersion": user.ResourceVersion,
+					},
+					"spec": map[string]any{
+						"rabbitmqClusterName": rabbitmqClusterName.Name,
+						"vhostRef":            vhostName.Name,
+						"secret":              secondSecretName.Name,
+					},
+				}
+				unstructuredObj := &unstructured.Unstructured{Object: raw}
+				g.Expect(th.K8sClient.Update(th.Ctx, unstructuredObj)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify secret was updated and username stayed the same
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(*user.Spec.Secret).To(Equal(secondSecretName.Name))
+				g.Expect(user.Spec.Username).To(Equal("same-user"))
+				g.Expect(user.Status.SecretName).To(Equal(secondSecretName.Name))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQUser changes credentialSelectors with same username", func() {
+		var credentialSecretName types.NamespacedName
+
+		BeforeEach(func() {
+			// Create secret with both default and custom keys pointing to same username
+			credentialSecretName = types.NamespacedName{
+				Name:      "multi-key-secret",
+				Namespace: namespace,
+			}
+			credentialSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      credentialSecretName.Name,
+					Namespace: credentialSecretName.Namespace,
+				},
+				Data: map[string][]byte{
+					"username": []byte("consistent-user"),
+					"password": []byte("pass1"),
+					"user":     []byte("consistent-user"),
+					"pass":     []byte("pass2"),
+					"alt_user": []byte("consistent-user"),
+					"alt_pass": []byte("pass3"),
+				},
+			}
+			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
+			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
+
+			// Create user with default selectors (no vhostRef to avoid finalizer cleanup issues)
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"secret":              credentialSecretName.Name,
+			}
+			user := CreateRabbitMQUser(userName, spec)
+			DeferCleanup(th.DeleteInstance, user)
+
+			// Wait for user to be created
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Spec.Username).To(Equal("consistent-user"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should allow changing selectors when username stays the same", func() {
+			// Update user to use different selectors (same username value)
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				raw := map[string]any{
+					"apiVersion": "rabbitmq.openstack.org/v1beta1",
+					"kind":       "RabbitMQUser",
+					"metadata": map[string]any{
+						"name":            user.Name,
+						"namespace":       user.Namespace,
+						"resourceVersion": user.ResourceVersion,
+					},
+					"spec": map[string]any{
+						"rabbitmqClusterName": rabbitmqClusterName.Name,
+						"secret":              credentialSecretName.Name,
+						"credentialSelectors": map[string]any{
+							"username": "alt_user",
+							"password": "alt_pass",
+						},
+					},
+				}
+				unstructuredObj := &unstructured.Unstructured{Object: raw}
+				g.Expect(th.K8sClient.Update(th.Ctx, unstructuredObj)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify selectors were updated and username stayed the same
+			Eventually(func(g Gomega) {
+				user := GetRabbitMQUser(userName)
+				g.Expect(user.Spec.CredentialSelectors).NotTo(BeNil())
+				g.Expect(user.Spec.CredentialSelectors.Username).To(Equal("alt_user"))
+				g.Expect(user.Spec.CredentialSelectors.Password).To(Equal("alt_pass"))
+				g.Expect(user.Spec.Username).To(Equal("consistent-user"))
 			}, timeout, interval).Should(Succeed())
 		})
 	})

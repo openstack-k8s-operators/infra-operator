@@ -37,6 +37,7 @@ import (
 	rabbitmqapi "github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/api"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/object"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,6 +51,9 @@ import (
 // TransportURL-owned users. This separate constant is used by the controller
 // for its own lifecycle management.
 const userFinalizer = "rabbitmquser.openstack.org/finalizer"
+
+// credentialSecretNameField is the field index for the credential secret
+const credentialSecretNameField = ".spec.secret"
 
 // generatePassword generates a random password
 func generatePassword(length int) (string, error) {
@@ -135,6 +139,20 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Add vhost finalizer after user finalizer exists
 	if instance.Spec.VhostRef != "" {
 		username := instance.Spec.Username
+
+		// Validate that username is set before creating finalizer
+		// The webhook should have set this, but we validate defensively
+		if username == "" {
+			err := fmt.Errorf("spec.Username is empty, cannot create vhost finalizer")
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQUserReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQUserReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+
 		vhostFinalizer := rabbitmqv1.UserVhostFinalizerPrefix + username
 
 		vhost := &rabbitmqv1.RabbitMQVhost{}
@@ -158,7 +176,10 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.RabbitMQUser, h *helper.Helper) (ctrl.Result, error) {
 	Log := log.FromContext(ctx)
 
-	// Username is defaulted by webhook
+	var password string
+	var secretName string
+
+	// Username is now always stored in spec.Username by the webhook
 	username := instance.Spec.Username
 
 	// Handle VhostRef changes - remove finalizer from old vhost if changed
@@ -211,52 +232,110 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	// Get or create user secret (use CR name to avoid conflicts when multiple CRs have same username)
-	secretName := fmt.Sprintf("rabbitmq-user-%s", instance.Name)
-	userSecret, _, err := oko_secret.GetSecret(ctx, h, secretName, instance.Namespace)
-	var password string
+	// Determine credentials source
+	var op controllerutil.OperationResult
+	if instance.Spec.Secret != nil && *instance.Spec.Secret != "" {
+		// Use user-provided secret
+		secretName = *instance.Spec.Secret
+		userSecret, _, err := oko_secret.GetSecret(ctx, h, secretName, instance.Namespace)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQUserReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQUserReadyErrorMessage,
+				fmt.Sprintf("failed to get credential secret %s: %v", secretName, err)))
+			return ctrl.Result{}, err
+		}
 
-	if err != nil {
-		if k8s_errors.IsNotFound(err) {
-			password, err = generatePassword(32)
-			if err != nil {
+		// Default credential selectors if not set (defensive coding)
+		if instance.Spec.CredentialSelectors == nil {
+			instance.Spec.CredentialSelectors = &rabbitmqv1.CredentialSelectors{
+				Username: "username",
+				Password: "password",
+			}
+		}
+
+		// Extract password using credential selector
+		passwordBytes, ok := userSecret.Data[instance.Spec.CredentialSelectors.Password]
+		if !ok {
+			err := fmt.Errorf("password key %q not found in secret %s",
+				instance.Spec.CredentialSelectors.Password, secretName)
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQUserReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQUserReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		password = string(passwordBytes)
+
+		// Always update the RabbitMQ user when using user-provided secrets to ensure
+		// password is synced if it changed in the secret.
+		// CreateOrUpdateUser is idempotent so this is safe to call on every reconcile.
+		// We set this to Created if this is the first time (status empty), otherwise Updated.
+		if instance.Status.Username == "" {
+			op = controllerutil.OperationResultCreated
+		} else {
+			// Treat as updated to ensure password changes are propagated
+			op = controllerutil.OperationResultUpdated
+		}
+	} else {
+		// Existing auto-generation logic for backward compatibility
+		secretName = fmt.Sprintf("rabbitmq-user-%s", instance.Name)
+		userSecret, _, err := oko_secret.GetSecret(ctx, h, secretName, instance.Namespace)
+
+		if err != nil {
+			if k8s_errors.IsNotFound(err) {
+				password, err = generatePassword(32)
+				if err != nil {
+					instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+					return ctrl.Result{}, err
+				}
+			} else {
 				instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 				return ctrl.Result{}, err
 			}
 		} else {
+			password = string(userSecret.Data["password"])
+		}
+
+		// Create or update user secret
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: instance.Namespace,
+			},
+			Data: map[string][]byte{},
+		}
+
+		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+			secret.Data["username"] = []byte(username)
+			secret.Data["password"] = []byte(password)
+			return controllerutil.SetControllerReference(instance, secret, r.Scheme)
+		})
+		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
 			return ctrl.Result{}, err
 		}
-	} else {
-		password = string(userSecret.Data["password"])
 	}
 
-	// Create or update user secret
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: instance.Namespace,
-		},
-		Data: map[string][]byte{},
-	}
-
-	op, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
-		secret.Data["username"] = []byte(username)
-		secret.Data["password"] = []byte(password)
-		return controllerutil.SetControllerReference(instance, secret, r.Scheme)
-	})
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
-		return ctrl.Result{}, err
-	}
+	// Update status with credentials info immediately, before attempting RabbitMQ operations
+	// This ensures status is recorded even if RabbitMQ operations fail
+	instance.Status.SecretName = secretName
+	instance.Status.Username = username
+	instance.Status.VhostRef = instance.Spec.VhostRef // Track the vhost CR name for finalizer management
+	// Note: status.Vhost will be updated after successful permission operations
 
 	// Create/update user in RabbitMQ if:
 	// 1. Secret was just created (new user)
-	// 2. Vhost changed (need to update permissions)
+	// 2. Secret was updated (for user-provided secrets, password might have changed)
+	// 3. Vhost changed (need to update permissions)
 	// Note: We check if status.Vhost differs from spec, including when status is empty
 	vhostChanged := instance.Status.Vhost != vhostName
 	oldPermissionsDeleted := true
-	if op == controllerutil.OperationResultCreated || vhostChanged {
+	if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated || vhostChanged {
 		// Get admin credentials
 		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
 		if err != nil {
@@ -311,26 +390,11 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		}
 	}
 
-	instance.Status.SecretName = secretName
-	instance.Status.Username = username
-	instance.Status.VhostRef = instance.Spec.VhostRef // Track the vhost CR name for finalizer management
-
-	// If old permissions weren't deleted, don't mark as Ready
-	// The watch on RabbitMQVhost will trigger reconciliation when permissions are cleaned up
-	if !oldPermissionsDeleted {
-		Log.Info("Old vhost permissions not deleted, waiting to mark Ready", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName)
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.RabbitMQUserReadyCondition,
-			condition.RequestedReason,
-			condition.SeverityInfo,
-			"Cleaning up permissions from old vhost %s",
-			instance.Status.Vhost,
-		))
-		return ctrl.Result{}, nil
+	// Only update status.Vhost if old permissions were successfully deleted
+	// This ensures we keep track of the old vhost and retry cleanup on next reconciliation
+	if oldPermissionsDeleted {
+		instance.Status.Vhost = vhostName
 	}
-
-	// Only update status.Vhost after old permissions are successfully deleted
-	instance.Status.Vhost = vhostName
 	instance.Status.Conditions.MarkTrue(rabbitmqv1.RabbitMQUserReadyCondition, rabbitmqv1.RabbitMQUserReadyMessage)
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 
@@ -514,16 +578,25 @@ func (r *RabbitMQUserReconciler) reconcileDelete(ctx context.Context, instance *
 		return ctrl.Result{}, fmt.Errorf("failed to delete user %s from RabbitMQ: %w", username, err)
 	}
 
-	// Delete secret (use CR name, same as in reconcileNormal)
-	secretName := fmt.Sprintf("rabbitmq-user-%s", instance.Name)
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: instance.Namespace,
-		},
-	}
-	if err := r.Delete(ctx, secret); err != nil && !k8s_errors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "Failed to delete user secret", "secret", secretName)
+	// Only delete auto-generated secret (when spec.secret is not set)
+	// User-provided secrets are NOT deleted
+	if instance.Spec.Secret == nil || *instance.Spec.Secret == "" {
+		secretName := fmt.Sprintf("rabbitmq-user-%s", instance.Name)
+		secret := &corev1.Secret{}
+
+		// Get the secret first to check ownership
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: instance.Namespace}, secret); err == nil {
+			// Check if we are the owner before deleting
+			if object.CheckOwnerRefExist(instance.GetUID(), secret.GetOwnerReferences()) {
+				if err := r.Delete(ctx, secret); err != nil && !k8s_errors.IsNotFound(err) {
+					log.FromContext(ctx).Error(err, "Failed to delete user secret", "secret", secretName)
+				}
+			} else {
+				log.FromContext(ctx).Info("Skipping secret deletion - not owned by this RabbitMQUser", "secret", secretName)
+			}
+		} else if !k8s_errors.IsNotFound(err) {
+			log.FromContext(ctx).Error(err, "Failed to get secret for ownership check", "secret", secretName)
+		}
 	}
 
 	controllerutil.RemoveFinalizer(instance, userFinalizer)
@@ -556,12 +629,52 @@ func (r *RabbitMQUserReconciler) vhostToUserMapFunc(ctx context.Context, obj cli
 	return requests
 }
 
+// findRabbitMQUsersForSecret finds all RabbitMQUsers that reference the given secret
+// This function uses the field index for efficient lookups
+func (r *RabbitMQUserReconciler) findRabbitMQUsersForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
+	// Use the field index to find RabbitMQUsers that reference this secret
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList,
+		client.InNamespace(secret.GetNamespace()),
+		client.MatchingFields{credentialSecretNameField: secret.GetName()}); err != nil {
+		return []reconcile.Request{}
+	}
+
+	requests := []reconcile.Request{}
+	for _, user := range userList.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      user.Name,
+				Namespace: user.Namespace,
+			},
+		})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Register field index for efficient secret watching
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(),
+		&rabbitmqv1.RabbitMQUser{}, credentialSecretNameField,
+		func(rawObj client.Object) []string {
+			user := rawObj.(*rabbitmqv1.RabbitMQUser)
+			if user.Spec.Secret == nil || *user.Spec.Secret == "" {
+				return nil
+			}
+			return []string{*user.Spec.Secret}
+		}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.RabbitMQUser{}).
 		Owns(&corev1.Secret{}).
 		Watches(&rabbitmqv1.RabbitMQVhost{},
 			handler.EnqueueRequestsFromMapFunc(r.vhostToUserMapFunc)).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findRabbitMQUsersForSecret),
+		).
 		Complete(r)
 }
