@@ -51,6 +51,10 @@ const (
 	QueueTypeQuorum = "Quorum"
 	// QueueTypeNone - no special queue type
 	QueueTypeNone = "None"
+
+	// Annotations
+	// AnnotationTargetVersion - annotation key for target RabbitMQ version (set by openstack-operator)
+	AnnotationTargetVersion = "rabbitmq.openstack.org/target-version"
 )
 
 // PodOverride defines per-pod service configurations
@@ -87,14 +91,6 @@ type RabbitMqSpecCore struct {
 	// QueueType to eventually apply the ha-all policy or configure default queue type for the cluster.
 	// Allowed values are: None, Mirrored, Quorum. Defaults to Quorum if not specified.
 	QueueType *string `json:"queueType,omitempty"`
-	// +kubebuilder:validation:Optional
-	// +operator-sdk:csv:customresourcedefinitions:type=spec
-	// Version - Desired RabbitMQ version (e.g., "3.9", "4.0").
-	// Changing this value triggers a version upgrade/downgrade process which requires storage wipe
-	// for major/minor version changes. Defaults to "4.0" for new instances and "3.9" for existing
-	// instances (backwards compatibility). This field should be set by openstack-operator to control
-	// the RabbitMQ version.
-	Version *string `json:"version,omitempty"`
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	// PodOverride - Override configuration for per-pod services. When specified, individual LoadBalancer
@@ -144,7 +140,7 @@ type RabbitMqStatus struct {
 
 	// CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.0")
 	// This is controller-managed and reflects the actual running version.
-	// Users should use spec.version to request version changes.
+	// openstack-operator should use the "rabbitmq.openstack.org/target-version" annotation to request version changes.
 	CurrentVersion string `json:"currentVersion,omitempty"`
 
 	// UpgradePhase - tracks the current phase of a version upgrade or migration

@@ -20,8 +20,8 @@ limitations under the License.
 //
 // Steps to roll back a failed upgrade:
 //
-//  1. Stop the upgrade process by reverting spec.version to the original version:
-//     kubectl patch rabbitmq <name> -n <namespace> --type=merge -p '{"spec":{"version":"<original-version>"}}'
+//  1. Stop the upgrade process by reverting the target-version annotation to the original version:
+//     kubectl annotate rabbitmq <name> -n <namespace> rabbitmq.openstack.org/target-version=<original-version> --overwrite
 //
 //  2. Check the current upgrade phase:
 //     kubectl get rabbitmq <name> -n <namespace> -o jsonpath='{.status.upgradePhase}'

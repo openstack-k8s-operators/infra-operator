@@ -1892,14 +1892,6 @@ spec:
                       current project
                     type: string
                 type: object
-              version:
-                description: |-
-                  Version - Desired RabbitMQ version (e.g., "3.9", "4.0").
-                  Changing this value triggers a version upgrade/downgrade process which requires storage wipe
-                  for major/minor version changes. Defaults to "4.0" for new instances and "3.9" for existing
-                  instances (backwards compatibility). This field should be set by openstack-operator to control
-                  the RabbitMQ version.
-                type: string
             required:
             - containerImage
             type: object
@@ -1952,7 +1944,7 @@ spec:
                 description: |-
                   CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.0")
                   This is controller-managed and reflects the actual running version.
-                  Users should use spec.version to request version changes.
+                  openstack-operator should use the "rabbitmq.openstack.org/target-version" annotation to request version changes.
                 type: string
               lastAppliedTopology:
                 description: LastAppliedTopology - the last applied Topology

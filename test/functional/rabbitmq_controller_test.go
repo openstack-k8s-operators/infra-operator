@@ -161,11 +161,13 @@ var _ = Describe("RabbitMQ Controller", func() {
 		When("with version 3.9", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
-				spec["version"] = "3.9"
 				spec["tls"] = map[string]any{
 					"secretName": certSecret.Name,
 				}
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "3.9",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 			})
 
@@ -739,8 +741,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
 				spec["queueType"] = "Quorum"
-				spec["version"] = "3.9"
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "3.9",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				Eventually(func(g Gomega) {
@@ -753,8 +757,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				// 3.9 -> 4.0 requires storage wipe (no direct path)
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					version := "4.0"
-					instance.Spec.Version = &version
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "4.0"
 					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 				}, timeout, interval).Should(Succeed())
 
@@ -775,8 +781,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 				Eventually(func(g Gomega) {
 					updatedInstance := GetRabbitMQ(rabbitmqName)
 					g.Expect(updatedInstance.Status.CurrentVersion).To(Equal("4.0"))
-					g.Expect(updatedInstance.Spec.Version).ToNot(BeNil())
-					g.Expect(*updatedInstance.Spec.Version).To(Equal("4.0"))
+					g.Expect(updatedInstance.Annotations).To(HaveKeyWithValue("rabbitmq.openstack.org/target-version", "4.0"))
 				}, timeout, interval).Should(Succeed())
 			})
 		})
@@ -784,8 +789,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 		When("RabbitMQ patch version changes (3.9.0 to 3.9.1)", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
-				spec["version"] = "3.9"
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "3.9",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				Eventually(func(g Gomega) {
@@ -797,8 +804,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 			It("should allow patch version changes without storage wipe", func() {
 				// Patch version changes don't require storage wipe
 				instance := GetRabbitMQ(rabbitmqName)
-				version := "3.9.1"
-				instance.Spec.Version = &version
+				if instance.Annotations == nil {
+					instance.Annotations = make(map[string]string)
+				}
+				instance.Annotations["rabbitmq.openstack.org/target-version"] = "3.9.1"
 				Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 
 				// Should NOT trigger storage wipe - Status.CurrentVersion should remain 3.9
@@ -819,8 +828,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				// First upgrade to 4.0 to establish a 4.0 cluster
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					version := "4.0"
-					instance.Spec.Version = &version
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "4.0"
 					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 				}, timeout, interval).Should(Succeed())
 
@@ -835,8 +846,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				// 4.0 -> 3.9 is a downgrade and requires storage wipe
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					version := "3.9"
-					instance.Spec.Version = &version
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "3.9"
 					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 				}, timeout, interval).Should(Succeed())
 
@@ -857,8 +870,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 				Eventually(func(g Gomega) {
 					updatedInstance := GetRabbitMQ(rabbitmqName)
 					g.Expect(updatedInstance.Status.CurrentVersion).To(Equal("3.9"))
-					g.Expect(updatedInstance.Spec.Version).ToNot(BeNil())
-					g.Expect(*updatedInstance.Spec.Version).To(Equal("3.9"))
+					g.Expect(updatedInstance.Annotations).To(HaveKeyWithValue("rabbitmq.openstack.org/target-version", "3.9"))
 				}, timeout, interval).Should(Succeed())
 			})
 		})
@@ -868,10 +880,12 @@ var _ = Describe("RabbitMQ Controller", func() {
 		When("RabbitMQ 3.9 with Mirrored queues", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
-				spec["version"] = "3.9"
 				spec["queueType"] = "Mirrored"
 				spec["replicas"] = 2
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "3.9",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 			})
 
@@ -904,7 +918,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				spec := GetDefaultRabbitMQSpec()
 				spec["queueType"] = "Mirrored"
 				spec["replicas"] = 2
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "4.0",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				// Wait for controller to set default version first (4.0)
@@ -963,10 +980,12 @@ var _ = Describe("RabbitMQ Controller", func() {
 		When("RabbitMQ 3.9 with Mirrored queues upgrading to 4.0", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
-				spec["version"] = "3.9"
 				spec["queueType"] = "Mirrored"
 				spec["replicas"] = 2
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				annotations := map[string]string{
+					"rabbitmq.openstack.org/target-version": "3.9",
+				}
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, annotations)
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				// Wait for controller to initialize with version 3.9
@@ -987,8 +1006,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				// Trigger upgrade to 4.0
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					version := "4.0"
-					instance.Spec.Version = &version
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "4.0"
 					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 				}, timeout, interval).Should(Succeed())
 

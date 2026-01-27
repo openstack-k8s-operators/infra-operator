@@ -114,9 +114,8 @@ const (
 
 // RabbitMQ version upgrade constants
 const (
-	// DefaultRabbitMQVersion is the default RabbitMQ version when Spec.Version is not set
-	// New instances default to 4.0, but this constant is used for Status.CurrentVersion
-	// initialization to maintain backwards compatibility with existing instances
+	// DefaultRabbitMQVersion is the default RabbitMQ version when the target-version annotation is not set
+	// This constant is used for Status.CurrentVersion initialization to maintain backwards compatibility
 	DefaultRabbitMQVersion = "4.0"
 	// UpgradeCheckInterval is how often to check upgrade progress
 	UpgradeCheckInterval = 2 * time.Second
@@ -193,14 +192,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	// Initialize RabbitMQ version in Status if it doesn't exist
 	// Status is controller-managed and can't be directly modified by users
-	// We initialize it to match Spec.Version to avoid triggering an immediate upgrade
+	// We initialize it to match the target-version annotation to avoid triggering an immediate upgrade
 	if instance.Status.CurrentVersion == "" {
-		// Use Spec.Version if set (webhook will have defaulted it appropriately)
-		// Otherwise fall back to the constant for backwards compatibility
+		// Priority order for determining initial version:
+		// 1. Use annotation if set by openstack-operator
+		// 2. Check if RabbitMQCluster exists (upgrade scenario - infer we're on 3.9 for backwards compat)
+		// 3. Fall back to DefaultRabbitMQVersion for new deployments
 		initialVersion := DefaultRabbitMQVersion
-		if instance.Spec.Version != nil && *instance.Spec.Version != "" {
-			initialVersion = *instance.Spec.Version
+
+		if instance.Annotations != nil {
+			if targetVersion, hasTarget := instance.Annotations[rabbitmqv1beta1.AnnotationTargetVersion]; hasTarget && targetVersion != "" {
+				initialVersion = targetVersion
+			}
+		} else {
+			// No annotation - check if this is an existing cluster
+			existingCluster := &rabbitmqv2.RabbitmqCluster{}
+			clusterKey := types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}
+			err := r.Get(ctx, clusterKey, existingCluster)
+
+			if err == nil && !existingCluster.CreationTimestamp.IsZero() {
+				// RabbitMQCluster exists but no annotation - this is an upgrade from old version
+				// Assume 3.9 for backwards compatibility (old deployments default to 3.9)
+				initialVersion = "3.9"
+				Log.Info("Existing RabbitMQCluster found without version annotation, defaulting to 3.9 for backwards compatibility",
+					"cluster", clusterKey,
+					"clusterCreated", existingCluster.CreationTimestamp)
+			} else if err != nil && !k8s_errors.IsNotFound(err) {
+				// Error checking for cluster (not NotFound) - log but continue with default
+				Log.Error(err, "Failed to check for existing RabbitMQCluster during version initialization")
+			}
+			// If cluster doesn't exist (NotFound), use DefaultRabbitMQVersion (4.0) for new deployments
 		}
+
 		instance.Status.CurrentVersion = initialVersion
 		Log.Info("Initialized RabbitMQ current version in status", "version", initialVersion)
 		// Persist the status update
@@ -218,46 +241,47 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	// Check for version upgrade requiring wipe
 	// Current version comes from Status (controller-managed)
-	// Target version comes from Spec (user-specified via openstack-operator)
+	// Target version comes from annotation (set by openstack-operator)
 	currentVersion := instance.Status.CurrentVersion
-	if instance.Spec.Version != nil && *instance.Spec.Version != "" {
-		targetVersion := *instance.Spec.Version
-		needsWipe, err := requiresStorageWipe(currentVersion, targetVersion)
-		if err != nil {
-			Log.Error(err, "Failed to determine upgrade compatibility",
-				"currentVersion", currentVersion,
-				"targetVersion", targetVersion)
-			return ctrl.Result{}, fmt.Errorf("failed to check upgrade compatibility: %w", err)
-		}
-		if needsWipe {
-			requiresWipe = true
-			wipeReason = "version upgrade"
-			Log.Info("RabbitMQ upgrade requires storage wipe (no direct upgrade path)",
-				"currentVersion", currentVersion,
-				"targetVersion", targetVersion)
+	if instance.Annotations != nil {
+		if targetVersion, hasTarget := instance.Annotations[rabbitmqv1beta1.AnnotationTargetVersion]; hasTarget && targetVersion != "" {
+			needsWipe, err := requiresStorageWipe(currentVersion, targetVersion)
+			if err != nil {
+				Log.Error(err, "Failed to determine upgrade compatibility",
+					"currentVersion", currentVersion,
+					"targetVersion", targetVersion)
+				return ctrl.Result{}, fmt.Errorf("failed to check upgrade compatibility: %w", err)
+			}
+			if needsWipe {
+				requiresWipe = true
+				wipeReason = "version upgrade"
+				Log.Info("RabbitMQ upgrade requires storage wipe (no direct upgrade path)",
+					"currentVersion", currentVersion,
+					"targetVersion", targetVersion)
 
-			// Automatically migrate from Mirrored to Quorum when upgrading from 3.x to 4.x
-			// Mirrored queues are deprecated in RabbitMQ 4.0+
-			currentVer, err := rabbitmq.ParseRabbitMQVersion(currentVersion)
-			if err == nil {
-				targetVer, err := rabbitmq.ParseRabbitMQVersion(targetVersion)
-				if err == nil && currentVer.Major == 3 && targetVer.Major >= 4 {
-					// Upgrading from 3.x to 4.x - automatically enforce Quorum queues
-					if instance.Spec.QueueType == nil || *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeQuorum {
-						Log.Info("Upgrading from RabbitMQ 3.x to 4.x - automatically migrating to Quorum queues",
-							"currentVersion", currentVersion,
-							"targetVersion", targetVersion)
-						queueType := rabbitmqv1beta1.QueueTypeQuorum
-						instance.Spec.QueueType = &queueType
+				// Automatically migrate from Mirrored to Quorum when upgrading from 3.x to 4.x
+				// Mirrored queues are deprecated in RabbitMQ 4.0+
+				currentVer, err := rabbitmq.ParseRabbitMQVersion(currentVersion)
+				if err == nil {
+					targetVer, err := rabbitmq.ParseRabbitMQVersion(targetVersion)
+					if err == nil && currentVer.Major == 3 && targetVer.Major >= 4 {
+						// Upgrading from 3.x to 4.x - automatically enforce Quorum queues
+						if instance.Spec.QueueType == nil || *instance.Spec.QueueType != rabbitmqv1beta1.QueueTypeQuorum {
+							Log.Info("Upgrading from RabbitMQ 3.x to 4.x - automatically migrating to Quorum queues",
+								"currentVersion", currentVersion,
+								"targetVersion", targetVersion)
+							queueType := rabbitmqv1beta1.QueueTypeQuorum
+							instance.Spec.QueueType = &queueType
 
-						// Patch the instance to persist the queue type change
-						if err := helper.PatchInstance(ctx, instance); err != nil {
-							Log.Error(err, "Failed to patch instance with Quorum queue type")
-							return ctrl.Result{}, fmt.Errorf("failed to update queue type during upgrade: %w", err)
+							// Patch the instance to persist the queue type change
+							if err := helper.PatchInstance(ctx, instance); err != nil {
+								Log.Error(err, "Failed to patch instance with Quorum queue type")
+								return ctrl.Result{}, fmt.Errorf("failed to update queue type during upgrade: %w", err)
+							}
+							Log.Info("Updated spec.queueType to Quorum for RabbitMQ 4.x compatibility")
+							// Requeue to let the change propagate
+							return ctrl.Result{Requeue: true}, nil
 						}
-						Log.Info("Updated spec.queueType to Quorum for RabbitMQ 4.x compatibility")
-						// Requeue to let the change propagate
-						return ctrl.Result{Requeue: true}, nil
 					}
 				}
 			}
@@ -538,10 +562,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 			// Emit event for observability
 			if r.Recorder != nil {
-				if wipeReason == "version upgrade" && instance.Spec.Version != nil && *instance.Spec.Version != "" {
-					r.Recorder.Eventf(instance, corev1.EventTypeNormal, "UpgradeStarted",
-						"Starting RabbitMQ upgrade from %s to %s (requires storage wipe)",
-						instance.Status.CurrentVersion, *instance.Spec.Version)
+				if wipeReason == "version upgrade" && instance.Annotations != nil {
+					if targetVersion, hasTarget := instance.Annotations[rabbitmqv1beta1.AnnotationTargetVersion]; hasTarget && targetVersion != "" {
+						r.Recorder.Eventf(instance, corev1.EventTypeNormal, "UpgradeStarted",
+							"Starting RabbitMQ upgrade from %s to %s (requires storage wipe)",
+							instance.Status.CurrentVersion, targetVersion)
+					}
 				} else {
 					r.Recorder.Eventf(instance, corev1.EventTypeNormal, "MigrationStarted",
 						"Starting queue type migration (requires storage wipe)")
@@ -599,27 +625,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 		// Storage wipe complete - update Status.CurrentVersion for version upgrades
 		if wipeReason == "version upgrade" {
-			if instance.Spec.Version != nil && *instance.Spec.Version != "" {
-				instance.Status.CurrentVersion = *instance.Spec.Version
-				// Clear the upgrade phase and timestamp
-				instance.Status.UpgradePhase = ""
-				instance.Status.StorageWipeStartedAt = nil
+			if instance.Annotations != nil {
+				if targetVersion, hasTarget := instance.Annotations[rabbitmqv1beta1.AnnotationTargetVersion]; hasTarget && targetVersion != "" {
+					instance.Status.CurrentVersion = targetVersion
+					// Clear the upgrade phase and timestamp
+					instance.Status.UpgradePhase = ""
+					instance.Status.StorageWipeStartedAt = nil
 
-				// If queue type changed during upgrade, update Status.QueueType to prevent
-				// triggering another wipe for "queue type migration"
-				if instance.Spec.QueueType != nil && *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
-					if instance.Status.QueueType == rabbitmqv1beta1.QueueTypeMirrored {
-						instance.Status.QueueType = rabbitmqv1beta1.QueueTypeQuorum
-						Log.Info("Updated Status.QueueType during version upgrade", "queueType", "Quorum")
+					// If queue type changed during upgrade, update Status.QueueType to prevent
+					// triggering another wipe for "queue type migration"
+					if instance.Spec.QueueType != nil && *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
+						if instance.Status.QueueType == rabbitmqv1beta1.QueueTypeMirrored {
+							instance.Status.QueueType = rabbitmqv1beta1.QueueTypeQuorum
+							Log.Info("Updated Status.QueueType during version upgrade", "queueType", "Quorum")
+						}
 					}
-				}
 
-				Log.Info("Storage cleanup complete - updated current version in status", "version", *instance.Spec.Version)
+					Log.Info("Storage cleanup complete - updated current version in status", "version", targetVersion)
 
-				// Emit event for observability
-				if r.Recorder != nil {
-					r.Recorder.Eventf(instance, corev1.EventTypeNormal, "StorageWipeComplete",
-						"Storage successfully wiped, recreating cluster with RabbitMQ %s", *instance.Spec.Version)
+					// Emit event for observability
+					if r.Recorder != nil {
+						r.Recorder.Eventf(instance, corev1.EventTypeNormal, "StorageWipeComplete",
+							"Storage successfully wiped, recreating cluster with RabbitMQ %s", targetVersion)
+					}
 				}
 			}
 		} else {
