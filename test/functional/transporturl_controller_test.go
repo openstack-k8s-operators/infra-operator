@@ -830,11 +830,13 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate user being ready
 			SimulateRabbitMQUserReady(oldUserCRName, "/")
 
-			// Verify old user exists and has the TransportURL finalizer
+			// Verify old user exists and has both finalizers
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
 				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeTrue())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
+					"User should have cleanup-blocked finalizer to prevent automatic deletion")
 			}, timeout, interval).Should(Succeed())
 
 			// Update the TransportURL spec with new username
@@ -868,6 +870,17 @@ var _ = Describe("TransportURL controller", func() {
 				}
 			}, timeout, interval).Should(Succeed())
 
+			// Manually remove the cleanup-blocked finalizer to allow deletion to proceed
+			// (simulating admin/operator manually approving the deletion)
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				if err == nil && controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
+					controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
+					g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
+				}
+			}, timeout, interval).Should(Succeed())
+
 			// Verify old user resource is deleted (or being deleted)
 			// With 30s grace period - deletion should happen after grace period elapses
 			Eventually(func(g Gomega) {
@@ -889,7 +902,7 @@ var _ = Describe("TransportURL controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
-		It("should NOT delete the old user if it has a nodeset finalizer", func() {
+		It("should NOT delete the old user if it has a nodeset finalizer or cleanup-blocked finalizer", func() {
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
 			// Wait for initial RabbitMQUser to be created
@@ -904,6 +917,14 @@ var _ = Describe("TransportURL controller", func() {
 
 			// Simulate user being ready
 			SimulateRabbitMQUserReady(oldUserCRName, "/")
+
+			// Verify user has the cleanup-blocked finalizer (added automatically)
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
+					"User should have cleanup-blocked finalizer")
+			}, timeout, interval).Should(Succeed())
 
 			// Add a nodeset finalizer to the old user (simulating external usage)
 			nodesetFinalizer := "dataplane.openstack.org/nodeset-compute"
@@ -948,22 +969,24 @@ var _ = Describe("TransportURL controller", func() {
 				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeFalse())
 			}, timeout, interval).Should(Succeed())
 
-			// Verify old user is STILL present (not deleted due to nodeset finalizer)
-			// No grace period - external finalizer immediately blocks deletion
+			// Verify old user is STILL present (not deleted due to external finalizers)
+			// No grace period - external finalizers immediately block deletion
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
 				// Should NOT have DeletionTimestamp
 				g.Expect(user.DeletionTimestamp.IsZero()).To(BeTrue(), "Old user should NOT be marked for deletion")
-				// Should still have the nodeset finalizer
+				// Should still have both the nodeset finalizer and cleanup-blocked finalizer
 				g.Expect(controllerutil.ContainsFinalizer(user, nodesetFinalizer)).To(BeTrue())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 
-			// Cleanup: Remove the nodeset finalizer to allow cleanup
+			// Cleanup: Remove both finalizers to allow cleanup
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
 				controllerutil.RemoveFinalizer(user, nodesetFinalizer)
+				controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
 				g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 		})
@@ -1149,6 +1172,16 @@ var _ = Describe("TransportURL controller", func() {
 				// User should still exist and not have DeletionTimestamp
 				g.Expect(user.DeletionTimestamp).To(BeNil(), "Old user should NOT be deleted during grace period")
 			}, time.Second*3, interval).Should(Succeed())
+
+			// Manually remove the cleanup-blocked finalizer to allow deletion to proceed
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				if err == nil && controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
+					controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
+					g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
+				}
+			}, timeout, interval).Should(Succeed())
 
 			// Now verify old user gets deleted after grace period (30s + buffer)
 			Eventually(func(g Gomega) {
@@ -1647,6 +1680,16 @@ var _ = Describe("TransportURL controller", func() {
 				if err == nil {
 					g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizer)).To(BeFalse(),
 						"TransportURL finalizer should be removed immediately when there is no owner")
+				}
+			}, timeout, interval).Should(Succeed())
+
+			// Manually remove the cleanup-blocked finalizer to allow deletion to proceed
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				if err == nil && controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
+					controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
+					g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
 				}
 			}, timeout, interval).Should(Succeed())
 

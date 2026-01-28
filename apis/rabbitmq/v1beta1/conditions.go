@@ -26,6 +26,12 @@ const (
 
 	// TransportURLFinalizer - finalizer to add to RabbitMQUsers owned by TransportURL
 	TransportURLFinalizer = "transporturl.rabbitmq.openstack.org/finalizer"
+
+	// RabbitMQUserCleanupBlockedFinalizer - temporary finalizer to block automatic cleanup of RabbitMQUsers
+	// This finalizer prevents TransportURL from automatically deleting users during credential rotation.
+	// It must be manually removed by an operator/admin to allow cleanup to proceed.
+	// TODO: Replace with proper safe-to-delete logic, then remove this finalizer from existing users.
+	RabbitMQUserCleanupBlockedFinalizer = "rabbitmq.openstack.org/cleanup-blocked"
 )
 
 // TransportURL Reasons used by API objects.

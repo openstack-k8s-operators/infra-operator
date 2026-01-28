@@ -634,6 +634,10 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			}
 			// Add TransportURL finalizer to protect user while in use
 			controllerutil.AddFinalizer(user, rabbitmqv1.TransportURLFinalizer)
+			// Add temporary blocking finalizer to prevent automatic cleanup
+			// This ensures users are not deleted automatically during credential rotation
+			// until proper safe-to-delete logic is implemented
+			controllerutil.AddFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
 			user.Spec.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
 			user.Spec.Username = instance.Spec.Username
 			user.Spec.VhostRef = vhostRef
@@ -906,7 +910,7 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling delete")
 
-	// Remove TransportURL finalizer from all owned users and vhosts
+	// Remove TransportURL finalizers from all owned users and vhosts
 	userList := &rabbitmqv1.RabbitMQUserList{}
 	if err := r.List(ctx, userList, client.InNamespace(instance.Namespace)); err == nil {
 		for i := range userList.Items {
@@ -914,9 +918,18 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 			// Check if this user is owned by this TransportURL
 			isOwned := object.CheckOwnerRefExist(instance.GetUID(), user.GetOwnerReferences())
 			if isOwned {
+				// Remove both the TransportURL finalizer and the cleanup-blocked finalizer
+				// When TransportURL is deleted, we want to allow full cleanup of owned users
+				updated := false
 				if controllerutil.RemoveFinalizer(user, rabbitmqv1.TransportURLFinalizer) {
+					updated = true
+				}
+				if controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
+					updated = true
+				}
+				if updated {
 					if err := r.Update(ctx, user); err != nil {
-						return ctrl.Result{}, fmt.Errorf("failed to remove TransportURL finalizer from user %s: %w", user.Name, err)
+						return ctrl.Result{}, fmt.Errorf("failed to remove finalizers from user %s: %w", user.Name, err)
 					}
 				}
 			}
