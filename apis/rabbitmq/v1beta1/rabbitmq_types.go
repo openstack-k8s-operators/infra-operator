@@ -51,6 +51,10 @@ const (
 	QueueTypeQuorum = "Quorum"
 	// QueueTypeNone - no special queue type
 	QueueTypeNone = "None"
+
+	// Annotations
+	// AnnotationTargetVersion - annotation key for target RabbitMQ version (set by openstack-operator)
+	AnnotationTargetVersion = "rabbitmq.openstack.org/target-version"
 )
 
 // PodOverride defines per-pod service configurations
@@ -133,6 +137,20 @@ type RabbitMqStatus struct {
 	// When populated, transport URLs use these hostnames instead of pod names.
 	// +listType=atomic
 	ServiceHostnames []string `json:"serviceHostnames,omitempty"`
+
+	// CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.0")
+	// This is controller-managed and reflects the actual running version.
+	// openstack-operator should use the "rabbitmq.openstack.org/target-version" annotation to request version changes.
+	CurrentVersion string `json:"currentVersion,omitempty"`
+
+	// UpgradePhase - tracks the current phase of a version upgrade or migration
+	// Valid values: "", "DeletingCluster", "DeletingStorage", "VerifyingCleanup", "Complete"
+	// This allows resuming upgrades that failed midway.
+	UpgradePhase string `json:"upgradePhase,omitempty"`
+
+	// StorageWipeStartedAt - timestamp when storage wipe process started
+	// Used to implement timeout protection against stuck PV/PVC deletions
+	StorageWipeStartedAt *metav1.Time `json:"storageWipeStartedAt,omitempty"`
 }
 
 //+kubebuilder:object:root=true

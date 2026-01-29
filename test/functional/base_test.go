@@ -1113,14 +1113,23 @@ func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 }
 
 func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]any) client.Object {
+	return CreateRabbitMQWithAnnotations(rabbitmq, spec, nil)
+}
+
+func CreateRabbitMQWithAnnotations(rabbitmq types.NamespacedName, spec map[string]any, annotations map[string]string) client.Object {
+	metadata := map[string]any{
+		"name":      rabbitmq.Name,
+		"namespace": rabbitmq.Namespace,
+	}
+	if len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+
 	raw := map[string]any{
 		"apiVersion": "rabbitmq.openstack.org/v1beta1",
 		"kind":       "RabbitMq",
-		"metadata": map[string]any{
-			"name":      rabbitmq.Name,
-			"namespace": rabbitmq.Namespace,
-		},
-		"spec": spec,
+		"metadata":   metadata,
+		"spec":       spec,
 	}
 
 	return th.CreateUnstructured(raw)
