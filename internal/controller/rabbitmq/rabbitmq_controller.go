@@ -116,7 +116,7 @@ const (
 const (
 	// DefaultRabbitMQVersion is the default RabbitMQ version when the target-version annotation is not set
 	// This constant is used for Status.CurrentVersion initialization to maintain backwards compatibility
-	DefaultRabbitMQVersion = "4.0"
+	DefaultRabbitMQVersion = "3.9"
 	// UpgradeCheckInterval is how often to check upgrade progress
 	UpgradeCheckInterval = 2 * time.Second
 )

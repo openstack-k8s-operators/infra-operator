@@ -122,7 +122,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 			DeferCleanup(th.DeleteSecret, types.NamespacedName{Name: certSecret.Name, Namespace: namespace})
 		})
 
-		When("with default version (4.0)", func() {
+		When("with default version (3.9)", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
 				spec["tls"] = map[string]any{
@@ -729,10 +729,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 			})
 
-			It("should default Status.CurrentVersion to 4.0", func() {
+			It("should default Status.CurrentVersion to 3.9", func() {
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					g.Expect(instance.Status.CurrentVersion).To(Equal("4.0"))
+					g.Expect(instance.Status.CurrentVersion).To(Equal("3.9"))
 				}, timeout, interval).Should(Succeed())
 			})
 		})
@@ -1050,7 +1050,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 			BeforeEach(func() {
 				spec := GetDefaultRabbitMQSpec()
 				spec["queueType"] = "Quorum"
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, map[string]string{
+					"rabbitmq.openstack.org/target-version": "4.0",
+				})
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				// Wait for default version initialization
@@ -1090,7 +1092,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 				spec["tls"] = map[string]any{
 					"secretName": "test-tls-secret",
 				}
-				rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+				rabbitmq := CreateRabbitMQWithAnnotations(rabbitmqName, spec, map[string]string{
+					"rabbitmq.openstack.org/target-version": "4.0",
+				})
 				DeferCleanup(th.DeleteInstance, rabbitmq)
 
 				// Create TLS secret
