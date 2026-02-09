@@ -1235,6 +1235,12 @@ var _ = Describe("RabbitMQUser controller", func() {
 			Expect(th.K8sClient.Create(th.Ctx, credentialSecret)).To(Succeed())
 			DeferCleanup(th.K8sClient.Delete, th.Ctx, credentialSecret)
 
+			// Wait for secret to be visible (webhook needs to see it)
+			Eventually(func(g Gomega) {
+				secret := &corev1.Secret{}
+				g.Expect(th.K8sClient.Get(th.Ctx, credentialSecretName, secret)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
 			// Create user with secret reference (no vhostRef to simplify cleanup)
 			immutableUserName := types.NamespacedName{Name: "immutable-user", Namespace: namespace}
 			spec := map[string]any{
