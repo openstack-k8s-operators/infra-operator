@@ -364,6 +364,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&rabbitmqcontroller.RabbitMQFederationReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Kclient: kclient,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "RabbitMQFederation")
+		os.Exit(1)
+	}
+
 	if err := (&rabbitmqcontroller.RabbitMQPolicyReconciler{
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
@@ -417,6 +426,10 @@ func main() {
 		}
 		if err := webhookrabbitmqv1beta1.SetupRabbitMQVhostWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMQVhost")
+			os.Exit(1)
+		}
+		if err := webhookrabbitmqv1beta1.SetupRabbitMQFederationWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "RabbitMQFederation")
 			os.Exit(1)
 		}
 		if err := webhooknetworkv1beta1.SetupNetConfigWebhookWithManager(mgr); err != nil {
