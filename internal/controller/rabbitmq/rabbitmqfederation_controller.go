@@ -164,7 +164,7 @@ func (r *RabbitMQFederationReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return r.reconcileNormal(ctx, instance, h)
 }
 
-func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.RabbitMQFederation, h *helper.Helper) (ctrl.Result, error) {
+func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, instance *rabbitmqv1.RabbitMQFederation, _ *helper.Helper) (ctrl.Result, error) {
 	Log := log.FromContext(ctx)
 
 	// Handle VhostRef changes - remove finalizer from old vhost if changed
@@ -295,7 +295,7 @@ func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, inst
 	return ctrl.Result{}, nil
 }
 
-func (r *RabbitMQFederationReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.RabbitMQFederation, h *helper.Helper) (ctrl.Result, error) {
+func (r *RabbitMQFederationReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.RabbitMQFederation, _ *helper.Helper) (ctrl.Result, error) {
 	Log := log.FromContext(ctx)
 
 	// Check if the RabbitMQ cluster is being deleted

@@ -1,0 +1,11 @@
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQFederation
+metadata:
+  name: rabbitmqfederation-sample
+spec:
+  rabbitmqClusterName: rabbitmq
+  upstreamName: upstream-federation
+  upstreamClusterName: rabbitmq-upstream
+  vhostRef: rabbitmqvhost-sample
+  ackMode: on-confirm
+  policyPattern: ".*"

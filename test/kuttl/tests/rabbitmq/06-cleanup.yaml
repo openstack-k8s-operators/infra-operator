@@ -5,6 +5,9 @@ delete:
   kind: RabbitMQPolicy
   name: rabbitmqpolicy-sample
 - apiVersion: rabbitmq.openstack.org/v1beta1
+  kind: RabbitMQFederation
+  name: rabbitmqfederation-sample
+- apiVersion: rabbitmq.openstack.org/v1beta1
   kind: RabbitMQUser
   name: rabbitmquser-sample
 - apiVersion: rabbitmq.openstack.org/v1beta1

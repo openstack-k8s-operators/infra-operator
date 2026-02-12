@@ -59,14 +59,14 @@ type RabbitMQFederationSpec struct {
 	// - on-confirm: wait for publisher confirms (safest, default)
 	// - on-publish: confirm immediately after publish (faster, may lose messages)
 	// - no-ack: no acknowledgements (fastest, least safe)
-	AckMode string `json:"ackMode,omitempty"`
+	AckMode string `json:"ackMode"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1800000
 	// Expires - time in milliseconds that the upstream should remember about this node for (default: 1800000ms = 30min)
 	// When connection is lost, messages will be queued for this duration
-	Expires int32 `json:"expires,omitempty"`
+	Expires int32 `json:"expires"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=0
@@ -79,19 +79,19 @@ type RabbitMQFederationSpec struct {
 	// +kubebuilder:default=1
 	// MaxHops - maximum number of federation links a message can traverse (default: 1)
 	// Prevents infinite loops in complex federation topologies
-	MaxHops int32 `json:"maxHops,omitempty"`
+	MaxHops int32 `json:"maxHops"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1000
 	// PrefetchCount - maximum number of unacknowledged messages the upstream can have (default: 1000)
-	PrefetchCount int32 `json:"prefetchCount,omitempty"`
+	PrefetchCount int32 `json:"prefetchCount"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=5
 	// ReconnectDelay - time in seconds to wait before reconnecting after connection failure (default: 5)
-	ReconnectDelay int32 `json:"reconnectDelay,omitempty"`
+	ReconnectDelay int32 `json:"reconnectDelay"`
 
 	// +kubebuilder:validation:Optional
 	// TrustUserId - whether to preserve user-id field across federation (default: false)
@@ -120,12 +120,12 @@ type RabbitMQFederationSpec struct {
 	// +kubebuilder:default=0
 	// Priority - priority of this upstream (higher values = higher priority, default: 0)
 	// Used when multiple upstreams are available
-	Priority int32 `json:"priority,omitempty"`
+	Priority int32 `json:"priority"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=".*"
 	// PolicyPattern - regex pattern for matching exchanges/queues to apply federation policy (default: ".*")
-	PolicyPattern string `json:"policyPattern,omitempty"`
+	PolicyPattern string `json:"policyPattern"`
 }
 
 // RabbitMQFederationStatus defines the observed state of RabbitMQFederation

@@ -17,6 +17,7 @@ resources:
 - bases/rabbitmq.openstack.org_rabbitmqvhosts.yaml
 - bases/rabbitmq.openstack.org_rabbitmqusers.yaml
 - bases/rabbitmq.openstack.org_rabbitmqpolicies.yaml
+- bases/rabbitmq.openstack.org_rabbitmqfederations.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
