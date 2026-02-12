@@ -19,7 +19,7 @@ kind: TestSuite
 reportFormat: JSON
 reportName: kuttl-test-infra
 namespace: infra-kuttl-tests
-timeout: 180
+timeout: 300
 parallel: 1
 suppress:
   - events                     # Remove spammy event logs

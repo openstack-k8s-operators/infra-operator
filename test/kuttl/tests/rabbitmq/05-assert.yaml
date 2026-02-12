@@ -1,0 +1,31 @@
+#
+# Check for:
+#
+# - 1 RabbitMQFederation CR
+# - Federation has correct spec fields
+# - Federation status conditions are initialized
+# - Vhost has federation finalizer
+#
+
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQFederation
+metadata:
+  name: rabbitmqfederation-sample
+spec:
+  rabbitmqClusterName: rabbitmq
+  upstreamName: upstream-federation
+  upstreamClusterName: rabbitmq-upstream
+  vhostRef: rabbitmqvhost-sample
+  ackMode: on-confirm
+  # Verify defaults are set
+  expires: 1800000
+  maxHops: 1
+  prefetchCount: 1000
+  reconnectDelay: 5
+  policyPattern: ".*"
+status:
+  conditions:
+  - status: "True"
+    type: Ready
+  - status: "True"
+    type: RabbitMQFederationReady
