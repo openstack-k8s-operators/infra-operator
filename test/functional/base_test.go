@@ -1238,3 +1238,29 @@ func RabbitMQPolicyConditionGetter(name types.NamespacedName) condition.Conditio
 	instance := GetRabbitMQPolicy(name)
 	return instance.Status.Conditions
 }
+
+func CreateRabbitMQFederation(name types.NamespacedName, spec map[string]any) client.Object {
+	raw := map[string]any{
+		"apiVersion": "rabbitmq.openstack.org/v1beta1",
+		"kind":       "RabbitMQFederation",
+		"metadata": map[string]any{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": spec,
+	}
+	return th.CreateUnstructured(raw)
+}
+
+func GetRabbitMQFederation(name types.NamespacedName) *rabbitmqv1.RabbitMQFederation {
+	instance := &rabbitmqv1.RabbitMQFederation{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func RabbitMQFederationConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetRabbitMQFederation(name)
+	return instance.Status.Conditions
+}
