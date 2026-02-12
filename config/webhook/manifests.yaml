@@ -150,6 +150,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /mutate-rabbitmq-openstack-org-v1beta1-rabbitmqfederation
+  failurePolicy: Fail
+  name: mrabbitmqfederation-v1beta1.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqfederations
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /mutate-rabbitmq-openstack-org-v1beta1-rabbitmqpolicy
   failurePolicy: Fail
   name: mrabbitmqpolicy-v1beta1.kb.io
@@ -223,6 +243,26 @@ webhooks:
     - UPDATE
     resources:
     - redises
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-rabbitmq-openstack-org-v1beta1-rabbitmqfederation
+  failurePolicy: Fail
+  name: mrabbitmqfederation.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqfederations
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -437,6 +477,26 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmqfederation
+  failurePolicy: Fail
+  name: vrabbitmqfederation-v1beta1.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqfederations
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmqpolicy
   failurePolicy: Fail
   name: vrabbitmqpolicy-v1beta1.kb.io
@@ -510,6 +570,26 @@ webhooks:
     - UPDATE
     resources:
     - redises
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-rabbitmq-openstack-org-v1beta1-rabbitmqfederation
+  failurePolicy: Fail
+  name: vrabbitmqfederation.kb.io
+  rules:
+  - apiGroups:
+    - rabbitmq.openstack.org
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - rabbitmqfederations
   sideEffects: None
 - admissionReviewVersions:
   - v1

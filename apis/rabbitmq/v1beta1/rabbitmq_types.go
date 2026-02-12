@@ -159,6 +159,13 @@ type RabbitMqList struct {
 	Items           []RabbitMq `json:"items"`
 }
 
+const (
+	// FederationUpstreamFinalizerPrefix - prefix for per-federation finalizers added to upstream RabbitMq clusters
+	// Full finalizer format: rmqfed.openstack.org/upstream-<federation-name>
+	// Prevents upstream cluster deletion while federation is active
+	FederationUpstreamFinalizerPrefix = "rmqfed.openstack.org/upstream-"
+)
+
 func init() {
 	SchemeBuilder.Register(&RabbitMq{}, &RabbitMqList{})
 }
