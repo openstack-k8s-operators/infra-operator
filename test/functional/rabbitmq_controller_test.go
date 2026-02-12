@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 
 	//revive:disable-next-line:dot-imports
 
@@ -301,6 +302,46 @@ var _ = Describe("RabbitMQ Controller", func() {
 				tlsCondition := instance.Status.Conditions.Get(condition.TLSInputReadyCondition)
 				g.Expect(tlsCondition.Status).To(Equal(corev1.ConditionFalse))
 				g.Expect(string(tlsCondition.Reason)).To(Equal(string(condition.RequestedReason)))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQ reconciles with existing additionalPlugins on RabbitmqCluster", func() {
+		BeforeEach(func() {
+			rabbitmq := CreateRabbitMQ(rabbitmqName, GetDefaultRabbitMQSpec())
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("should preserve additionalPlugins set by the federation controller", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Simulate what the federation controller does: add plugins to the RabbitmqCluster
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				cluster.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqclusterv2.Plugin{
+					"rabbitmq_federation",
+					"rabbitmq_federation_management",
+				}
+				g.Expect(k8sClient.Update(ctx, cluster)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Trigger a reconciliation of the RabbitMq CR by updating it
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				if instance.Annotations == nil {
+					instance.Annotations = map[string]string{}
+				}
+				instance.Annotations["test-trigger"] = "reconcile"
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the plugins are preserved after RabbitMq controller reconciliation
+			Consistently(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation_management")))
 			}, timeout, interval).Should(Succeed())
 		})
 	})

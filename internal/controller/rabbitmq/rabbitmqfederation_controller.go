@@ -32,6 +32,7 @@ import (
 	rabbitmqapi "github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/api"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -57,7 +58,7 @@ type RabbitMQFederationReconciler struct {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts/finalizers,verbs=update
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs/finalizers,verbs=update
-//+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile reconciles a RabbitMQFederation object
@@ -90,9 +91,8 @@ func (r *RabbitMQFederationReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// Restore condition timestamps if they haven't changed
 		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
 
-		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
-			instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
-		}
+		// Always mirror the ReadyCondition from the federation-specific condition
+		instance.Status.Conditions.Set(instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		if err := h.PatchInstance(ctx, instance); err != nil {
 			Log.Error(err, "Failed to patch instance")
 		}
@@ -221,6 +221,23 @@ func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, inst
 		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, err
 	}
 
+	// Ensure federation plugins are enabled on the RabbitmqCluster
+	pluginsUpdated, err := r.ensureFederationPlugins(ctx, instance.Spec.RabbitmqClusterName, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQFederationReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			rabbitmqv1.RabbitMQFederationReadyErrorMessage,
+			fmt.Sprintf("failed to enable federation plugins: %v", err)))
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, err
+	}
+	if pluginsUpdated {
+		// Plugins were just enabled - requeue to give RabbitMQ time to load them
+		Log.Info("Federation plugins enabled, requeueing to allow RabbitMQ to load them")
+		return ctrl.Result{RequeueAfter: time.Duration(30) * time.Second}, nil
+	}
+
 	// Get RabbitMQ cluster connection details
 	apiClient, err := r.getRabbitMQClient(ctx, instance.Spec.RabbitmqClusterName, instance.Namespace)
 	if err != nil {
@@ -287,9 +304,12 @@ func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, inst
 
 	Log.Info("Created/updated federation policy", "policy", policyName, "vhost", vhostName)
 
-	// Set ready condition
+	// Set ready conditions
 	instance.Status.Conditions.Set(condition.TrueCondition(
 		rabbitmqv1.RabbitMQFederationReadyCondition,
+		rabbitmqv1.RabbitMQFederationReadyMessage))
+	instance.Status.Conditions.Set(condition.TrueCondition(
+		condition.ReadyCondition,
 		rabbitmqv1.RabbitMQFederationReadyMessage))
 
 	return ctrl.Result{}, nil
@@ -298,63 +318,70 @@ func (r *RabbitMQFederationReconciler) reconcileNormal(ctx context.Context, inst
 func (r *RabbitMQFederationReconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1.RabbitMQFederation, h *helper.Helper) (ctrl.Result, error) {
 	Log := log.FromContext(ctx)
 
-	// Check if the RabbitMQ cluster is being deleted
-	// If so, skip cleanup as the cluster resources will be deleted anyway
+	// Check if the RabbitMQ cluster is being deleted or gone.
+	// If so, skip RabbitMQ management API cleanup but still attempt Kubernetes-level
+	// cleanup (plugin removal, finalizer removal).
+	clusterGone := false
 	cluster := &rabbitmqv1.RabbitMq{}
 	if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, cluster); err != nil {
 		if k8s_errors.IsNotFound(err) {
-			Log.Info("RabbitMQ cluster not found, skipping federation cleanup")
-			controllerutil.RemoveFinalizer(instance, federationFinalizer)
-			return ctrl.Result{}, nil
+			Log.Info("RabbitMQ cluster not found, skipping management API cleanup")
+			clusterGone = true
+		} else {
+			// If there's an error other than NotFound, log it but continue with cleanup attempt
+			Log.Info("Unable to get RabbitMQ cluster, will attempt cleanup anyway", "error", err)
 		}
-		// If there's an error other than NotFound, log it but continue with cleanup attempt
-		Log.Info("Unable to get RabbitMQ cluster, will attempt cleanup anyway", "error", err)
 	} else if !cluster.DeletionTimestamp.IsZero() {
-		// Cluster is being deleted, skip cleanup
-		Log.Info("RabbitMQ cluster is being deleted, skipping federation cleanup")
-		controllerutil.RemoveFinalizer(instance, federationFinalizer)
-		return ctrl.Result{}, nil
+		Log.Info("RabbitMQ cluster is being deleted, skipping management API cleanup")
+		clusterGone = true
 	}
 
-	// Get the vhost name from status (or spec if status not set)
-	vhostName := instance.Status.Vhost
-	if vhostName == "" {
-		vhostName = "/"
-		if instance.Spec.VhostRef != "" {
-			vhost := &rabbitmqv1.RabbitMQVhost{}
-			if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost); err == nil {
-				vhostName = vhost.Spec.Name
+	// Best-effort cleanup of RabbitMQ management API resources (upstream, policy).
+	// Only attempt if the cluster is still alive.
+	if !clusterGone {
+		// Get the vhost name from status (or spec if status not set)
+		vhostName := instance.Status.Vhost
+		if vhostName == "" {
+			vhostName = "/"
+			if instance.Spec.VhostRef != "" {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				if err := r.Get(ctx, types.NamespacedName{Name: instance.Spec.VhostRef, Namespace: instance.Namespace}, vhost); err == nil {
+					vhostName = vhost.Spec.Name
+				}
+			}
+		}
+
+		apiClient, err := r.getRabbitMQClient(ctx, instance.Spec.RabbitmqClusterName, instance.Namespace)
+		if err != nil {
+			Log.Info("Failed to get RabbitMQ client for cleanup, skipping upstream/policy deletion", "error", err)
+		} else {
+			// Delete policy
+			policyName := instance.Status.PolicyName
+			if policyName == "" {
+				policyName = fmt.Sprintf("federation-%s", instance.Spec.UpstreamName)
+			}
+
+			if err := apiClient.DeletePolicy(vhostName, policyName); err != nil {
+				Log.Info("Failed to delete federation policy", "policy", policyName, "error", err)
+			} else {
+				Log.Info("Deleted federation policy", "policy", policyName, "vhost", vhostName)
+			}
+
+			// Delete federation upstream
+			if err := apiClient.DeleteFederationUpstream(vhostName, instance.Spec.UpstreamName); err != nil {
+				Log.Info("Failed to delete federation upstream", "upstream", instance.Spec.UpstreamName, "error", err)
+			} else {
+				Log.Info("Deleted federation upstream", "upstream", instance.Spec.UpstreamName, "vhost", vhostName)
 			}
 		}
 	}
 
-	// Get RabbitMQ client
-	apiClient, err := r.getRabbitMQClient(ctx, instance.Spec.RabbitmqClusterName, instance.Namespace)
-	if err != nil {
-		Log.Info("Failed to get RabbitMQ client for cleanup, removing finalizer anyway", "error", err)
-		controllerutil.RemoveFinalizer(instance, federationFinalizer)
-		return ctrl.Result{}, nil
-	}
-
-	// Delete policy
-	policyName := instance.Status.PolicyName
-	if policyName == "" {
-		policyName = fmt.Sprintf("federation-%s", instance.Spec.UpstreamName)
-	}
-
-	if err := apiClient.DeletePolicy(vhostName, policyName); err != nil {
-		Log.Info("Failed to delete federation policy", "policy", policyName, "error", err)
-		// Continue with upstream deletion even if policy deletion fails
-	} else {
-		Log.Info("Deleted federation policy", "policy", policyName, "vhost", vhostName)
-	}
-
-	// Delete federation upstream
-	if err := apiClient.DeleteFederationUpstream(vhostName, instance.Spec.UpstreamName); err != nil {
-		Log.Info("Failed to delete federation upstream", "upstream", instance.Spec.UpstreamName, "error", err)
+	// Remove federation plugins if no other federations reference this cluster.
+	// This uses the Kubernetes API (not the RabbitMQ management API), so it should
+	// always be attempted regardless of management API availability.
+	if err := r.removeFederationPluginsIfUnused(ctx, instance.Spec.RabbitmqClusterName, instance.Namespace, instance.Name); err != nil {
+		Log.Info("Failed to remove federation plugins", "cluster", instance.Spec.RabbitmqClusterName, "error", err)
 		// Continue anyway - don't block deletion on cleanup failures
-	} else {
-		Log.Info("Deleted federation upstream", "upstream", instance.Spec.UpstreamName, "vhost", vhostName)
 	}
 
 	// Remove finalizer from vhost if VhostRef is set
@@ -468,6 +495,17 @@ func (r *RabbitMQFederationReconciler) buildUpstreamURI(ctx context.Context, ins
 
 // getRabbitMQClient creates a RabbitMQ API client for the specified cluster
 func (r *RabbitMQFederationReconciler) getRabbitMQClient(ctx context.Context, clusterName, namespace string) (*rabbitmqapi.Client, error) {
+	h, err := helper.NewHelper(&rabbitmqv1.RabbitMQFederation{}, r.Client, r.Kclient, r.Scheme, log.FromContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create helper: %w", err)
+	}
+
+	// Get the RabbitmqCluster CR to determine TLS settings
+	rmqCluster := &rabbitmqclusterv2.RabbitmqCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, rmqCluster); err != nil {
+		return nil, fmt.Errorf("failed to get RabbitmqCluster %s: %w", clusterName, err)
+	}
+
 	// Get the RabbitMQ cluster credentials
 	secretName := fmt.Sprintf("%s-default-user", clusterName)
 	secret := &corev1.Secret{}
@@ -479,18 +517,128 @@ func (r *RabbitMQFederationReconciler) getRabbitMQClient(ctx context.Context, cl
 	if !ok {
 		return nil, fmt.Errorf("secret %s does not contain 'username' key", secretName)
 	}
-
 	password, ok := secret.Data["password"]
 	if !ok {
 		return nil, fmt.Errorf("secret %s does not contain 'password' key", secretName)
 	}
 
-	// Build the management API URL
-	serviceName := fmt.Sprintf("%s.%s.svc.cluster.local", clusterName, namespace)
-	baseURL := fmt.Sprintf("http://%s:15672", serviceName)
+	// Build the management API URL using the shared helper (handles TLS)
+	baseURL := getManagementURL(rmqCluster, secret)
 
-	// Create and return the client
-	return rabbitmqapi.NewClient(baseURL, string(username), string(password), false, nil), nil
+	// Get TLS CA cert if TLS is enabled
+	caCert, err := getTLSCACert(ctx, h, rmqCluster, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get TLS CA cert: %w", err)
+	}
+
+	tlsEnabled := rmqCluster.Spec.TLS.SecretName != ""
+	return rabbitmqapi.NewClient(baseURL, string(username), string(password), tlsEnabled, caCert), nil
+}
+
+// federationPlugins are the RabbitMQ plugins required for federation
+var federationPlugins = []rabbitmqclusterv2.Plugin{
+	"rabbitmq_federation",
+	"rabbitmq_federation_management",
+}
+
+// ensureFederationPlugins ensures that the federation plugins are enabled on the RabbitmqCluster CR.
+// The rabbitmq controller preserves additionalPlugins set here when reconciling.
+// Returns true if the cluster was updated (plugins were added).
+func (r *RabbitMQFederationReconciler) ensureFederationPlugins(ctx context.Context, clusterName, namespace string) (bool, error) {
+	Log := log.FromContext(ctx)
+
+	rmqCluster := &rabbitmqclusterv2.RabbitmqCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, rmqCluster); err != nil {
+		return false, fmt.Errorf("failed to get RabbitmqCluster %s: %w", clusterName, err)
+	}
+
+	existing := rmqCluster.Spec.Rabbitmq.AdditionalPlugins
+	updated := false
+	for _, plugin := range federationPlugins {
+		found := false
+		for _, p := range existing {
+			if p == plugin {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, plugin)
+			updated = true
+		}
+	}
+
+	if updated {
+		rmqCluster.Spec.Rabbitmq.AdditionalPlugins = existing
+		if err := r.Update(ctx, rmqCluster); err != nil {
+			return false, fmt.Errorf("failed to update RabbitmqCluster %s with federation plugins: %w", clusterName, err)
+		}
+		Log.Info("Enabled federation plugins on RabbitmqCluster", "cluster", clusterName,
+			"plugins", federationPlugins)
+	}
+
+	return updated, nil
+}
+
+// removeFederationPluginsIfUnused removes federation plugins from the RabbitmqCluster CR
+// if no other RabbitMQFederation CRs reference this cluster.
+func (r *RabbitMQFederationReconciler) removeFederationPluginsIfUnused(ctx context.Context, clusterName, namespace, excludeFederationName string) error {
+	Log := log.FromContext(ctx)
+
+	// Check if any other RabbitMQFederation CRs still reference this cluster
+	fedList := &rabbitmqv1.RabbitMQFederationList{}
+	if err := r.List(ctx, fedList, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("failed to list RabbitMQFederation resources: %w", err)
+	}
+
+	for i := range fedList.Items {
+		fed := &fedList.Items[i]
+		// Skip the federation being deleted and any that are also being deleted
+		if fed.Name == excludeFederationName || !fed.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if fed.Spec.RabbitmqClusterName == clusterName {
+			Log.Info("Other federation still references this cluster, keeping plugins",
+				"cluster", clusterName, "federation", fed.Name)
+			return nil
+		}
+	}
+
+	// No other federations reference this cluster - remove the plugins
+	rmqCluster := &rabbitmqclusterv2.RabbitmqCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: namespace}, rmqCluster); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get RabbitmqCluster %s: %w", clusterName, err)
+	}
+
+	filtered := make([]rabbitmqclusterv2.Plugin, 0, len(rmqCluster.Spec.Rabbitmq.AdditionalPlugins))
+	removed := false
+	for _, p := range rmqCluster.Spec.Rabbitmq.AdditionalPlugins {
+		isFedPlugin := false
+		for _, fp := range federationPlugins {
+			if p == fp {
+				isFedPlugin = true
+				break
+			}
+		}
+		if !isFedPlugin {
+			filtered = append(filtered, p)
+		} else {
+			removed = true
+		}
+	}
+
+	if removed {
+		rmqCluster.Spec.Rabbitmq.AdditionalPlugins = filtered
+		if err := r.Update(ctx, rmqCluster); err != nil {
+			return fmt.Errorf("failed to remove federation plugins from RabbitmqCluster %s: %w", clusterName, err)
+		}
+		Log.Info("Removed federation plugins from RabbitmqCluster", "cluster", clusterName)
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

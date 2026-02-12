@@ -380,6 +380,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("error configuring RabbitmqCluster: %w", err)
 	}
 
+	// Preserve additionalPlugins that may have been set by the federation controller
+	// on the existing RabbitmqCluster CR, since MarshalInto from the RabbitMq spec
+	// does not include them.
+	existingCluster := &rabbitmqv2.RabbitmqCluster{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, existingCluster); err == nil {
+		if len(existingCluster.Spec.Rabbitmq.AdditionalPlugins) > 0 && len(rabbitmqCluster.Spec.Rabbitmq.AdditionalPlugins) == 0 {
+			rabbitmqCluster.Spec.Rabbitmq.AdditionalPlugins = existingCluster.Spec.Rabbitmq.AdditionalPlugins
+		}
+	}
+
 	rabbitmqImplCluster := impl.NewRabbitMqCluster(rabbitmqCluster, 5)
 	rmqres, rmqerr := rabbitmqImplCluster.CreateOrPatch(ctx, helper)
 	if rmqerr != nil {

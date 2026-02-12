@@ -287,6 +287,130 @@ var _ = Describe("RabbitMQFederation controller", func() {
 		})
 	})
 
+	When("a RabbitMQFederation is created, it should add federation plugins to the RabbitmqCluster", func() {
+		BeforeEach(func() {
+			// Create RabbitMq CRs (the OpenStack wrapper) needed by the controller
+			// for finalizer management on the upstream cluster
+			clusterCm := types.NamespacedName{Name: "cluster-config-v1", Namespace: "kube-system"}
+			th.CreateConfigMap(clusterCm, map[string]any{"install-config": "fips: false"})
+			DeferCleanup(th.DeleteConfigMap, clusterCm)
+
+			// Note: No DeferCleanup for upstream RabbitMq - federation controller adds
+			// a finalizer to it, so th.DeleteInstance would hang. Namespace cleanup handles it.
+			CreateRabbitMQ(upstreamClusterName, GetDefaultRabbitMQSpec())
+
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"upstreamName":        "plugin-test-upstream",
+				"upstreamClusterName": upstreamClusterName.Name,
+			}
+			CreateRabbitMQFederation(federationName, spec)
+			// Note: No DeferCleanup - namespace cleanup handles federation deletion
+		})
+
+		It("should add rabbitmq_federation and rabbitmq_federation_management plugins", func() {
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqClusterName)
+				plugins := cluster.Spec.Rabbitmq.AdditionalPlugins
+				g.Expect(plugins).To(ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+				g.Expect(plugins).To(ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation_management")))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should have initialized status conditions", func() {
+			Eventually(func(g Gomega) {
+				fed := GetRabbitMQFederation(federationName)
+				g.Expect(fed.Status.Conditions).NotTo(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQFederation is deleted and no other federations exist", func() {
+		It("should remove federation plugins from the RabbitmqCluster", func() {
+			// Create required RabbitMq CR for upstream cluster
+			clusterCm := types.NamespacedName{Name: "cluster-config-v1", Namespace: "kube-system"}
+			th.CreateConfigMap(clusterCm, map[string]any{"install-config": "fips: false"})
+			DeferCleanup(th.DeleteConfigMap, clusterCm)
+
+			CreateRabbitMQ(upstreamClusterName, GetDefaultRabbitMQSpec())
+
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"upstreamName":        "delete-test-upstream",
+				"upstreamClusterName": upstreamClusterName.Name,
+			}
+			CreateRabbitMQFederation(federationName, spec)
+
+			// Wait for plugins to be added
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqClusterName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+			}, timeout, interval).Should(Succeed())
+
+			// Delete the federation
+			fed := GetRabbitMQFederation(federationName)
+			Expect(th.K8sClient.Delete(th.Ctx, fed)).Should(Succeed())
+
+			// Plugins should be removed since no other federations reference this cluster
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqClusterName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).NotTo(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).NotTo(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation_management")))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQFederation is deleted but another federation references the same cluster", func() {
+		It("should keep federation plugins on the RabbitmqCluster", func() {
+			// Create required RabbitMq CR for upstream cluster
+			clusterCm := types.NamespacedName{Name: "cluster-config-v1", Namespace: "kube-system"}
+			th.CreateConfigMap(clusterCm, map[string]any{"install-config": "fips: false"})
+			DeferCleanup(th.DeleteConfigMap, clusterCm)
+
+			CreateRabbitMQ(upstreamClusterName, GetDefaultRabbitMQSpec())
+
+			// Create first federation
+			spec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"upstreamName":        "first-upstream",
+				"upstreamClusterName": upstreamClusterName.Name,
+			}
+			CreateRabbitMQFederation(federationName, spec)
+
+			// Wait for plugins to be added
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqClusterName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+			}, timeout, interval).Should(Succeed())
+
+			// Create second federation referencing the same cluster
+			secondFedName := types.NamespacedName{Name: "second-federation", Namespace: namespace}
+			spec2 := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+				"upstreamName":        "second-upstream",
+				"upstreamClusterName": upstreamClusterName.Name,
+			}
+			CreateRabbitMQFederation(secondFedName, spec2)
+
+			// Delete the first federation
+			fed := GetRabbitMQFederation(federationName)
+			Expect(th.K8sClient.Delete(th.Ctx, fed)).Should(Succeed())
+
+			// Plugins should still be present because second federation still exists
+			Consistently(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqClusterName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation_management")))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("a RabbitMQFederation is created with both UpstreamClusterName and UpstreamSecretRef", func() {
 		It("should reject creation with validation error", func() {
 			badFedName := types.NamespacedName{Name: "both-upstream-federation", Namespace: namespace}
