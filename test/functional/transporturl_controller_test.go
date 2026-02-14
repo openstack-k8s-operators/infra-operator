@@ -1706,4 +1706,55 @@ var _ = Describe("TransportURL controller", func() {
 			}, time.Second*45, interval).Should(Succeed())
 		})
 	})
+
+	When("TransportURL is created before RabbitMQ Status.QueueType is set (race condition)", func() {
+		BeforeEach(func() {
+			// Create RabbitMQ CR with Spec.QueueType=Quorum but without Status.QueueType
+			// This simulates the race condition during RabbitMQ 3.9->4.2 upgrade
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Quorum"
+			rabbitmq := CreateRabbitMQ(rabbitmqClusterName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create RabbitMQCluster
+			CreateRabbitMQCluster(rabbitmqClusterName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqClusterName)
+
+			// Create TransportURL
+			transportURLSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqClusterName.Name,
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, transportURLSpec))
+		})
+
+		It("should read Spec.QueueType when Status.QueueType is not yet set", func() {
+			// Simulate RabbitMQCluster as ready
+			// Note: SimulateRabbitMQClusterReady does NOT set Status.QueueType
+			SimulateRabbitMQClusterReady(rabbitmqClusterName)
+
+			// Verify RabbitMQ CR has Spec.QueueType set to Quorum
+			Eventually(func(g Gomega) {
+				rabbitmq := GetRabbitMQ(rabbitmqClusterName)
+				g.Expect(rabbitmq.Spec.QueueType).ToNot(BeNil())
+				g.Expect(*rabbitmq.Spec.QueueType).To(Equal(rabbitmqv1.QueueTypeQuorum))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the TransportURL secret contains quorumqueues=true
+			// even though Status.QueueType is not set (race condition scenario)
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(transportURLSecretName)
+				g.Expect(s.Data).To(HaveKey("transport_url"))
+				g.Expect(s.Data).To(HaveKeyWithValue("quorumqueues", []byte("true")),
+					"TransportURL should set quorumqueues=true based on Spec.QueueType even when Status.QueueType is not yet set")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify TransportURL is ready
+			th.ExpectCondition(
+				transportURLName,
+				ConditionGetterFunc(TransportURLConditionGetter),
+				rabbitmqv1.TransportURLReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
 })

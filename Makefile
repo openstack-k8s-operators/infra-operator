@@ -121,11 +121,18 @@ tidy: ## Run go mod tidy on every mod file in the repo
 PROCS?=$(shell expr $(shell nproc --ignore 2) / 2)
 PROC_CMD = --procs ${PROCS}
 
+# Skip instanceha tests if --focus or --skip is used (focused test run)
+ifeq (,$(findstring --focus,$(GINKGO_ARGS))$(findstring --skip,$(GINKGO_ARGS)))
+INSTANCEHA_DEP = test-instanceha
+else
+INSTANCEHA_DEP =
+endif
+
 .PHONY: test
-test: manifests generate gowork fmt vet envtest ginkgo test-instanceha ## Run tests.
+test: manifests generate gowork fmt vet envtest ginkgo $(INSTANCEHA_DEP) ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) -v debug --bin-dir $(LOCALBIN) use $(ENVTEST_K8S_VERSION) -p path)" \
 	OPERATOR_TEMPLATES="$(PWD)/templates" \
-	$(GINKGO) --trace --cover --coverpkg=./pkg/...,./internal/...,./apis/network/v1beta1/...,./apis/rabbitmq/v1beta1/... --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/... ./apis/network/... ./apis/rabbitmq/... ./internal/webhook/...
+	$(GINKGO) --trace --cover --coverpkg=./pkg/...,./internal/...,./apis/network/v1beta1/...,./apis/rabbitmq/v1beta1/... --coverprofile cover.out --covermode=atomic ${PROC_CMD} $(GINKGO_ARGS) ./test/... ./apis/network/... ./apis/rabbitmq/... ./internal/webhook/... ./internal/controller/...
 
 .PHONY: test-instanceha
 test-instanceha: ## Run instanceha tests.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
@@ -18,6 +19,43 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// Version represents a parsed RabbitMQ version
+type Version struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+// ParseRabbitMQVersion parses a version string like "3.9", "3.13.1", "4.2" into components
+func ParseRabbitMQVersion(versionStr string) (Version, error) {
+	var v Version
+	parts := strings.Split(versionStr, ".")
+
+	if len(parts) < 2 {
+		return v, fmt.Errorf("invalid version format: %s", versionStr)
+	}
+
+	var err error
+	v.Major, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return v, fmt.Errorf("invalid major version: %s", parts[0])
+	}
+
+	v.Minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return v, fmt.Errorf("invalid minor version: %s", parts[1])
+	}
+
+	if len(parts) > 2 {
+		v.Patch, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return v, fmt.Errorf("invalid patch version: %s", parts[2])
+		}
+	}
+
+	return v, nil
+}
+
 // ConfigureCluster configures a RabbitMQ cluster with the specified parameters
 func ConfigureCluster(
 	cluster *rabbitmqv2.RabbitmqCluster,
@@ -26,6 +64,10 @@ func ConfigureCluster(
 	topology *topologyv1.Topology,
 	nodeselector *map[string]string,
 	override *rabbitmqv2.OverrideTrimmed,
+	queueType *string,
+	rabbitmqVersion string,
+	needsDataWipe bool,
+	targetVersion string,
 ) error {
 	envVars := []corev1.EnvVar{
 		{
@@ -91,6 +133,59 @@ func ConfigureCluster(
 		Value: fmt.Sprintf("-proto_dist %s_%s %s", inetFamily, inetProtocol, tlsArgs),
 	})
 
+	// Build init containers list - add data-wipe container if needed
+	initContainers := []corev1.Container{}
+
+	// Add data-wipe init container for storage upgrades
+	// This ensures clean state even if the same PV is reused (e.g., local-storage)
+	// The init container runs BEFORE setup-container and wipes /var/lib/rabbitmq
+	// Controlled by annotation on RabbitMQCluster to ensure it only runs once
+	if needsDataWipe {
+		// Use version-specific marker to ensure wipe happens only once per version
+		// Marker file prevents re-wiping on pod restarts
+		wipeScript := fmt.Sprintf(`set -ex
+WIPE_DIR="/var/lib/rabbitmq"
+MARKER="${WIPE_DIR}/.operator-wipe-%s"
+
+if [ -f "$MARKER" ]; then
+  echo "Data already wiped for version %s, skipping..."
+  exit 0
+fi
+
+echo "Wiping RabbitMQ data in $WIPE_DIR for upgrade to version %s..."
+# Remove all content from the volume, including hidden files
+rm -rf "${WIPE_DIR:?}"/*
+rm -rf "${WIPE_DIR:?}"/.[!.]*
+# Create marker to prevent re-wipe
+touch "$MARKER"
+echo "Data wipe complete for version %s (marker: $MARKER)"
+ls -la "$WIPE_DIR"
+`, targetVersion, targetVersion, targetVersion, targetVersion)
+
+		initContainers = append(initContainers, corev1.Container{
+			Name:       "wipe-data",
+			Image:      cluster.Spec.Image,
+			WorkingDir: "/var/lib/rabbitmq",
+			Command:    []string{"/bin/sh"},
+			Args: []string{
+				"-c",
+				wipeScript,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "persistence",
+					MountPath: "/var/lib/rabbitmq",
+				},
+			},
+		})
+	}
+
+	// Add the standard setup-container
+	initContainers = append(initContainers, corev1.Container{
+		Name:            "setup-container",
+		SecurityContext: &corev1.SecurityContext{},
+	})
+
 	defaultStatefulSet := rabbitmqv2.StatefulSet{
 		Spec: &rabbitmqv2.StatefulSetSpec{
 			Template: &rabbitmqv2.PodTemplateSpec{
@@ -111,10 +206,8 @@ func ConfigureCluster(
 							VolumeMounts: []corev1.VolumeMount{},
 						},
 					},
-					InitContainers: []corev1.Container{
-						{Name: "setup-container", SecurityContext: &corev1.SecurityContext{}},
-					},
-					Volumes: []corev1.Volume{},
+					InitContainers: initContainers,
+					Volumes:        []corev1.Volume{},
 				},
 			},
 		},
@@ -187,13 +280,21 @@ func ConfigureCluster(
 		}
 		// disable non tls listeners
 		cluster.Spec.TLS.DisableNonTLSListeners = true
-		// NOTE(dciabrin) OSPRH-20331 reported RabbitMQ partitionning during
-		// key update events, so until this can be resolved, revert to the
-		// same configuration scheme as OSP17 (see OSPRH-13633)
+		// Determine TLS version configuration based on RabbitMQ version
+		// NOTE(dciabrin) OSPRH-20331 reported RabbitMQ partitioning during
+		// key update events, so revert to OSP17 configuration scheme (see OSPRH-13633)
+		// For RabbitMQ 4.x and later, TLS 1.3 is enabled regardless of FIPS mode
+		// as the partitioning issue is resolved in RabbitMQ 4.x
 		var tlsVersions string
-		if fipsEnabled {
+		parsedVersion, err := ParseRabbitMQVersion(rabbitmqVersion)
+		if err == nil && parsedVersion.Major >= 4 {
+			// RabbitMQ 4.x+: Enable TLS 1.2 and 1.3
+			tlsVersions = "['tlsv1.2','tlsv1.3']"
+		} else if fipsEnabled {
+			// RabbitMQ 3.x with FIPS: Enable TLS 1.2 and 1.3
 			tlsVersions = "['tlsv1.2','tlsv1.3']"
 		} else {
+			// RabbitMQ 3.x without FIPS: TLS 1.2 only (OSPRH-20331 workaround)
 			tlsVersions = "['tlsv1.2']"
 		}
 		// NOTE(dciabrin) RabbitMQ/Erlang needs a specific TLS configuration ordering
@@ -301,6 +402,26 @@ func ConfigureCluster(
 		settings = append(settings, "ssl_options.verify = verify_none", "prometheus.ssl.ip = ::")
 		// management ssl ip needs to be set in the AdvancedConfig
 	}
+
+	// Configure node-wide default queue type and migration settings (RabbitMQ 4.2+ only)
+	// These configuration options are only available in RabbitMQ 4.2 and later
+	// https://www.rabbitmq.com/docs/vhosts#node-wide-default-queue-type-node-wide-dqt
+	// https://www.rabbitmq.com/docs/vhosts#migration-to-quorum-queues-a-way-to-relax-queue-property-equivalence-checks
+	if queueType != nil && *queueType == "Quorum" && len(rabbitmqVersion) > 0 && rabbitmqVersion[0] >= '4' {
+		settings = append(settings,
+			// Set default queue type to quorum - all newly declared queues will be quorum type
+			// This prevents services from accidentally creating classic queues
+			"default_queue_type = quorum",
+			// Disable classic queue mirroring to prevent accidental creation of mirrored queues
+			// Mirrored queues are deprecated in RabbitMQ 4.2+
+			"deprecated_features.permit.classic_queue_mirroring = false",
+			// Relax queue property equivalence checks on redeclaration
+			// This prevents channel exceptions when services redeclare queues after migration
+			// from classic/mirrored to quorum queues with different properties
+			"quorum_queue.property_equivalence.relaxed_checks_on_redeclaration = true",
+		)
+	}
+
 	additionalDefaults := strings.Join(settings, "\n")
 
 	// If additionalConfig is empty set let's our defaults, append otherwise.

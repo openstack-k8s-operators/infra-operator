@@ -18,6 +18,9 @@ package v1beta1
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
 	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
@@ -48,6 +51,22 @@ func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 	rabbitmqlog.Info("RabbitMq defaults initialized", "defaults", defaults)
 }
 
+// parseVersionMajor extracts the major version number from a version string
+// Returns the major version and an error if parsing fails
+func parseVersionMajor(version string) (int, error) {
+	parts := strings.Split(version, ".")
+	if len(parts) < 1 {
+		return 0, fmt.Errorf("invalid version format: %s", version)
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, fmt.Errorf("invalid major version: %s", parts[0])
+	}
+
+	return major, nil
+}
+
 // Default sets default values for the RabbitMq using the provided Kubernetes client
 // to check if the cluster already exists
 func (r *RabbitMq) Default(k8sClient client.Client) {
@@ -68,9 +87,55 @@ func (r *RabbitMq) Default(k8sClient client.Client) {
 			panic("cannot determine if RabbitMq resource is new or existing due to API error")
 		}
 
-		if err == nil && existingRabbitMq.Spec.QueueType != nil && *existingRabbitMq.Spec.QueueType != "" {
-			r.Spec.QueueType = existingRabbitMq.Spec.QueueType
-			rabbitmqlog.Info("preserving QueueType from existing CR", "name", r.Name, "queueType", *r.Spec.QueueType)
+		if err == nil && existingRabbitMq.Spec.QueueType != nil {
+			// Check if we should override Mirrored to Quorum on RabbitMQ 4.2+
+			// Only override if the queueType is NOT being explicitly CHANGED to Mirrored
+			shouldOverride := false
+			if *existingRabbitMq.Spec.QueueType == "Mirrored" {
+				// Kubernetes fills in all spec fields during updates, so we need to detect
+				// if the user is explicitly CHANGING to Mirrored (from something else)
+				// vs just preserving the existing Mirrored value
+				userChangingToMirrored := r.Spec.QueueType != nil &&
+					*r.Spec.QueueType == "Mirrored" &&
+					*existingRabbitMq.Spec.QueueType != "Mirrored"
+
+				if !userChangingToMirrored {
+					// User is not explicitly changing TO Mirrored, so we can auto-override
+					// Check the target version (annotation) to see if upgrading to 4.2+
+					if r.Annotations != nil {
+						if targetVersion, hasTarget := r.Annotations[AnnotationTargetVersion]; hasTarget {
+							// Parse version to check if major version is 4 or higher
+							majorVersion, err := parseVersionMajor(targetVersion)
+							if err == nil && majorVersion >= 4 {
+								shouldOverride = true
+								queueType := "Quorum"
+								r.Spec.QueueType = &queueType
+								rabbitmqlog.Info("overriding Mirrored to Quorum on RabbitMQ 4.2+",
+									"name", r.Name,
+									"targetVersion", targetVersion,
+									"queueType", "Quorum")
+							}
+						}
+					}
+				}
+			}
+
+			// Only preserve existing queueType if we didn't override above
+			if !shouldOverride {
+				// Preserve existing queueType if the incoming request doesn't specify one
+				// This allows operators to explicitly change the queueType for migration purposes
+				if r.Spec.QueueType == nil || *r.Spec.QueueType == "" {
+					r.Spec.QueueType = existingRabbitMq.Spec.QueueType
+					rabbitmqlog.Info("preserving QueueType from existing CR", "name", r.Name, "queueType", *r.Spec.QueueType)
+				} else if *r.Spec.QueueType != *existingRabbitMq.Spec.QueueType {
+					// User is explicitly changing queueType - allow it to proceed to validation
+					rabbitmqlog.Info("allowing queueType change",
+						"name", r.Name,
+						"oldQueueType", *existingRabbitMq.Spec.QueueType,
+						"newQueueType", *r.Spec.QueueType)
+				}
+			}
+
 			isNew = false
 		} else {
 			// Check if RabbitMQCluster exists (upgrade scenario: cluster exists but CR is new)
@@ -93,6 +158,16 @@ func (r *RabbitMq) Default(k8sClient client.Client) {
 	}
 
 	r.Spec.Default(isNew)
+
+	// For updates (isNew == false), also apply version-aware defaults
+	// This handles cases where existing CRs don't have queueType set
+	if !isNew {
+		if r.Annotations != nil {
+			if targetVersion, hasTarget := r.Annotations[AnnotationTargetVersion]; hasTarget {
+				r.Spec.RabbitMqSpecCore.DefaultForUpdate(targetVersion)
+			}
+		}
+	}
 }
 
 // Default - set defaults for this RabbitMq spec
@@ -105,7 +180,30 @@ func (spec *RabbitMqSpec) Default(isNew bool) {
 
 // Default - set defaults for this RabbitMqSpecCore
 func (spec *RabbitMqSpecCore) Default(isNew bool) {
+	// Default QueueType for new instances
 	if isNew && (spec.QueueType == nil || *spec.QueueType == "") {
+		queueType := "Quorum"
+		spec.QueueType = &queueType
+	}
+}
+
+// DefaultForUpdate - set defaults for RabbitMqSpecCore during updates
+// This is called when updating existing CRs
+// For RabbitMQ 4.2+, we enforce Quorum queues (override Mirrored if present)
+func (spec *RabbitMqSpecCore) DefaultForUpdate(targetVersion string) {
+	if targetVersion == "" {
+		return
+	}
+
+	majorVersion, err := parseVersionMajor(targetVersion)
+	if err != nil || majorVersion < 4 {
+		return
+	}
+
+	// For RabbitMQ 4.2+:
+	// 1. If queueType is not set, default to Quorum
+	// 2. If queueType is Mirrored, override to Quorum (mirrored queues removed in 4.2)
+	if spec.QueueType == nil || *spec.QueueType == "" || *spec.QueueType == "Mirrored" {
 		queueType := "Quorum"
 		spec.QueueType = &queueType
 	}
@@ -149,7 +247,7 @@ func (r *RabbitMq) ValidateCreate() (admission.Warnings, error) {
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) {
+func (r *RabbitMq) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 	rabbitmqlog.Info("validate update", "name", r.Name)
 
 	var allErrs field.ErrorList
@@ -166,6 +264,50 @@ func (r *RabbitMq) ValidateUpdate(_ runtime.Object) (admission.Warnings, error) 
 
 	// Validate QueueType if specified
 	allErrs = append(allErrs, r.Spec.ValidateQueueType(basePath)...)
+
+	// Note: We don't block queueType: Mirrored on RabbitMQ 4.x here because:
+	// 1. Default() function automatically overrides Mirrored → Quorum when target-version is 4.2+
+	// 2. DefaultForUpdate() handles cases where queueType is not explicitly set
+	// 3. Controller also enforces Quorum queues on RabbitMQ 4.x upgrades
+	// 4. RabbitMQ server will reject mirrored queues on 4.2+ if they somehow get through
+	oldRabbitMq := old.(*RabbitMq)
+
+	// Block migrating TO Quorum on RabbitMQ 3.x (no server-side enforcement available)
+	// Allow creating new clusters with Quorum on 3.x, only block migrations
+	// UNLESS there's a concurrent version upgrade to 4.x (which will wipe storage)
+	if r.Spec.QueueType != nil && *r.Spec.QueueType == "Quorum" {
+		// Check if queueType is being changed TO Quorum (wasn't Quorum before)
+		queueTypeChanged := oldRabbitMq.Spec.QueueType != nil && *oldRabbitMq.Spec.QueueType != "Quorum"
+
+		if queueTypeChanged {
+			// Check current running version from Status (controller-managed)
+			currentVersion := oldRabbitMq.Status.CurrentVersion
+			if currentVersion != "" {
+				// Parse version - if major version is 3.x, check if upgrading
+				majorVersion, err := parseVersionMajor(currentVersion)
+				if err == nil && majorVersion == 3 {
+					// Check if there's a concurrent version upgrade to 4.x via annotation
+					isUpgradingTo4x := false
+					if r.Annotations != nil {
+						if targetVersion, hasTarget := r.Annotations[AnnotationTargetVersion]; hasTarget {
+							targetMajor, err := parseVersionMajor(targetVersion)
+							if err == nil && targetMajor >= 4 {
+								isUpgradingTo4x = true
+							}
+						}
+					}
+
+					// Only block if NOT upgrading to 4.x
+					if !isUpgradingTo4x {
+						allErrs = append(allErrs, field.Forbidden(
+							basePath.Child("queueType"),
+							"Migrating to Quorum queues on RabbitMQ 3.x is not supported due to lack of server-side enforcement. "+
+								"Upgrade to RabbitMQ 4.x first to enable automatic Quorum queue migration."))
+					}
+				}
+			}
+		}
+	}
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(

@@ -40,6 +40,28 @@ func (r *RabbitMqCluster) CreateOrPatch(
 	}
 
 	op, err := controllerutil.CreateOrPatch(ctx, h.GetClient(), rabbitmq, func() error {
+		// Sync annotations to match desired state (add new ones, remove unwanted ones)
+		// This ensures temporary annotations like storage-wipe-needed are removed when no longer needed
+		if r.rabbitmqCluster.Annotations != nil {
+			if rabbitmq.Annotations == nil {
+				rabbitmq.Annotations = make(map[string]string)
+			}
+			// Add/update annotations from desired spec
+			for k, v := range r.rabbitmqCluster.Annotations {
+				rabbitmq.Annotations[k] = v
+			}
+		}
+		// Remove annotations that exist on the cluster but not in desired spec
+		if rabbitmq.Annotations != nil {
+			for k := range rabbitmq.Annotations {
+				// Check if this annotation is in the desired spec
+				_, existsInDesired := r.rabbitmqCluster.Annotations[k]
+				if !existsInDesired {
+					delete(rabbitmq.Annotations, k)
+				}
+			}
+		}
+
 		rabbitmq.Spec.Image = r.rabbitmqCluster.Spec.Image
 		rabbitmq.Spec.Replicas = r.rabbitmqCluster.Spec.Replicas
 		rabbitmq.Spec.Tolerations = r.rabbitmqCluster.Spec.Tolerations

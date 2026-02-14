@@ -1940,6 +1940,12 @@ spec:
                   - type
                   type: object
                 type: array
+              currentVersion:
+                description: |-
+                  CurrentVersion - the currently deployed RabbitMQ version (e.g., "3.9", "4.2")
+                  This is controller-managed and reflects the actual running version.
+                  openstack-operator should use the "rabbitmq.openstack.org/target-version" annotation to request version changes.
+                type: string
               lastAppliedTopology:
                 description: LastAppliedTopology - the last applied Topology
                 properties:
@@ -1975,6 +1981,16 @@ spec:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
+              upgradePhase:
+                description: |-
+                  UpgradePhase - tracks the current phase of a version upgrade or migration
+                  Valid values:
+                    "" (no upgrade in progress)
+                    "DeletingResources" (deleting cluster and ha-all policy)
+                    "WaitingForPods" (waiting for pods to terminate after cluster deletion)
+                    "WaitingForCluster" (pods terminated, waiting for new cluster creation)
+                  This allows resuming upgrades that failed midway.
+                type: string
             type: object
         type: object
     served: true
