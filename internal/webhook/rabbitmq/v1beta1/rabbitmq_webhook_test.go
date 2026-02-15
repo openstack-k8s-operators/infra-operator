@@ -225,4 +225,82 @@ var _ = Describe("RabbitMq webhook", func() {
 			Expect(*freshRabbitMq.Spec.QueueType).To(Equal("Quorum"), "QueueType should be preserved from existing CR")
 		})
 	})
+
+	Context("Validation method", func() {
+		It("should block migrating to Quorum on RabbitMQ 3.x", func() {
+			// Create existing RabbitMq with Mirrored queue type on 3.x
+			existingRabbitMq := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-rabbitmq",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{
+						QueueType: ptr.To("Mirrored"),
+					},
+				},
+				Status: rabbitmqv1beta1.RabbitMqStatus{
+					CurrentVersion: "3.13",
+				},
+			}
+
+			// Try to update to Quorum without upgrading to 4.x
+			updatedRabbitMq := existingRabbitMq.DeepCopy()
+			updatedRabbitMq.Spec.QueueType = ptr.To("Quorum")
+
+			warnings, err := updatedRabbitMq.ValidateUpdate(existingRabbitMq)
+			Expect(warnings).To(BeEmpty())
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Migrating to Quorum queues on RabbitMQ 3.x is not supported"))
+		})
+
+		It("should allow migrating to Quorum on RabbitMQ 4.x", func() {
+			// Create existing RabbitMq with Mirrored queue type on 4.x
+			existingRabbitMq := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-rabbitmq",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{
+						QueueType: ptr.To("Mirrored"),
+					},
+				},
+				Status: rabbitmqv1beta1.RabbitMqStatus{
+					CurrentVersion: "4.2",
+				},
+			}
+
+			// Try to update to Quorum - should be allowed on 4.x
+			updatedRabbitMq := existingRabbitMq.DeepCopy()
+			updatedRabbitMq.Spec.QueueType = ptr.To("Quorum")
+
+			warnings, err := updatedRabbitMq.ValidateUpdate(existingRabbitMq)
+			Expect(warnings).To(BeEmpty())
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should allow creating new cluster with Quorum on RabbitMQ 3.x", func() {
+			// Create new RabbitMq with Quorum queue type on 3.x (not a migration)
+			newRabbitMq := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-rabbitmq",
+					Namespace: "default",
+					Annotations: map[string]string{
+						rabbitmqv1beta1.AnnotationTargetVersion: "3.13",
+					},
+				},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{
+						QueueType: ptr.To("Quorum"),
+					},
+				},
+			}
+
+			// ValidateCreate should allow it
+			warnings, err := newRabbitMq.ValidateCreate()
+			Expect(warnings).To(BeEmpty())
+			Expect(err).ToNot(HaveOccurred())
+		})
+	})
 })

@@ -583,6 +583,13 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
+	// Get RabbitMq CR early to determine queue type for vhost selection
+	rabbitmqCR := &rabbitmqv1.RabbitMq{}
+	rabbitmqCRErr := r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitmqCR)
+	if rabbitmqCRErr != nil {
+		Log.Info(fmt.Sprintf("Could not fetch RabbitMQ CR: %v", rabbitmqCRErr))
+	}
+
 	// Determine credentials and vhost
 	var finalUsername, finalPassword, vhostName string
 	var userRef, vhostRef string
@@ -590,7 +597,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	if instance.Spec.UserRef != "" {
 		userRef = instance.Spec.UserRef
 	} else if instance.Spec.Username != "" {
-		// Create RabbitMQVhost if needed
+		// Determine vhost
 		vhostName = instance.Spec.Vhost
 		if vhostName == "" {
 			vhostName = "/"
@@ -761,13 +768,9 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	tlsEnabled := rabbit.Spec.TLS.SecretName != ""
 	Log.Info(fmt.Sprintf("rabbitmq cluster %s has TLS enabled: %t", rabbit.Name, tlsEnabled))
 
-	// Get RabbitMq CR for both secret generation and status update
-	rabbitmqCR := &rabbitmqv1.RabbitMq{}
-	err = r.Get(ctx, types.NamespacedName{Name: instance.Spec.RabbitmqClusterName, Namespace: instance.Namespace}, rabbitmqCR)
-
 	// Build list of hosts - use ServiceHostnames from status if available, otherwise use host from secret
 	var hosts []string
-	if err == nil && len(rabbitmqCR.Status.ServiceHostnames) > 0 {
+	if rabbitmqCRErr == nil && len(rabbitmqCR.Status.ServiceHostnames) > 0 {
 		hosts = rabbitmqCR.Status.ServiceHostnames
 		Log.Info(fmt.Sprintf("Using per-pod service hostnames: %v", hosts))
 	} else {
@@ -788,14 +791,27 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// Determine quorum setting for secret generation
 	quorum := false
-	if err != nil {
-		Log.Info(fmt.Sprintf("Could not fetch RabbitMQ CR: %v", err))
+	if rabbitmqCRErr != nil {
+		Log.Info(fmt.Sprintf("Could not fetch RabbitMQ CR: %v", rabbitmqCRErr))
 		// Default to false for quorum if we can't fetch the CR
 	} else {
 		Log.Info(fmt.Sprintf("Found RabbitMQ CR: %s", rabbitmqCR.Name))
 
-		quorum = rabbitmqCR.Status.QueueType == rabbitmqv1.QueueTypeQuorum
-		Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType", quorum))
+		// Determine quorum setting - prefer Spec over Status
+		// Spec represents the configured queue type and is set immediately when the CR is created,
+		// while Status.QueueType is updated asynchronously after cluster initialization.
+		// This prevents a race condition where TransportURL reconciles before Status.QueueType is set
+		// after a RabbitMQ upgrade/recreation (e.g., during 3.9 -> 4.2 upgrade with storage wipe).
+		if rabbitmqCR.Spec.QueueType != nil {
+			quorum = *rabbitmqCR.Spec.QueueType == rabbitmqv1.QueueTypeQuorum
+			Log.Info(fmt.Sprintf("Setting quorum to: %t based on spec QueueType", quorum))
+		} else if rabbitmqCR.Status.QueueType != "" {
+			quorum = rabbitmqCR.Status.QueueType == rabbitmqv1.QueueTypeQuorum
+			Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType (spec not set)", quorum))
+		} else {
+			// Default to false if neither is set
+			Log.Info("Setting quorum to: false (neither spec nor status QueueType set)")
+		}
 
 		// Update QueueType and add annotation to signal change
 		if rabbitmqCR.Status.QueueType != instance.Status.QueueType {
