@@ -961,6 +961,185 @@ var _ = Describe("RabbitMQ Controller", func() {
 					g.Expect(foundWipeContainer).To(BeTrue(), "wipe-data init container should remain present to avoid pod restarts")
 				}, "5s", interval).Should(Succeed())
 			})
+
+			It("should preserve default user credentials during storage wipe", func() {
+				// Create initial default user secret before triggering storage wipe
+				var cluster *rabbitmqclusterv2.RabbitmqCluster
+				Eventually(func(g Gomega) {
+					cluster = &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, cluster)
+					g.Expect(err).ToNot(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+
+				// Create the default user secret
+				secretName := types.NamespacedName{
+					Name:      rabbitmqName.Name + "-default-user",
+					Namespace: rabbitmqName.Namespace,
+				}
+				CreateOrUpdateRabbitMQClusterSecret(secretName, cluster)
+
+				// Capture the original secret credentials
+				var originalSecret corev1.Secret
+				Eventually(func(g Gomega) {
+					secret := &corev1.Secret{}
+					err := k8sClient.Get(ctx, secretName, secret)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(secret.Data["username"]).ToNot(BeEmpty())
+					g.Expect(secret.Data["password"]).ToNot(BeEmpty())
+					originalSecret = *secret
+				}, timeout, interval).Should(Succeed())
+
+				// Trigger storage wipe by upgrading from 3.9 to 4.2
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "4.2"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for storage wipe to reach WaitingForCluster phase
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.UpgradePhase).To(Equal("WaitingForCluster"),
+						"should reach WaitingForCluster after cluster deletion")
+				}, timeout*2, interval).Should(Succeed())
+
+				// Verify backup secret was created with original credentials
+				Eventually(func(g Gomega) {
+					backupSecret := &corev1.Secret{}
+					backupSecretName := types.NamespacedName{
+						Name:      rabbitmqName.Name + "-default-user-backup",
+						Namespace: rabbitmqName.Namespace,
+					}
+					err := k8sClient.Get(ctx, backupSecretName, backupSecret)
+					g.Expect(err).ToNot(HaveOccurred(), "backup secret should exist during storage wipe")
+					g.Expect(backupSecret.Data["username"]).To(Equal(originalSecret.Data["username"]))
+					g.Expect(backupSecret.Data["password"]).To(Equal(originalSecret.Data["password"]))
+				}, timeout, interval).Should(Succeed())
+
+				// Simulate the new cluster as ready
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Wait for upgrade to complete
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.2"),
+						"CurrentVersion should be updated to 4.2 after successful upgrade")
+					g.Expect(instance.Status.UpgradePhase).To(BeEmpty(),
+						"UpgradePhase should be cleared after upgrade completes")
+				}, timeout*2, interval).Should(Succeed())
+
+				// Verify a preserved RabbitMQUser was created with original credentials
+				Eventually(func(g Gomega) {
+					preservedUser := &rabbitmqv1.RabbitMQUser{}
+					preservedUserName := types.NamespacedName{
+						Name:      rabbitmqName.Name + "-default-user-preserved",
+						Namespace: rabbitmqName.Namespace,
+					}
+					err := k8sClient.Get(ctx, preservedUserName, preservedUser)
+					g.Expect(err).ToNot(HaveOccurred(), "preserved user should exist after storage wipe")
+
+					// Verify it uses the original username and references the backup secret
+					g.Expect(preservedUser.Spec.Username).To(Equal(string(originalSecret.Data["username"])),
+						"preserved user should have original username")
+					g.Expect(*preservedUser.Spec.Secret).To(Equal(rabbitmqName.Name+"-default-user-backup"),
+						"preserved user should reference backup secret")
+					g.Expect(preservedUser.Spec.Tags).To(ContainElement("administrator"),
+						"preserved user should have administrator tag")
+				}, timeout, interval).Should(Succeed())
+
+				// Verify backup secret still exists (needed by RabbitMQUser)
+				Eventually(func(g Gomega) {
+					backupSecret := &corev1.Secret{}
+					backupSecretName := types.NamespacedName{
+						Name:      rabbitmqName.Name + "-default-user-backup",
+						Namespace: rabbitmqName.Namespace,
+					}
+					err := k8sClient.Get(ctx, backupSecretName, backupSecret)
+					g.Expect(err).ToNot(HaveOccurred(), "backup secret should still exist for RabbitMQUser to reference")
+					g.Expect(backupSecret.Data["username"]).To(Equal(originalSecret.Data["username"]))
+					g.Expect(backupSecret.Data["password"]).To(Equal(originalSecret.Data["password"]))
+				}, timeout, interval).Should(Succeed())
+			})
+
+			It("should preserve default user secret credentials during upgrade", func() {
+				// Wait for initial cluster to be created
+				var cluster *rabbitmqclusterv2.RabbitmqCluster
+				Eventually(func(g Gomega) {
+					cluster = &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, cluster)
+					g.Expect(err).ToNot(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+
+				// Create the default user secret WITHOUT marking the cluster as ready yet
+				// This simulates that the secret exists from the initial deployment
+				secretName := types.NamespacedName{
+					Name:      rabbitmqName.Name + "-default-user",
+					Namespace: rabbitmqName.Namespace,
+				}
+				CreateOrUpdateRabbitMQClusterSecret(secretName, cluster)
+
+				// Capture the original secret credentials
+				var originalSecret corev1.Secret
+				Eventually(func(g Gomega) {
+					secret := &corev1.Secret{}
+					err := k8sClient.Get(ctx, secretName, secret)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(secret.Data["username"]).ToNot(BeEmpty())
+					g.Expect(secret.Data["password"]).ToNot(BeEmpty())
+					originalSecret = *secret
+				}, timeout, interval).Should(Succeed())
+
+				// NOW trigger upgrade from 3.9 to 4.2 (will delete pods, not cluster)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					if instance.Annotations == nil {
+						instance.Annotations = make(map[string]string)
+					}
+					instance.Annotations["rabbitmq.openstack.org/target-version"] = "4.2"
+					g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+				}, timeout, interval).Should(Succeed())
+
+				// Wait for upgrade to reach WaitingForCluster phase (pods deleted)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.UpgradePhase).To(Equal("WaitingForCluster"), "should reach WaitingForCluster after pods are deleted")
+				}, timeout*2, interval).Should(Succeed())
+
+				// Simulate pods coming back up (cluster becomes ready again)
+				SimulateRabbitMQClusterReady(rabbitmqName)
+
+				// Wait for the upgrade to complete (CurrentVersion updated, UpgradePhase cleared)
+				Eventually(func(g Gomega) {
+					instance := GetRabbitMQ(rabbitmqName)
+					g.Expect(instance.Status.CurrentVersion).To(Equal("4.2"), "CurrentVersion should be updated to 4.2")
+					g.Expect(instance.Status.UpgradePhase).To(BeEmpty(), "UpgradePhase should be cleared after completion")
+				}, timeout*2, interval).Should(Succeed())
+
+				// Verify the RabbitMQCluster still exists (we only deleted pods, not the cluster)
+				Eventually(func(g Gomega) {
+					cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+					err := k8sClient.Get(ctx, rabbitmqName, cluster)
+					g.Expect(err).ToNot(HaveOccurred(), "RabbitMQCluster should still exist - we only delete pods")
+				}, timeout, interval).Should(Succeed())
+
+				// Verify the default user secret still exists and credentials are unchanged
+				Eventually(func(g Gomega) {
+					secret := &corev1.Secret{}
+					secretName := types.NamespacedName{
+						Name:      rabbitmqName.Name + "-default-user",
+						Namespace: rabbitmqName.Namespace,
+					}
+					err := k8sClient.Get(ctx, secretName, secret)
+					g.Expect(err).ToNot(HaveOccurred(), "secret should exist - it was never deleted")
+
+					// Credentials must be identical - secret was never deleted/recreated
+					g.Expect(secret.Data["username"]).To(Equal(originalSecret.Data["username"]), "username must remain stable for external consumers")
+					g.Expect(secret.Data["password"]).To(Equal(originalSecret.Data["password"]), "password must remain stable for external consumers")
+				}, timeout, interval).Should(Succeed())
+			})
 		})
 
 		When("RabbitMQ patch version changes (3.9.0 to 3.9.1)", func() {
@@ -1099,40 +1278,25 @@ var _ = Describe("RabbitMQ Controller", func() {
 						"CurrentVersion should be initialized to 3.9 when existing cluster is detected")
 				}, timeout, interval).Should(Succeed())
 
-				// Step 4: Verify storage wipe is triggered (UpgradePhase set)
-				// Accept "DeletingResources", "WaitingForPods", or "WaitingForCluster"
+				// Step 4: Wait for storage wipe to reach WaitingForCluster phase
+				// This ensures pods have been deleted and the cluster is waiting for readiness
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
-					g.Expect(instance.Status.UpgradePhase).To(Or(
-						Equal("DeletingResources"),
-						Equal("WaitingForPods"),
-						Equal("WaitingForCluster")),
-						"Storage wipe should be in progress or completed for 3.9 -> 4.2 upgrade")
-				}, timeout, interval).Should(Succeed())
-
-				// Step 5: Wait for cluster to be deleted and recreated as part of storage wipe
-				// Note: Due to fast reconciliation, we might not observe the "not found" state
-				// The cluster may already be recreated by the time we check
-
-				// Step 6: Wait for storage wipe to complete and cluster to be recreated
-				Eventually(func(g Gomega) {
-					newCluster := &rabbitmqclusterv2.RabbitmqCluster{}
-					err := k8sClient.Get(ctx, rabbitmqName, newCluster)
-					g.Expect(err).ToNot(HaveOccurred())
-					g.Expect(newCluster.Generation).To(BeNumerically(">", 0))
+					g.Expect(instance.Status.UpgradePhase).To(Equal("WaitingForCluster"),
+						"Storage wipe should reach WaitingForCluster phase for 3.9 -> 4.2 upgrade")
 				}, timeout*2, interval).Should(Succeed())
 
-				// Step 7: Simulate the new cluster as ready
+				// Step 5: Simulate the new cluster as ready (pods came back up)
 				SimulateRabbitMQClusterReady(rabbitmqName)
 
-				// Step 8: Verify CurrentVersion is updated to "4.2" after upgrade completes
+				// Step 6: Verify CurrentVersion is updated to "4.2" after upgrade completes
 				Eventually(func(g Gomega) {
 					instance := GetRabbitMQ(rabbitmqName)
 					g.Expect(instance.Status.CurrentVersion).To(Equal("4.2"),
 						"CurrentVersion should be updated to 4.2 after successful upgrade")
 					g.Expect(instance.Status.UpgradePhase).To(BeEmpty(),
 						"UpgradePhase should be cleared after upgrade completes")
-				}, timeout, interval).Should(Succeed())
+				}, timeout*2, interval).Should(Succeed())
 			})
 		})
 	})
