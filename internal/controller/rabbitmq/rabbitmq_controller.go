@@ -612,11 +612,52 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return ctrl.Result{Requeue: true}, nil
 		}
 
-		// Phase: DeletingResources - Delete cluster and ha-all policy once
+		// Phase: DeletingResources - Backup default user secret, then delete cluster
 		if instance.Status.UpgradePhase == "DeletingResources" {
-			Log.Info("Deleting RabbitMQ cluster and resources for storage wipe", "reason", wipeReason)
+			Log.Info("Backing up default user credentials and deleting RabbitMQ cluster for storage wipe", "reason", wipeReason)
 
-			// Create the RabbitMQ cluster wrapper for deletion
+			// Step 1: Back up the default user secret before deleting the cluster
+			defaultUserSecretName := instance.Name + "-default-user"
+			defaultUserSecret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      defaultUserSecretName,
+				Namespace: instance.Namespace,
+			}, defaultUserSecret); err != nil {
+				if !k8s_errors.IsNotFound(err) {
+					Log.Error(err, "Failed to get default user secret for backup")
+					return ctrl.Result{}, err
+				}
+				Log.Info("Default user secret not found, skipping backup")
+			} else {
+				// Create a backup secret with the credentials
+				// This secret will be owned by the RabbitMq CR (not the cluster), so it survives cluster deletion
+				backupSecretName := instance.Name + "-default-user-backup"
+				backupSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      backupSecretName,
+						Namespace: instance.Namespace,
+					},
+				}
+
+				_, err = controllerutil.CreateOrUpdate(ctx, r.Client, backupSecret, func() error {
+					// Copy the credentials
+					if backupSecret.Data == nil {
+						backupSecret.Data = make(map[string][]byte)
+					}
+					backupSecret.Data["username"] = defaultUserSecret.Data["username"]
+					backupSecret.Data["password"] = defaultUserSecret.Data["password"]
+
+					// Set owner reference to RabbitMq CR (not cluster) so it survives cluster deletion
+					return controllerutil.SetControllerReference(instance, backupSecret, r.Scheme)
+				})
+				if err != nil {
+					Log.Error(err, "Failed to create backup secret for default user")
+					return ctrl.Result{}, err
+				}
+				Log.Info("Backed up default user credentials", "secret", backupSecretName)
+			}
+
+			// Step 2: Create the RabbitMQ cluster wrapper for deletion
 			rmqCluster := impl.NewRabbitMqCluster(rabbitmqCluster, 5)
 
 			// Delete ha-all policy if needed (for Mirrored queue migrations)
@@ -630,7 +671,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 			}
 
-			// Delete the RabbitMQCluster to trigger pod deletion
+			// Step 3: Delete the RabbitMQCluster (this will cascade delete the default user secret)
 			if err := rmqCluster.Delete(ctx, helper); err != nil && !k8s_errors.IsNotFound(err) {
 				Log.Error(err, "Failed to delete RabbitMQCluster during storage wipe")
 				return ctrl.Result{}, err
@@ -792,6 +833,52 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// If we just completed a storage wipe, update CurrentVersion and clear UpgradePhase
 		// This ensures CurrentVersion reflects the actually deployed version
 		if instance.Status.UpgradePhase == "WaitingForCluster" {
+			// Restore the default user credentials using RabbitMQUser CRD
+			// This ensures external consumers can continue using the same credentials
+			backupSecretName := instance.Name + "-default-user-backup"
+			backupSecret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      backupSecretName,
+				Namespace: instance.Namespace,
+			}, backupSecret); err == nil {
+				// Backup exists, create RabbitMQUser to restore the credentials
+				defaultUser := &rabbitmqv1beta1.RabbitMQUser{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      instance.Name + "-default-user",
+						Namespace: instance.Namespace,
+					},
+				}
+
+				_, err = controllerutil.CreateOrUpdate(ctx, r.Client, defaultUser, func() error {
+					// Configure the user to use the backed-up credentials
+					defaultUser.Spec.RabbitmqClusterName = instance.Name
+					// Use the actual username from the backup secret
+					defaultUser.Spec.Username = string(backupSecret.Data["username"])
+					defaultUser.Spec.Secret = &backupSecretName
+					defaultUser.Spec.Tags = []string{"administrator"}
+					defaultUser.Spec.Permissions = rabbitmqv1beta1.RabbitMQUserPermissions{
+						Configure: ".*",
+						Write:     ".*",
+						Read:      ".*",
+					}
+
+					// Set owner reference to RabbitMq CR (not cluster) so it survives cluster deletions
+					return controllerutil.SetControllerReference(instance, defaultUser, r.Scheme)
+				})
+				if err != nil {
+					Log.Error(err, "Failed to create/update default user after storage wipe")
+					return ctrl.Result{}, err
+				}
+				Log.Info("Restored default user credentials after storage wipe", "secret", backupSecretName)
+
+				// Note: We do NOT delete the backup secret - the RabbitMQUser controller needs it
+				// to read the credentials. The backup secret is owned by the RabbitMq CR,
+				// so it will be automatically cleaned up when the RabbitMq CR is deleted.
+			} else if !k8s_errors.IsNotFound(err) {
+				Log.Error(err, "Failed to get backup secret for default user restoration")
+				return ctrl.Result{}, err
+			}
+
 			// Always clear UpgradePhase when cluster is ready
 			instance.Status.UpgradePhase = ""
 
