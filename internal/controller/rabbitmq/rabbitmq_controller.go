@@ -846,6 +846,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Add AMQP proxy sidecar if needed for upgrade or queue migration
 	// Proxy allows non-durable clients to work with durable quorum queues
 	if r.shouldEnableProxy(instance) {
+		// IMPORTANT: Configure TLS for inter-node only
+		// We keep TLS enabled for secure inter-node communication, but allow non-TLS AMQP listeners
+		// The proxy will handle client TLS termination instead of RabbitMQ
+		// Set DisableNonTLSListeners=false AFTER ConfigureCluster() so it doesn't get overridden
+		rabbitmqCluster.Spec.TLS.DisableNonTLSListeners = false
+		Log.Info("Proxy enabled - configured TLS for inter-node only (proxy will handle client TLS)")
+
 		// Create ConfigMap with proxy script
 		if err := r.ensureProxyConfigMap(ctx, instance, helper); err != nil {
 			Log.Error(err, "Failed to create proxy ConfigMap")

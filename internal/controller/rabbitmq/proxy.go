@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"strings"
 
 	instancehav1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
@@ -109,6 +110,43 @@ func (r *Reconciler) addProxySidecar(
 	// Add proxy sidecar container
 	podSpec.Containers = append(podSpec.Containers, r.buildProxySidecarContainer(instance))
 
+	// Update RabbitMQ container's readiness probe and ports to match backend configuration
+	// The RabbitMQ cluster operator sets a probe on port 5671 and exposes ports by default,
+	// but with the proxy enabled, RabbitMQ only listens on localhost:5673
+	for i, container := range podSpec.Containers {
+		if container.Name == "rabbitmq" {
+			// Override the readiness probe to check the backend port
+			// Note: We use an exec probe instead of TCPSocket because RabbitMQ listens on 127.0.0.1 only,
+			// and TCPSocket probes run from the kubelet (node context), not the pod network namespace.
+			// The exec probe runs inside the container where 127.0.0.1 refers to the pod's localhost.
+			podSpec.Containers[i].ReadinessProbe = &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/sh",
+							"-c",
+							fmt.Sprintf("timeout 1 bash -c '</dev/tcp/127.0.0.1/%d'", rabbitmqBackendPort),
+						},
+					},
+				},
+				InitialDelaySeconds: 10,
+				TimeoutSeconds:      5,
+				PeriodSeconds:       10,
+				SuccessThreshold:    1,
+				FailureThreshold:    3,
+			}
+
+			// Note: We don't override container ports here because:
+			// 1. Ports are just metadata declarations, not actual network configuration
+			// 2. What RabbitMQ actually listens on is controlled by our listener config
+			// 3. Overriding ports can cause conflicts with cluster operator defaults
+
+			Log.Info("Updated RabbitMQ container readiness probe for proxy mode",
+				"readinessProbePort", rabbitmqBackendPort)
+			break
+		}
+	}
+
 	// Add volume for proxy script
 	if podSpec.Volumes == nil {
 		podSpec.Volumes = []corev1.Volume{}
@@ -136,6 +174,10 @@ func (r *Reconciler) addProxySidecar(
 			},
 		})
 	}
+
+	// Note: rabbitmq-tls volume is automatically added by the cluster operator when
+	// cluster.Spec.TLS.SecretName is set (which we keep for inter-node TLS).
+	// The proxy container will mount this volume via buildProxySidecarContainer().
 
 	// Add rabbitmq-tls-ca volume if CA is in a separate secret
 	if instance.Spec.TLS.CaSecretName != "" && instance.Spec.TLS.CaSecretName != instance.Spec.TLS.SecretName {
@@ -317,10 +359,23 @@ func (r *Reconciler) removeProxySidecar(cluster *rabbitmqv2.RabbitmqCluster) {
 	}
 	podSpec.Containers = newContainers
 
-	// Remove proxy-script volume
+	// Restore RabbitMQ container's readiness probe to default
+	// When proxy is removed, RabbitMQ listens on standard ports again
+	// Setting probe to nil allows the cluster operator to restore its default
+	if removed {
+		for i, container := range podSpec.Containers {
+			if container.Name == "rabbitmq" {
+				podSpec.Containers[i].ReadinessProbe = nil
+				Log.Info("Restored RabbitMQ container readiness probe to default")
+				break
+			}
+		}
+	}
+
+	// Remove proxy-script and rabbitmq-tls-ca volumes
 	newVolumes := []corev1.Volume{}
 	for _, vol := range podSpec.Volumes {
-		if vol.Name != "proxy-script" {
+		if vol.Name != "proxy-script" && vol.Name != "rabbitmq-tls-ca" {
 			newVolumes = append(newVolumes, vol)
 		}
 	}
@@ -396,6 +451,8 @@ func (r *Reconciler) configureRabbitMQBackendPort(
 	instance *rabbitmqv1beta1.RabbitMq,
 	cluster *rabbitmqv2.RabbitmqCluster,
 ) {
+	Log := r.GetLogger(context.Background())
+
 	// Determine proxy listen port based on TLS configuration
 	listenPort := proxyListenPortPlain
 	tlsStatus := "without TLS"
@@ -404,22 +461,29 @@ func (r *Reconciler) configureRabbitMQBackendPort(
 		tlsStatus = "with TLS"
 	}
 
-	// Configure RabbitMQ to listen on localhost:5673 without TLS
-	// The proxy will handle TLS termination (if enabled) on 0.0.0.0:5671 or 0.0.0.0:5672
-	additionalConfig := fmt.Sprintf(`
-# Proxy sidecar configuration
-# RabbitMQ listens on localhost:%d without TLS (proxy handles encryption)
-# External clients connect to proxy on port %d %s
-# Disable all default listeners to prevent bypassing the proxy and port conflicts
-listeners.tcp = none
-listeners.ssl = none
-listeners.tcp.1 = 127.0.0.1:%d
-`, rabbitmqBackendPort, listenPort, tlsStatus, rabbitmqBackendPort)
+	// Inject listener configuration into existing AdvancedConfig
+	// The cluster operator already sets up AdvancedConfig with TLS settings
+	// We need to add tcp_listeners and ssl_listeners to the {rabbit, [...]} section
+	advancedConfig := cluster.Spec.Rabbitmq.AdvancedConfig
+	if advancedConfig != "" {
+		// Find the {rabbit, [ section and inject our listener config after ssl_options
+		// We look for the closing ]} of ssl_options and insert our listeners there
+		listenerSettings := fmt.Sprintf(`,
+{tcp_listeners, [{"127.0.0.1", %d}]},
+{ssl_listeners, []}`, rabbitmqBackendPort)
 
-	// Append to existing additional config if any
-	if cluster.Spec.Rabbitmq.AdditionalConfig != "" {
-		cluster.Spec.Rabbitmq.AdditionalConfig += "\n" + additionalConfig
-	} else {
-		cluster.Spec.Rabbitmq.AdditionalConfig = additionalConfig
+		// Insert after the ssl_options section closes
+		// Pattern: find "]}↵]}" which closes ssl_options and rabbit section
+		advancedConfig = strings.Replace(advancedConfig,
+			"]}\n]},",  // End of ssl_options within rabbit section
+			"]}"+listenerSettings+"\n]},",  // Add our listeners
+			1)
+
+		cluster.Spec.Rabbitmq.AdvancedConfig = advancedConfig
 	}
+
+	Log.Info("Configured RabbitMQ backend listener for proxy mode",
+		"backendPort", rabbitmqBackendPort,
+		"proxyPort", listenPort,
+		"tlsStatus", tlsStatus)
 }
