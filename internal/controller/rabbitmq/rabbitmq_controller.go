@@ -813,6 +813,58 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("error configuring RabbitmqCluster: %w", err)
 	}
 
+	// Manage ProxyRequired status flag
+	// Set to true when we detect a 3.x → 4.x upgrade with Quorum migration
+	// Clear when clients-reconfigured annotation is set
+	if instance.Annotations != nil {
+		if configured, ok := instance.Annotations["rabbitmq.openstack.org/clients-reconfigured"]; ok && configured == "true" {
+			// Clients have been reconfigured, clear proxy requirement
+			if instance.Status.ProxyRequired {
+				instance.Status.ProxyRequired = false
+				Log.Info("Clients reconfigured - clearing proxy requirement")
+			}
+		}
+	}
+
+	// Set ProxyRequired if we're in a 3.x → 4.x upgrade with Quorum migration
+	if !instance.Status.ProxyRequired && instance.Status.UpgradePhase != "" {
+		if instance.Spec.QueueType != nil && *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
+			currentVersion := instance.Status.CurrentVersion
+			targetVersion := ""
+			if instance.Annotations != nil {
+				targetVersion = instance.Annotations[rabbitmqv1beta1.AnnotationTargetVersion]
+			}
+			// Only set ProxyRequired if upgrading FROM 3.x TO 4.x
+			if currentVersion != "" && len(currentVersion) >= 2 && currentVersion[:2] == "3." &&
+				targetVersion != "" && len(targetVersion) >= 2 && targetVersion[:2] == "4." {
+				instance.Status.ProxyRequired = true
+				Log.Info("Detected 3.x → 4.x upgrade with Quorum migration - enabling proxy requirement")
+			}
+		}
+	}
+
+	// Add AMQP proxy sidecar if needed for upgrade or queue migration
+	// Proxy allows non-durable clients to work with durable quorum queues
+	if r.shouldEnableProxy(instance) {
+		// Create ConfigMap with proxy script
+		if err := r.ensureProxyConfigMap(ctx, instance, helper); err != nil {
+			Log.Error(err, "Failed to create proxy ConfigMap")
+			return ctrl.Result{}, err
+		}
+
+		// Add proxy sidecar container
+		r.addProxySidecar(ctx, instance, rabbitmqCluster)
+
+		// Configure RabbitMQ to listen on backend port (localhost:5673)
+		// Proxy will listen on standard port (0.0.0.0:5672) with TLS
+		r.configureRabbitMQBackendPort(instance, rabbitmqCluster)
+
+		Log.Info("Proxy sidecar enabled for upgrade/migration")
+	} else {
+		// Remove proxy sidecar if it exists but is no longer needed
+		r.removeProxySidecar(rabbitmqCluster)
+	}
+
 	rabbitmqImplCluster := impl.NewRabbitMqCluster(rabbitmqCluster, 5)
 	rmqres, rmqerr := rabbitmqImplCluster.CreateOrPatch(ctx, helper)
 	if rmqerr != nil {

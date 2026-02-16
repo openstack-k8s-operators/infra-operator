@@ -151,6 +151,12 @@ type RabbitMqStatus struct {
 	//   "WaitingForCluster" (pods terminated, waiting for new cluster creation)
 	// This allows resuming upgrades that failed midway.
 	UpgradePhase string `json:"upgradePhase,omitempty"`
+
+	// ProxyRequired - tracks whether the AMQP proxy sidecar is required for this cluster.
+	// Set to true when upgrading from RabbitMQ 3.x to 4.x with Quorum queues.
+	// The proxy allows non-durable clients to work with quorum queues during the upgrade window.
+	// Only cleared when the "rabbitmq.openstack.org/clients-reconfigured" annotation is set.
+	ProxyRequired bool `json:"proxyRequired,omitempty"`
 }
 
 //+kubebuilder:object:root=true
