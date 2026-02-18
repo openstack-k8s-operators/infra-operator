@@ -72,6 +72,10 @@ const (
 	serviceSecretNameField = ".spec.tls.SecretName"
 	caSecretNameField      = ".spec.tls.CASecretName"
 	topologyField          = ".spec.topologyRef.Name"
+
+	// rabbitmqClusterFinalizer is added to RabbitmqCluster to prevent direct deletion
+	// Only removed when parent RabbitMq CR is being deleted
+	rabbitmqClusterFinalizer = "rabbitmq.openstack.org/cluster-finalizer"
 )
 
 var rmqAllWatchFields = []string{
@@ -93,6 +97,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs/finalizers,verbs=update
 
 // +kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters/finalizers,verbs=update
 
 // Required to determine IPv6 and FIPS
 // +kubebuilder:rbac:groups=config.openshift.io,resources=networks,verbs=get;list;watch;
@@ -193,6 +198,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if instance.Spec.TopologyRef != nil {
 		c := condition.UnknownCondition(condition.TopologyReadyCondition, condition.InitReason, condition.TopologyReadyInitMessage)
 		cl.Set(c)
+	}
+
+	// If we're not deleting this and the service object doesn't have our finalizer, add it.
+	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) || isNewInstance {
+		return ctrl.Result{}, nil
 	}
 
 	// Handle service delete
@@ -386,6 +396,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return rmqres, rmqerr
 	}
 	rabbitmqClusterInstance := rabbitmqImplCluster.GetRabbitMqCluster()
+
+	// Add finalizer to RabbitmqCluster to prevent direct deletion
+	// This ensures RabbitmqCluster can only be deleted when parent RabbitMq is deleted
+	// Need to fetch the cluster again to get a proper pointer for the client
+	clusterForFinalizer := &rabbitmqv2.RabbitmqCluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, clusterForFinalizer); err == nil {
+		if controllerutil.AddFinalizer(clusterForFinalizer, rabbitmqClusterFinalizer) {
+			if err := r.Update(ctx, clusterForFinalizer); err != nil {
+				return ctrl.Result{}, err
+			}
+			// Finalizer was added, requeue to continue processing
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
 
 	clusterReady := false
 	if rabbitmqClusterInstance.Status.ObservedGeneration == rabbitmqClusterInstance.Generation {
@@ -713,6 +737,21 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1be
 		return ctrl.Result{}, err
 	}
 
+	// Remove finalizer from RabbitmqCluster so it can be deleted
+	clusterInstance := &rabbitmqv2.RabbitmqCluster{}
+	err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, clusterInstance)
+	if err == nil {
+		// Cluster exists - remove our finalizer
+		if controllerutil.RemoveFinalizer(clusterInstance, rabbitmqClusterFinalizer) {
+			if err := r.Update(ctx, clusterInstance); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	} else if !k8s_errors.IsNotFound(err) {
+		// Error getting cluster (not NotFound) - return error
+		return ctrl.Result{}, err
+	}
+
 	rabbitmqCluster := impl.NewRabbitMqCluster(
 		&rabbitmqv2.RabbitmqCluster{
 			ObjectMeta: metav1.ObjectMeta{
@@ -722,7 +761,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1be
 		},
 		5,
 	)
-	err := rabbitmqCluster.Delete(ctx, helper)
+	err = rabbitmqCluster.Delete(ctx, helper)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

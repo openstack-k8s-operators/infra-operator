@@ -796,6 +796,10 @@ var _ = Describe("TransportURL controller", func() {
 				Namespace: namespace,
 			}
 
+			// Set up mock RabbitMQ Management API so controller can make API calls
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
 			// Create RabbitMQCluster first
 			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
 			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)

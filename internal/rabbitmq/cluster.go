@@ -91,6 +91,42 @@ func ConfigureCluster(
 		Value: fmt.Sprintf("-proto_dist %s_%s %s", inetFamily, inetProtocol, tlsArgs),
 	})
 
+	// Wipe script to clean RabbitMQ data on every pod start
+	// This ensures a fresh start and prevents issues with stale data after cluster recreation
+	wipeScript := `set -ex
+WIPE_DIR="/var/lib/rabbitmq"
+
+echo "Wiping RabbitMQ data in $WIPE_DIR..."
+# Remove all content from the volume, including hidden files (except . and ..)
+rm -rf "${WIPE_DIR:?}"/*
+rm -rf "${WIPE_DIR:?}"/.[!.]*
+echo "Data wipe complete"
+ls -la "$WIPE_DIR"
+`
+
+	initContainers := []corev1.Container{
+		{
+			Name:       "wipe-data",
+			Image:      cluster.Spec.Image,
+			WorkingDir: "/var/lib/rabbitmq",
+			Command:    []string{"/bin/sh"},
+			Args: []string{
+				"-c",
+				wipeScript,
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "persistence",
+					MountPath: "/var/lib/rabbitmq",
+				},
+			},
+		},
+		{
+			Name:            "setup-container",
+			SecurityContext: &corev1.SecurityContext{},
+		},
+	}
+
 	defaultStatefulSet := rabbitmqv2.StatefulSet{
 		Spec: &rabbitmqv2.StatefulSetSpec{
 			Template: &rabbitmqv2.PodTemplateSpec{
@@ -111,10 +147,8 @@ func ConfigureCluster(
 							VolumeMounts: []corev1.VolumeMount{},
 						},
 					},
-					InitContainers: []corev1.Container{
-						{Name: "setup-container", SecurityContext: &corev1.SecurityContext{}},
-					},
-					Volumes: []corev1.Volume{},
+					InitContainers: initContainers,
+					Volumes:        []corev1.Volume{},
 				},
 			},
 		},
