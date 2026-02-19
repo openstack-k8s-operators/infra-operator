@@ -794,8 +794,23 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 	} else {
 		Log.Info(fmt.Sprintf("Found RabbitMQ CR: %s", rabbitmqCR.Name))
 
-		quorum = rabbitmqCR.Status.QueueType == rabbitmqv1.QueueTypeQuorum
-		Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType", quorum))
+		// Determine quorum setting - prefer Spec over Status
+		// Spec represents the configured queue type and is set immediately when the CR is created,
+		// while Status.QueueType is updated asynchronously after cluster initialization.
+		// This prevents a race condition where TransportURL reconciles before Status.QueueType is set.
+		if rabbitmqCR.Spec.QueueType != nil {
+			quorum = *rabbitmqCR.Spec.QueueType == rabbitmqv1.QueueTypeQuorum
+			Log.Info(fmt.Sprintf("Setting quorum to: %t based on spec QueueType", quorum))
+		} else if rabbitmqCR.Status.QueueType != "" {
+			quorum = rabbitmqCR.Status.QueueType == rabbitmqv1.QueueTypeQuorum
+			Log.Info(fmt.Sprintf("Setting quorum to: %t based on status QueueType (spec not set)", quorum))
+		} else {
+			// Default to false if neither is set - this should not normally happen
+			// as the webhook should always set Spec.QueueType
+			Log.Info("WARNING: Setting quorum to: false (neither spec nor status QueueType set - this is unexpected)",
+				"rabbitmq", rabbitmqCR.Name,
+				"namespace", rabbitmqCR.Namespace)
+		}
 
 		// Update QueueType and add annotation to signal change
 		if rabbitmqCR.Status.QueueType != instance.Status.QueueType {

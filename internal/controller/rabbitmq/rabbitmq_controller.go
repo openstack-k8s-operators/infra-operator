@@ -401,17 +401,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	rabbitmqClusterInstance := rabbitmqImplCluster.GetRabbitMqCluster()
 
 	// Add finalizer to RabbitmqCluster to prevent direct deletion
-	// This ensures RabbitmqCluster can only be deleted when parent RabbitMq is deleted
-	// Need to fetch the cluster again to get a proper pointer for the client
-	clusterForFinalizer := &rabbitmqv2.RabbitmqCluster{}
-	if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, clusterForFinalizer); err == nil {
-		if controllerutil.AddFinalizer(clusterForFinalizer, rabbitmqClusterFinalizer) {
-			if err := r.Update(ctx, clusterForFinalizer); err != nil {
-				return ctrl.Result{}, err
+	if controllerutil.AddFinalizer(&rabbitmqClusterInstance, rabbitmqClusterFinalizer) {
+		if err := r.Update(ctx, &rabbitmqClusterInstance); err != nil {
+			if k8s_errors.IsConflict(err) {
+				Log.Info("Conflict while adding cluster finalizer, will retry", "cluster", instance.Name)
+				return ctrl.Result{Requeue: true}, nil
 			}
-			// Finalizer was added, requeue to continue processing
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	clusterReady := false

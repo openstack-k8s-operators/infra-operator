@@ -323,23 +323,21 @@ func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmq
 			},
 		}
 
-		// Use mock RabbitMQ API host/port if available, otherwise use fake service host
 		host := "host." + namespace + ".svc"
 		port := "5672"
 		if mockRabbitMQHost != "" {
 			host = mockRabbitMQHost
-			// For mock server, use management API port directly in secret
-			// getManagementURL will construct http://host:port where port is management port
-			// We need to override the management port to use our mock server's port
-			port = mockRabbitMQPort
 		}
 
-		// create rabbitmq-secret secret
 		secretData := map[string][]byte{
 			"host":     []byte(host),
 			"password": []byte("12345678"),
 			"username": []byte("user"),
 			"port":     []byte(port),
+		}
+
+		if mockRabbitMQHost != "" {
+			secretData["management-port"] = []byte(mockRabbitMQPort)
 		}
 
 		// if tls is enabled for rabbitmq cluster port will be 5671
