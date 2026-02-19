@@ -19,7 +19,6 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -135,26 +134,26 @@ func (r *RabbitMQPolicyReconciler) reconcileNormal(ctx context.Context, instance
 		return ctrl.Result{}, err
 	}
 
-	// Check if cluster is being deleted
-	if !rabbit.DeletionTimestamp.IsZero() {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.RabbitMQPolicyReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			rabbitmqv1.RabbitMQPolicyReadyErrorMessage,
-			fmt.Sprintf("RabbitMQ cluster %s is being deleted", instance.Spec.RabbitmqClusterName)))
-		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
-	}
-
-	// Check if cluster is ready - need DefaultUser secret to proceed
-	if rabbit.Status.DefaultUser == nil || rabbit.Status.DefaultUser.SecretReference == nil || rabbit.Status.DefaultUser.SecretReference.Name == "" {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.RabbitMQPolicyReadyCondition,
-			condition.RequestedReason,
-			condition.SeverityInfo,
-			"RabbitMQ policy waiting for dependencies %s",
-			fmt.Sprintf("RabbitMQ cluster %s", instance.Spec.RabbitmqClusterName)))
-		log.FromContext(ctx).Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName, "hasDefaultUser", rabbit.Status.DefaultUser != nil)
+	// Check if cluster is ready for operations
+	if readinessErr := checkClusterReadiness(rabbit); readinessErr != nil {
+		if readinessErr.IsWaiting {
+			// Cluster is starting up - set waiting condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQPolicyReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				"RabbitMQ policy waiting for dependencies %s",
+				readinessErr.Reason))
+			log.FromContext(ctx).Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName)
+		} else {
+			// Cluster is being deleted - set error condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQPolicyReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQPolicyReadyErrorMessage,
+				readinessErr.Reason))
+		}
 		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
 

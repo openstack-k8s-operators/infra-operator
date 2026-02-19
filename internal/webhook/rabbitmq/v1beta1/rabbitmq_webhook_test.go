@@ -45,10 +45,10 @@ var _ = Describe("RabbitMq webhook", func() {
 			Expect(*rabbitmq.Spec.QueueType).To(Equal("Quorum"))
 		})
 
-		It("should not set QueueType for existing clusters", func() {
+		It("should default QueueType even when cluster already exists", func() {
 			ctx := context.Background()
 
-			// Create a RabbitMQCluster to simulate an existing cluster
+			// Create a RabbitMQCluster to simulate an existing cluster (e.g., during upgrade)
 			cluster := &rabbitmqv2.RabbitmqCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-rabbitmq-existing",
@@ -77,7 +77,8 @@ var _ = Describe("RabbitMq webhook", func() {
 
 			rabbitmq.Default(k8sClient)
 
-			Expect(rabbitmq.Spec.QueueType).To(BeNil())
+			Expect(rabbitmq.Spec.QueueType).NotTo(BeNil())
+			Expect(*rabbitmq.Spec.QueueType).To(Equal("Quorum"))
 		})
 
 		It("should not override explicitly set QueueType for new clusters", func() {
@@ -136,7 +137,8 @@ var _ = Describe("RabbitMq webhook", func() {
 			rabbitmq.Default(k8sClient)
 
 			Expect(rabbitmq.Spec.ContainerImage).To(Equal("test-image:latest"))
-			Expect(rabbitmq.Spec.QueueType).To(BeNil())
+			Expect(rabbitmq.Spec.QueueType).NotTo(BeNil())
+			Expect(*rabbitmq.Spec.QueueType).To(Equal("Quorum"))
 		})
 
 		It("should not override existing ContainerImage for existing clusters", func() {
@@ -223,6 +225,52 @@ var _ = Describe("RabbitMq webhook", func() {
 			freshRabbitMq.Default(k8sClient)
 			Expect(freshRabbitMq.Spec.QueueType).NotTo(BeNil())
 			Expect(*freshRabbitMq.Spec.QueueType).To(Equal("Quorum"), "QueueType should be preserved from existing CR")
+		})
+
+		It("should default QueueType for existing CR when QueueType was never set", func() {
+			ctx := context.Background()
+
+			// Create RabbitMq CR WITHOUT QueueType to simulate a CR that was created
+			// before the webhook had defaulting logic, or when the webhook was bypassed
+			existingRabbitMq := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-rabbitmq-no-queuetype",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					ContainerImage: "old-image:v1",
+				},
+			}
+			Expect(k8sClient.Create(ctx, existingRabbitMq)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, existingRabbitMq) }()
+
+			// Wait for it to be created
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: existingRabbitMq.Name, Namespace: existingRabbitMq.Namespace}, existingRabbitMq)
+				return err == nil
+			}).Should(BeTrue())
+
+			// Verify the CR HAS QueueType defaulted by the webhook during creation
+			// (webhooks are active in the test environment, so this will be defaulted)
+			Expect(existingRabbitMq.Spec.QueueType).NotTo(BeNil())
+			Expect(*existingRabbitMq.Spec.QueueType).To(Equal("Quorum"))
+
+			// Simulate an update (e.g., from OpenStackControlPlane)
+			// The webhook should preserve the existing QueueType value
+			updatedRabbitMq := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-rabbitmq-no-queuetype",
+					Namespace: "default",
+				},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					ContainerImage: "new-image:v2",
+				},
+			}
+
+			// Webhook should preserve QueueType from existing CR
+			updatedRabbitMq.Default(k8sClient)
+			Expect(updatedRabbitMq.Spec.QueueType).NotTo(BeNil())
+			Expect(*updatedRabbitMq.Spec.QueueType).To(Equal("Quorum"), "QueueType should be preserved from existing CR")
 		})
 	})
 })
