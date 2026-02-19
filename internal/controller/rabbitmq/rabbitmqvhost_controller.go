@@ -61,6 +61,7 @@ type RabbitMQVhostReconciler struct {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts/finalizers,verbs=update
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
@@ -124,6 +125,29 @@ func (r *RabbitMQVhostReconciler) reconcileNormal(ctx context.Context, instance 
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQVhostReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQVhostReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
+	}
+
+	// Check if cluster is ready for operations
+	if readinessErr := checkClusterReadiness(rabbit); readinessErr != nil {
+		if readinessErr.IsWaiting {
+			// Cluster is starting up - set waiting condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQVhostReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				"RabbitMQ vhost waiting for dependencies %s",
+				readinessErr.Reason))
+			log.FromContext(ctx).Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName)
+		} else {
+			// Cluster is being deleted - set error condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQVhostReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQVhostReadyErrorMessage,
+				readinessErr.Reason))
+		}
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
 
 	// Get admin credentials
@@ -350,6 +374,35 @@ func (r *RabbitMQVhostReconciler) transportURLToVhostMapFunc(_ context.Context, 
 	return requests
 }
 
+// clusterToVhostMapFunc maps RabbitMQ cluster changes to vhost reconciliation requests
+// This allows the vhost controller to react when a cluster is created, deleted,
+// or becomes ready, ensuring vhosts are created/updated when the cluster is available
+// Works with both RabbitmqCluster (cluster-operator) and RabbitMq CRs
+func (r *RabbitMQVhostReconciler) clusterToVhostMapFunc(ctx context.Context, obj client.Object) []reconcile.Request {
+	clusterName := obj.GetName()
+	clusterNamespace := obj.GetNamespace()
+
+	vhostList := &rabbitmqv1.RabbitMQVhostList{}
+	if err := r.List(ctx, vhostList, client.InNamespace(clusterNamespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list vhosts for cluster watch", "cluster", clusterName)
+		return []reconcile.Request{}
+	}
+
+	requests := []reconcile.Request{}
+	for _, vhost := range vhostList.Items {
+		// Reconcile vhosts that reference this cluster
+		if vhost.Spec.RabbitmqClusterName == clusterName {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      vhost.Name,
+					Namespace: vhost.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQVhostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Index RabbitMQUsers by username for efficient lookup
@@ -365,6 +418,10 @@ func (r *RabbitMQVhostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&rabbitmqv1.RabbitMQVhost{}).
 		Watches(&rabbitmqv1.RabbitMQUser{},
 			handler.EnqueueRequestsFromMapFunc(r.userToVhostMapFunc)).
+		Watches(&rabbitmqclusterv2.RabbitmqCluster{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToVhostMapFunc)).
+		Watches(&rabbitmqv1.RabbitMq{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToVhostMapFunc)).
 		Watches(&rabbitmqv1.TransportURL{},
 			handler.EnqueueRequestsFromMapFunc(r.transportURLToVhostMapFunc)).
 		Complete(r)

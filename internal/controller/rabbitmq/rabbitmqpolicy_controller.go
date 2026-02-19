@@ -19,11 +19,14 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	rabbitmqapi "github.com/openstack-k8s-operators/infra-operator/pkg/rabbitmq/api"
@@ -51,6 +54,8 @@ type RabbitMQPolicyReconciler struct {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqpolicies,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqpolicies/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqpolicies/finalizers,verbs=update
+//+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
+//+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
 
 // Reconcile reconciles a RabbitMQPolicy object
 func (r *RabbitMQPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -127,6 +132,29 @@ func (r *RabbitMQPolicyReconciler) reconcileNormal(ctx context.Context, instance
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQPolicyReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQPolicyReadyErrorMessage, err.Error()))
 		return ctrl.Result{}, err
+	}
+
+	// Check if cluster is ready for operations
+	if readinessErr := checkClusterReadiness(rabbit); readinessErr != nil {
+		if readinessErr.IsWaiting {
+			// Cluster is starting up - set waiting condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQPolicyReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				"RabbitMQ policy waiting for dependencies %s",
+				readinessErr.Reason))
+			log.FromContext(ctx).Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName)
+		} else {
+			// Cluster is being deleted - set error condition
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.RabbitMQPolicyReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.RabbitMQPolicyReadyErrorMessage,
+				readinessErr.Reason))
+		}
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
 
 	// Get admin credentials
@@ -237,9 +265,42 @@ func (r *RabbitMQPolicyReconciler) reconcileDelete(ctx context.Context, instance
 	return ctrl.Result{}, nil
 }
 
+// clusterToPolicyMapFunc maps RabbitMQ cluster changes to policy reconciliation requests
+// This allows the policy controller to react when a cluster is created, deleted,
+// or becomes ready, ensuring policies are created/updated when the cluster is available
+// Works with both RabbitmqCluster (cluster-operator) and RabbitMq CRs
+func (r *RabbitMQPolicyReconciler) clusterToPolicyMapFunc(ctx context.Context, obj client.Object) []reconcile.Request {
+	clusterName := obj.GetName()
+	clusterNamespace := obj.GetNamespace()
+
+	policyList := &rabbitmqv1.RabbitMQPolicyList{}
+	if err := r.List(ctx, policyList, client.InNamespace(clusterNamespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list policies for cluster watch", "cluster", clusterName)
+		return []reconcile.Request{}
+	}
+
+	requests := []reconcile.Request{}
+	for _, policy := range policyList.Items {
+		// Reconcile policies that reference this cluster
+		if policy.Spec.RabbitmqClusterName == clusterName {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      policy.Name,
+					Namespace: policy.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.RabbitMQPolicy{}).
+		Watches(&rabbitmqclusterv2.RabbitmqCluster{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToPolicyMapFunc)).
+		Watches(&rabbitmqv1.RabbitMq{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToPolicyMapFunc)).
 		Complete(r)
 }
