@@ -1507,4 +1507,199 @@ var _ = Describe("RabbitMQUser controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 	})
+
+	When("a RabbitMQUser is created with mock RabbitMQ API", func() {
+		var mockClusterName types.NamespacedName
+		var mockVhostName types.NamespacedName
+		var mockUserName types.NamespacedName
+
+		BeforeEach(func() {
+			mockClusterName = types.NamespacedName{Name: "rabbitmq-user-mock", Namespace: namespace}
+			mockVhostName = types.NamespacedName{Name: "vhost-user-mock", Namespace: namespace}
+			mockUserName = types.NamespacedName{Name: "user-mock-test", Namespace: namespace}
+
+			// Set up mock RabbitMQ Management API so controller can make API calls
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			// Create cluster and mark it ready
+			CreateRabbitMQCluster(mockClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(mockClusterName)
+			DeferCleanup(DeleteRabbitMQCluster, mockClusterName)
+
+			// Create vhost and mark it ready
+			vhost := CreateRabbitMQVhost(mockVhostName, map[string]any{
+				"rabbitmqClusterName": mockClusterName.Name,
+				"name":                "test-vhost",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+			SimulateRabbitMQVhostReady(mockVhostName)
+
+			// Create user
+			user := CreateRabbitMQUser(mockUserName, map[string]any{
+				"rabbitmqClusterName": mockClusterName.Name,
+				"vhostRef":            mockVhostName.Name,
+			})
+			DeferCleanup(th.DeleteInstance, user)
+		})
+
+		It("should create user via RabbitMQ Management API and become ready", func() {
+			// User should become ready after successfully calling the mock API
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(mockUserName)
+				g.Expect(u.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+				g.Expect(u.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should reconcile user on every reconciliation loop", func() {
+			// Wait for initial ready state
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(mockUserName)
+				g.Expect(u.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Update a label to trigger reconciliation
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(mockUserName)
+				if u.Labels == nil {
+					u.Labels = make(map[string]string)
+				}
+				u.Labels["test-reconcile"] = "trigger"
+				g.Expect(th.K8sClient.Update(th.Ctx, u)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// User should remain ready - controller called API again
+			Consistently(func(g Gomega) {
+				u := GetRabbitMQUser(mockUserName)
+				g.Expect(u.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+				g.Expect(u.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, "3s", interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQ cluster is deleted and recreated", func() {
+		var recreateClusterName types.NamespacedName
+		var recreateVhostName types.NamespacedName
+		var recreateUserName types.NamespacedName
+
+		BeforeEach(func() {
+			// Use separate cluster to avoid interfering with other tests
+			recreateClusterName = types.NamespacedName{Name: "rabbitmq-recreate", Namespace: namespace}
+			recreateVhostName = types.NamespacedName{Name: "vhost-recreate", Namespace: namespace}
+			recreateUserName = types.NamespacedName{Name: "user-recreate", Namespace: namespace}
+
+			// Create cluster, vhost, and user
+			CreateRabbitMQCluster(recreateClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(recreateClusterName)
+
+			CreateRabbitMQVhost(recreateVhostName, map[string]any{
+				"rabbitmqClusterName": recreateClusterName.Name,
+				"name":                "recreate-test",
+			})
+
+			spec := map[string]any{
+				"rabbitmqClusterName": recreateClusterName.Name,
+				"vhostRef":            recreateVhostName.Name,
+			}
+			CreateRabbitMQUser(recreateUserName, spec)
+
+			// Simulate vhost and user ready since we don't have real RabbitMQ
+			SimulateRabbitMQVhostReady(recreateVhostName)
+			SimulateRabbitMQUserReady(recreateUserName, "recreate-test")
+		})
+
+		AfterEach(func() {
+			// Mark cluster for deletion to allow cleanup without RabbitMQ API calls
+			cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+			err := th.K8sClient.Get(th.Ctx, recreateClusterName, cluster)
+			if err == nil && cluster.DeletionTimestamp.IsZero() {
+				Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+			}
+
+			// Clean up user
+			user := &rabbitmqv1.RabbitMQUser{}
+			err = th.K8sClient.Get(th.Ctx, recreateUserName, user)
+			if err == nil {
+				Expect(th.K8sClient.Delete(th.Ctx, user)).To(Succeed())
+				Eventually(func(g Gomega) {
+					u := &rabbitmqv1.RabbitMQUser{}
+					err := th.K8sClient.Get(th.Ctx, recreateUserName, u)
+					g.Expect(err).To(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+			}
+
+			// Clean up vhost
+			vhost := &rabbitmqv1.RabbitMQVhost{}
+			err = th.K8sClient.Get(th.Ctx, recreateVhostName, vhost)
+			if err == nil {
+				Expect(th.K8sClient.Delete(th.Ctx, vhost)).To(Succeed())
+				Eventually(func(g Gomega) {
+					v := &rabbitmqv1.RabbitMQVhost{}
+					err := th.K8sClient.Get(th.Ctx, recreateVhostName, v)
+					g.Expect(err).To(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+			}
+
+			// Wait for cluster to be deleted
+			Eventually(func(g Gomega) {
+				c := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, recreateClusterName, c)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should automatically reconcile users when cluster is recreated", func() {
+			// Delete the cluster
+			DeleteRabbitMQCluster(recreateClusterName)
+
+			// Wait for cluster to be deleted
+			Eventually(func(g Gomega) {
+				cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, recreateClusterName, cluster)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+
+			// User should go to error state when cluster is gone
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(recreateUserName)
+				// User exists but cluster is gone - should show error
+				g.Expect(u.Status.Conditions.IsFalse(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+				// The condition message should indicate cluster not found
+				cond := u.Status.Conditions.Get(rabbitmqv1.RabbitMQUserReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Message).To(ContainSubstring("not found"))
+			}, timeout, interval).Should(Succeed())
+
+			// Recreate the cluster with the same name (but don't mark it ready yet)
+			CreateRabbitMQCluster(recreateClusterName, GetDefaultRabbitMQClusterSpec(false))
+
+			// User should show waiting status when cluster exists but isn't ready
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(recreateUserName)
+				g.Expect(u.Status.Conditions.IsFalse(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+				cond := u.Status.Conditions.Get(rabbitmqv1.RabbitMQUserReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				// Should indicate waiting for cluster to be ready
+				g.Expect(cond.Message).To(ContainSubstring("waiting"))
+			}, timeout, interval).Should(Succeed())
+
+			// Now mark the cluster as ready
+			SimulateRabbitMQClusterReady(recreateClusterName)
+
+			// The watch should trigger reconciliation. Simulate success since we don't have real RabbitMQ API
+			SimulateRabbitMQVhostReady(recreateVhostName)
+			SimulateRabbitMQUserReady(recreateUserName, "recreate-test")
+
+			// Verify user is ready again
+			Eventually(func(g Gomega) {
+				u := GetRabbitMQUser(recreateUserName)
+				g.Expect(u.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+				// Status fields should be populated
+				g.Expect(u.Status.Username).NotTo(BeEmpty())
+				g.Expect(u.Status.SecretName).NotTo(BeEmpty())
+				g.Expect(u.Status.Vhost).To(Equal("recreate-test"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
 })

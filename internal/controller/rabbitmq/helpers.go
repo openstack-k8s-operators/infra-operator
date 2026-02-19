@@ -35,6 +35,18 @@ func getManagementURL(rabbit *rabbitmqclusterv2.RabbitmqCluster, rabbitSecret *c
 		protocol = "https"
 		managementPort = "15671"
 	}
+
+	// Check if secret has a custom port (for testing with mock servers)
+	// In production, the port field contains the AMQP port (5672/5671), not the management port
+	// But in tests with mock servers, we put the mock server's port in the port field
+	if portBytes, ok := rabbitSecret.Data["port"]; ok {
+		port := string(portBytes)
+		// If port is not a standard AMQP port, assume it's a custom management port (for tests)
+		if port != "5672" && port != "5671" {
+			managementPort = port
+		}
+	}
+
 	return fmt.Sprintf("%s://%s:%s", protocol, string(rabbitSecret.Data["host"]), managementPort)
 }
 
