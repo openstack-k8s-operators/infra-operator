@@ -19,6 +19,8 @@ package functional_test
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -59,6 +61,74 @@ const (
 	uSubnet1 = "Subnet1"
 	host1    = "host1"
 )
+
+var (
+	// mockRabbitMQServer is the global mock RabbitMQ Management API server for tests
+	mockRabbitMQServer *httptest.Server
+	// mockRabbitMQHost is the host of the mock server
+	mockRabbitMQHost string
+	// mockRabbitMQPort is the port of the mock server
+	mockRabbitMQPort string
+)
+
+// SetupMockRabbitMQAPI starts a mock RabbitMQ Management API server for tests
+// Call this in BeforeEach and defer StopMockRabbitMQAPI() to clean up
+func SetupMockRabbitMQAPI() {
+	if mockRabbitMQServer != nil {
+		// Already running
+		return
+	}
+	mockRabbitMQServer, mockRabbitMQHost, mockRabbitMQPort = StartMockRabbitMQAPI()
+}
+
+// StopMockRabbitMQAPI stops the mock RabbitMQ Management API server
+func StopMockRabbitMQAPI() {
+	if mockRabbitMQServer != nil {
+		mockRabbitMQServer.Close()
+		mockRabbitMQServer = nil
+		mockRabbitMQHost = ""
+		mockRabbitMQPort = ""
+	}
+}
+
+// StartMockRabbitMQAPI starts an HTTP test server that mocks the RabbitMQ Management API
+// Returns the server, host, and port to use in secrets
+func StartMockRabbitMQAPI() (*httptest.Server, string, string) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Mock all RabbitMQ Management API endpoints
+		// Return 204 No Content for PUT operations (create/update)
+		// Return 204 No Content for DELETE operations
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/users/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/users/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/vhosts/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/vhosts/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/permissions/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/permissions/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/policies/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/policies/"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	// Extract host and port from server URL (e.g., "http://127.0.0.1:12345")
+	// Remove the http:// prefix and split host:port
+	hostPort := strings.TrimPrefix(server.URL, "http://")
+	parts := strings.Split(hostPort, ":")
+	host := parts[0]
+	port := parts[1]
+
+	return server, host, port
+}
 
 func CreateDNSMasq(namespace string, spec map[string]any) client.Object {
 	name := uuid.New().String()
@@ -253,16 +323,27 @@ func CreateOrUpdateRabbitMQClusterSecret(name types.NamespacedName, mq *rabbitmq
 			},
 		}
 
+		// Use mock RabbitMQ API host/port if available, otherwise use fake service host
+		host := "host." + namespace + ".svc"
+		port := "5672"
+		if mockRabbitMQHost != "" {
+			host = mockRabbitMQHost
+			// For mock server, use management API port directly in secret
+			// getManagementURL will construct http://host:port where port is management port
+			// We need to override the management port to use our mock server's port
+			port = mockRabbitMQPort
+		}
+
 		// create rabbitmq-secret secret
 		secretData := map[string][]byte{
-			"host":     fmt.Appendf(nil, "host.%s.svc", namespace),
+			"host":     []byte(host),
 			"password": []byte("12345678"),
 			"username": []byte("user"),
-			"port":     []byte("5672"),
+			"port":     []byte(port),
 		}
 
 		// if tls is enabled for rabbitmq cluster port will be 5671
-		if mq.Spec.TLS.SecretName != "" {
+		if mq.Spec.TLS.SecretName != "" && mockRabbitMQHost == "" {
 			secretData["port"] = []byte("5671")
 		}
 

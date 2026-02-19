@@ -79,6 +79,7 @@ type RabbitMQUserReconciler struct {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqusers/finalizers,verbs=update
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts/finalizers,verbs=update
+//+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
@@ -232,8 +233,30 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
+	// Check if cluster is being deleted
+	if !rabbit.DeletionTimestamp.IsZero() {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			rabbitmqv1.RabbitMQUserReadyErrorMessage,
+			fmt.Sprintf("RabbitMQ cluster %s is being deleted", instance.Spec.RabbitmqClusterName)))
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+	}
+
+	// Check if cluster is ready - need DefaultUser secret to proceed
+	if rabbit.Status.DefaultUser == nil || rabbit.Status.DefaultUser.SecretReference == nil || rabbit.Status.DefaultUser.SecretReference.Name == "" {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			rabbitmqv1.RabbitMQUserReadyWaitingMessage,
+			fmt.Sprintf("RabbitMQ cluster %s", instance.Spec.RabbitmqClusterName)))
+		Log.Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName, "hasDefaultUser", rabbit.Status.DefaultUser != nil)
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+	}
+
 	// Determine credentials source
-	var op controllerutil.OperationResult
 	if instance.Spec.Secret != nil && *instance.Spec.Secret != "" {
 		// Use user-provided secret
 		secretName = *instance.Spec.Secret
@@ -270,17 +293,6 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 			return ctrl.Result{}, err
 		}
 		password = string(passwordBytes)
-
-		// Always update the RabbitMQ user when using user-provided secrets to ensure
-		// password is synced if it changed in the secret.
-		// CreateOrUpdateUser is idempotent so this is safe to call on every reconcile.
-		// We set this to Created if this is the first time (status empty), otherwise Updated.
-		if instance.Status.Username == "" {
-			op = controllerutil.OperationResultCreated
-		} else {
-			// Treat as updated to ensure password changes are propagated
-			op = controllerutil.OperationResultUpdated
-		}
 	} else {
 		// Existing auto-generation logic for backward compatibility
 		secretName = fmt.Sprintf("rabbitmq-user-%s", instance.Name)
@@ -310,7 +322,7 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 			Data: map[string][]byte{},
 		}
 
-		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 			secret.Data["username"] = []byte(username)
 			secret.Data["password"] = []byte(password)
 			return controllerutil.SetControllerReference(instance, secret, r.Scheme)
@@ -328,66 +340,62 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 	instance.Status.VhostRef = instance.Spec.VhostRef // Track the vhost CR name for finalizer management
 	// Note: status.Vhost will be updated after successful permission operations
 
-	// Create/update user in RabbitMQ if:
-	// 1. Secret was just created (new user)
-	// 2. Secret was updated (for user-provided secrets, password might have changed)
-	// 3. Vhost changed (need to update permissions)
-	// Note: We check if status.Vhost differs from spec, including when status is empty
+	// Always reconcile the user in RabbitMQ to ensure it exists
+	// Following the Kubernetes reconciliation pattern: always ensure actual state matches desired state
+
+	// Get admin credentials
+	rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	// Create API client
+	baseURL := getManagementURL(rabbit, rabbitSecret)
+	tlsEnabled := rabbit.Spec.TLS.SecretName != ""
+	caCert, err := getTLSCACert(ctx, h, rabbit, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+		return ctrl.Result{}, err
+	}
+	apiClient := rabbitmqapi.NewClient(baseURL, string(rabbitSecret.Data["username"]), string(rabbitSecret.Data["password"]), tlsEnabled, caCert)
+
+	// If vhost changed and there was a previous vhost, delete permissions from old vhost first
 	vhostChanged := instance.Status.Vhost != vhostName
 	oldPermissionsDeleted := true
-	if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated || vhostChanged {
-		// Get admin credentials
-		rabbitSecret, _, err := oko_secret.GetSecret(ctx, h, rabbit.Status.DefaultUser.SecretReference.Name, instance.Namespace)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
+	if vhostChanged && instance.Status.Vhost != "" {
+		Log.Info("Vhost changed, deleting permissions from old vhost", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName, "username", username)
+		if err := apiClient.DeletePermissions(instance.Status.Vhost, username); err != nil {
+			// Track that old permissions weren't deleted - we'll retry on next reconciliation
+			// We continue to set new permissions so the user works in the new vhost,
+			// but we won't update status.Vhost until old permissions are cleaned up
+			oldPermissionsDeleted = false
+			Log.Error(err, "Failed to delete permissions from old vhost, will retry", "old_vhost", instance.Status.Vhost, "username", username)
 		}
+	}
 
-		// Create API client
-		baseURL := getManagementURL(rabbit, rabbitSecret)
-		tlsEnabled := rabbit.Spec.TLS.SecretName != ""
-		caCert, err := getTLSCACert(ctx, h, rabbit, instance.Namespace)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
-		}
-		apiClient := rabbitmqapi.NewClient(baseURL, string(rabbitSecret.Data["username"]), string(rabbitSecret.Data["password"]), tlsEnabled, caCert)
+	// Always create/update user - CreateOrUpdateUser is idempotent
+	tags := instance.Spec.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+	err = apiClient.CreateOrUpdateUser(username, password, tags)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+		return ctrl.Result{}, err
+	}
 
-		// If vhost changed and there was a previous vhost, delete permissions from old vhost first
-		if vhostChanged && instance.Status.Vhost != "" {
-			Log.Info("Vhost changed, deleting permissions from old vhost", "old_vhost", instance.Status.Vhost, "new_vhost", vhostName, "username", username)
-			if err := apiClient.DeletePermissions(instance.Status.Vhost, username); err != nil {
-				// Track that old permissions weren't deleted - we'll retry on next reconciliation
-				// We continue to set new permissions so the user works in the new vhost,
-				// but we won't update status.Vhost until old permissions are cleaned up
-				oldPermissionsDeleted = false
-				Log.Error(err, "Failed to delete permissions from old vhost, will retry", "old_vhost", instance.Status.Vhost, "username", username)
-			}
-		}
-
-		// Create user
-		tags := instance.Spec.Tags
-		if tags == nil {
-			tags = []string{}
-		}
-		err = apiClient.CreateOrUpdateUser(username, password, tags)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
-		}
-
-		// Set permissions
-		// Note: instance.Spec.Permissions is never nil because the field doesn't use omitempty.
-		// Individual permission fields (Configure/Write/Read) are guaranteed to have values
-		// either from user input or from kubebuilder defaults (".*" for full permissions).
-		err = apiClient.SetPermissions(vhostName, username,
-			instance.Spec.Permissions.Configure,
-			instance.Spec.Permissions.Write,
-			instance.Spec.Permissions.Read)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
-		}
+	// Always set permissions to ensure they're correct
+	// Note: instance.Spec.Permissions is never nil because the field doesn't use omitempty.
+	// Individual permission fields (Configure/Write/Read) are guaranteed to have values
+	// either from user input or from kubebuilder defaults (".*" for full permissions).
+	err = apiClient.SetPermissions(vhostName, username,
+		instance.Spec.Permissions.Configure,
+		instance.Spec.Permissions.Write,
+		instance.Spec.Permissions.Read)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(rabbitmqv1.RabbitMQUserReadyCondition, condition.ErrorReason, condition.SeverityWarning, rabbitmqv1.RabbitMQUserReadyErrorMessage, err.Error()))
+		return ctrl.Result{}, err
 	}
 
 	// Only update status.Vhost if old permissions were successfully deleted
@@ -652,6 +660,35 @@ func (r *RabbitMQUserReconciler) findRabbitMQUsersForSecret(ctx context.Context,
 	return requests
 }
 
+// clusterToUserMapFunc maps RabbitMQ cluster changes to user reconciliation requests
+// This allows the user controller to react when a cluster is created, deleted,
+// or becomes ready, ensuring users are created/updated when the cluster is available
+// Works with both RabbitmqCluster (cluster-operator) and RabbitMq CRs
+func (r *RabbitMQUserReconciler) clusterToUserMapFunc(ctx context.Context, obj client.Object) []reconcile.Request {
+	clusterName := obj.GetName()
+	clusterNamespace := obj.GetNamespace()
+
+	userList := &rabbitmqv1.RabbitMQUserList{}
+	if err := r.List(ctx, userList, client.InNamespace(clusterNamespace)); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list users for cluster watch", "cluster", clusterName)
+		return []reconcile.Request{}
+	}
+
+	requests := []reconcile.Request{}
+	for _, user := range userList.Items {
+		// Reconcile users that reference this cluster
+		if user.Spec.RabbitmqClusterName == clusterName {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      user.Name,
+					Namespace: user.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *RabbitMQUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Register field index for efficient secret watching
@@ -672,6 +709,10 @@ func (r *RabbitMQUserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Watches(&rabbitmqv1.RabbitMQVhost{},
 			handler.EnqueueRequestsFromMapFunc(r.vhostToUserMapFunc)).
+		Watches(&rabbitmqclusterv2.RabbitmqCluster{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToUserMapFunc)).
+		Watches(&rabbitmqv1.RabbitMq{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToUserMapFunc)).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findRabbitMQUsersForSecret),
