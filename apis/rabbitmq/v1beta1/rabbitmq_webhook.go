@@ -20,7 +20,6 @@ import (
 	"context"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
-	rabbitmqv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -53,46 +52,51 @@ func SetupRabbitMqDefaults(defaults RabbitMqDefaults) {
 func (r *RabbitMq) Default(k8sClient client.Client) {
 	rabbitmqlog.Info("default", "name", r.Name)
 
-	isNew := true
-
 	if k8sClient != nil {
-		// First check if existing RabbitMq CR has QueueType set - preserve it across updates
-		existingRabbitMq := &RabbitMq{}
-		err := k8sClient.Get(context.Background(), types.NamespacedName{
-			Name: r.Name, Namespace: r.Namespace,
-		}, existingRabbitMq)
-
-		if err != nil && !apierrors.IsNotFound(err) {
-			// Fail the webhook to avoid making incorrect defaulting decisions
-			rabbitmqlog.Error(err, "failed to get existing RabbitMq CR", "name", r.Name, "namespace", r.Namespace)
-			panic("cannot determine if RabbitMq resource is new or existing due to API error")
-		}
-
-		if err == nil && existingRabbitMq.Spec.QueueType != nil && *existingRabbitMq.Spec.QueueType != "" {
-			r.Spec.QueueType = existingRabbitMq.Spec.QueueType
-			rabbitmqlog.Info("preserving QueueType from existing CR", "name", r.Name, "queueType", *r.Spec.QueueType)
-			isNew = false
+		// First, check if the user has explicitly set QueueType in the incoming request
+		// If so, preserve it and don't override with any default value
+		if r.Spec.QueueType != nil && *r.Spec.QueueType != "" {
+			rabbitmqlog.Info("preserving user-specified QueueType", "name", r.Name, "queueType", *r.Spec.QueueType)
 		} else {
-			// Check if RabbitMQCluster exists (upgrade scenario: cluster exists but CR is new)
-			cluster := &rabbitmqv2.RabbitmqCluster{}
-			err = k8sClient.Get(context.Background(), types.NamespacedName{
+			// User didn't set QueueType - check if existing RabbitMq CR has it set
+			existingRabbitMq := &RabbitMq{}
+			err := k8sClient.Get(context.Background(), types.NamespacedName{
 				Name: r.Name, Namespace: r.Namespace,
-			}, cluster)
+			}, existingRabbitMq)
 
 			if err != nil && !apierrors.IsNotFound(err) {
-				// Fail the webhook to avoid making incorrect defaulting decisions
-				rabbitmqlog.Error(err, "failed to get existing RabbitMQCluster", "name", r.Name, "namespace", r.Namespace)
-				panic("cannot determine if RabbitMQCluster is new or existing due to API error")
+				rabbitmqlog.Error(err, "failed to get existing RabbitMq CR", "name", r.Name, "namespace", r.Namespace)
+				queueType := "Quorum"
+				r.Spec.QueueType = &queueType
+				r.Spec.Default(false)
+				return
 			}
 
-			if err == nil && !cluster.CreationTimestamp.IsZero() {
-				isNew = false
-				rabbitmqlog.Info("found existing RabbitMQCluster", "name", r.Name, "creationTimestamp", cluster.CreationTimestamp.String())
+			if err == nil && existingRabbitMq.Spec.QueueType != nil && *existingRabbitMq.Spec.QueueType != "" {
+				// Existing CR has QueueType set - preserve it
+				r.Spec.QueueType = existingRabbitMq.Spec.QueueType
+				rabbitmqlog.Info("preserving QueueType from existing CR", "name", r.Name, "queueType", *r.Spec.QueueType)
+			} else {
+				// Either:
+				// - No existing RabbitMq CR (creation)
+				// - Existing RabbitMq CR without QueueType (needs defaulting)
+				// In both cases, default QueueType to Quorum.
+				// The CR's queueType should always be set based on desired state, not cluster state.
+				// Status.QueueType will reflect the actual cluster state after reconciliation.
+				if err == nil {
+					rabbitmqlog.Info("existing RabbitMq CR found without QueueType, will default to Quorum", "name", r.Name)
+				} else {
+					rabbitmqlog.Info("new RabbitMq CR, will default QueueType to Quorum", "name", r.Name)
+				}
+				queueType := "Quorum"
+				r.Spec.QueueType = &queueType
 			}
 		}
 	}
 
-	r.Spec.Default(isNew)
+	// Apply other defaults (ContainerImage, etc.)
+	// Pass isNew=false to prevent overwriting the QueueType we just set
+	r.Spec.Default(false)
 }
 
 // Default - set defaults for this RabbitMq spec

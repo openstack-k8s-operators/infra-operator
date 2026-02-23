@@ -91,6 +91,13 @@ func ConfigureCluster(
 		Value: fmt.Sprintf("-proto_dist %s_%s %s", inetFamily, inetProtocol, tlsArgs),
 	})
 
+	initContainers := []corev1.Container{
+		{
+			Name:            "setup-container",
+			SecurityContext: &corev1.SecurityContext{},
+		},
+	}
+
 	defaultStatefulSet := rabbitmqv2.StatefulSet{
 		Spec: &rabbitmqv2.StatefulSetSpec{
 			Template: &rabbitmqv2.PodTemplateSpec{
@@ -111,10 +118,8 @@ func ConfigureCluster(
 							VolumeMounts: []corev1.VolumeMount{},
 						},
 					},
-					InitContainers: []corev1.Container{
-						{Name: "setup-container", SecurityContext: &corev1.SecurityContext{}},
-					},
-					Volumes: []corev1.Volume{},
+					InitContainers: initContainers,
+					Volumes:        []corev1.Volume{},
 				},
 			},
 		},

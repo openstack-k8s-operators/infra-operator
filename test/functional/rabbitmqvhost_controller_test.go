@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -373,6 +374,165 @@ var _ = Describe("RabbitMQVhost controller", func() {
 				v := &rabbitmqv1.RabbitMQVhost{}
 				err := th.K8sClient.Get(th.Ctx, vhostWithDeletingCluster, v)
 				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQVhost is created with mock RabbitMQ API", func() {
+		var mockClusterName types.NamespacedName
+		var mockVhostName types.NamespacedName
+
+		BeforeEach(func() {
+			mockClusterName = types.NamespacedName{Name: "rabbitmq-vhost-mock", Namespace: namespace}
+			mockVhostName = types.NamespacedName{Name: "vhost-mock-test", Namespace: namespace}
+
+			// Set up mock RabbitMQ Management API so controller can make API calls
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			// Create cluster and mark it ready
+			CreateRabbitMQCluster(mockClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(mockClusterName)
+			DeferCleanup(DeleteRabbitMQCluster, mockClusterName)
+
+			// Create vhost
+			vhost := CreateRabbitMQVhost(mockVhostName, map[string]any{
+				"rabbitmqClusterName": mockClusterName.Name,
+				"name":                "test-vhost-api",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+		})
+
+		It("should create vhost via RabbitMQ Management API and become ready", func() {
+			// Vhost should become ready after successfully calling the mock API
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(mockVhostName)
+				g.Expect(v.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
+				g.Expect(v.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should reconcile vhost on every reconciliation loop", func() {
+			// Wait for initial ready state
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(mockVhostName)
+				g.Expect(v.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Update a label to trigger reconciliation
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(mockVhostName)
+				if v.Labels == nil {
+					v.Labels = make(map[string]string)
+				}
+				v.Labels["test-reconcile"] = "trigger"
+				g.Expect(th.K8sClient.Update(th.Ctx, v)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Vhost should remain ready - controller called API again
+			Consistently(func(g Gomega) {
+				v := GetRabbitMQVhost(mockVhostName)
+				g.Expect(v.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
+				g.Expect(v.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, "3s", interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQ cluster is deleted and recreated", func() {
+		var recreateClusterName types.NamespacedName
+		var recreateVhostName types.NamespacedName
+
+		BeforeEach(func() {
+			// Use separate cluster to avoid interfering with other tests
+			recreateClusterName = types.NamespacedName{Name: "rabbitmq-vhost-recreate", Namespace: namespace}
+			recreateVhostName = types.NamespacedName{Name: "vhost-for-recreate", Namespace: namespace}
+
+			// Create cluster and vhost
+			CreateRabbitMQCluster(recreateClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(recreateClusterName)
+
+			CreateRabbitMQVhost(recreateVhostName, map[string]any{
+				"rabbitmqClusterName": recreateClusterName.Name,
+				"name":                "vhost-recreate-test",
+			})
+
+			// Simulate vhost ready since we don't have real RabbitMQ
+			SimulateRabbitMQVhostReady(recreateVhostName)
+		})
+
+		AfterEach(func() {
+			// Mark cluster for deletion to allow cleanup without RabbitMQ API calls
+			cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+			err := th.K8sClient.Get(th.Ctx, recreateClusterName, cluster)
+			if err == nil && cluster.DeletionTimestamp.IsZero() {
+				Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+			}
+
+			// Clean up vhost
+			vhost := &rabbitmqv1.RabbitMQVhost{}
+			err = th.K8sClient.Get(th.Ctx, recreateVhostName, vhost)
+			if err == nil {
+				Expect(th.K8sClient.Delete(th.Ctx, vhost)).To(Succeed())
+				Eventually(func(g Gomega) {
+					v := &rabbitmqv1.RabbitMQVhost{}
+					err := th.K8sClient.Get(th.Ctx, recreateVhostName, v)
+					g.Expect(err).To(HaveOccurred())
+				}, timeout, interval).Should(Succeed())
+			}
+
+			// Wait for cluster to be deleted
+			Eventually(func(g Gomega) {
+				c := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, recreateClusterName, c)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should automatically reconcile vhosts when cluster is recreated", func() {
+			// Delete the cluster
+			DeleteRabbitMQCluster(recreateClusterName)
+
+			// Wait for cluster to be deleted
+			Eventually(func(g Gomega) {
+				cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, recreateClusterName, cluster)
+				g.Expect(err).To(HaveOccurred())
+			}, timeout, interval).Should(Succeed())
+
+			// Vhost should go to error state when cluster is gone
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(recreateVhostName)
+				// Vhost exists but cluster is gone - should show error
+				g.Expect(v.Status.Conditions.IsFalse(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
+				// The condition message should indicate cluster not found
+				cond := v.Status.Conditions.Get(rabbitmqv1.RabbitMQVhostReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Message).To(ContainSubstring("not found"))
+			}, timeout, interval).Should(Succeed())
+
+			// Recreate the cluster with the same name (but don't mark it ready yet)
+			CreateRabbitMQCluster(recreateClusterName, GetDefaultRabbitMQClusterSpec(false))
+
+			// Vhost should show waiting status when cluster exists but isn't ready
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(recreateVhostName)
+				g.Expect(v.Status.Conditions.IsFalse(rabbitmqv1.RabbitMQVhostReadyCondition)).To(BeTrue())
+				cond := v.Status.Conditions.Get(rabbitmqv1.RabbitMQVhostReadyCondition)
+				g.Expect(cond).NotTo(BeNil())
+				// Should indicate waiting for cluster to be ready
+				g.Expect(cond.Message).To(ContainSubstring("waiting"))
+			}, timeout, interval).Should(Succeed())
+
+			// Now mark the cluster as ready
+			SimulateRabbitMQClusterReady(recreateClusterName)
+
+			// The watch should trigger reconciliation. Simulate success since we don't have real RabbitMQ API
+			SimulateRabbitMQVhostReady(recreateVhostName)
+
+			// Verify vhost is ready again
+			Eventually(func(g Gomega) {
+				v := GetRabbitMQVhost(recreateVhostName)
+				g.Expect(v.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 	})

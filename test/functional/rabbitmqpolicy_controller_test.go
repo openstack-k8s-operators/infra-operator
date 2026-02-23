@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive
 	. "github.com/onsi/gomega"    //nolint:revive
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -114,6 +115,80 @@ var _ = Describe("RabbitMQPolicy controller", func() {
 		It("should have spec with non-existent cluster reference", func() {
 			policy := GetRabbitMQPolicy(policyBadCluster)
 			Expect(policy.Spec.RabbitmqClusterName).To(Equal("non-existent"))
+		})
+	})
+
+	When("a RabbitMQPolicy is created with mock RabbitMQ API", func() {
+		var mockClusterName types.NamespacedName
+		var mockVhostName types.NamespacedName
+		var mockPolicyName types.NamespacedName
+
+		BeforeEach(func() {
+			mockClusterName = types.NamespacedName{Name: "rabbitmq-policy-mock", Namespace: namespace}
+			mockVhostName = types.NamespacedName{Name: "vhost-policy-mock", Namespace: namespace}
+			mockPolicyName = types.NamespacedName{Name: "policy-mock-test", Namespace: namespace}
+
+			// Set up mock RabbitMQ Management API so controller can make API calls
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			// Create cluster and mark it ready
+			CreateRabbitMQCluster(mockClusterName, GetDefaultRabbitMQClusterSpec(false))
+			SimulateRabbitMQClusterReady(mockClusterName)
+			DeferCleanup(DeleteRabbitMQCluster, mockClusterName)
+
+			// Create vhost and mark it ready
+			vhost := CreateRabbitMQVhost(mockVhostName, map[string]any{
+				"rabbitmqClusterName": mockClusterName.Name,
+				"name":                "test-vhost",
+			})
+			DeferCleanup(th.DeleteInstance, vhost)
+			SimulateRabbitMQVhostReady(mockVhostName)
+
+			// Create policy
+			policy := CreateRabbitMQPolicy(mockPolicyName, map[string]any{
+				"rabbitmqClusterName": mockClusterName.Name,
+				"vhostRef":            mockVhostName.Name,
+				"pattern":             ".*",
+				"definition": map[string]interface{}{
+					"max-length": 10000,
+				},
+			})
+			DeferCleanup(th.DeleteInstance, policy)
+		})
+
+		It("should create policy via RabbitMQ Management API and become ready", func() {
+			// Policy should become ready after successfully calling the mock API
+			Eventually(func(g Gomega) {
+				p := GetRabbitMQPolicy(mockPolicyName)
+				g.Expect(p.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQPolicyReadyCondition)).To(BeTrue())
+				g.Expect(p.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should reconcile policy on every reconciliation loop", func() {
+			// Wait for initial ready state
+			Eventually(func(g Gomega) {
+				p := GetRabbitMQPolicy(mockPolicyName)
+				g.Expect(p.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQPolicyReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Update a label to trigger reconciliation
+			Eventually(func(g Gomega) {
+				p := GetRabbitMQPolicy(mockPolicyName)
+				if p.Labels == nil {
+					p.Labels = make(map[string]string)
+				}
+				p.Labels["test-reconcile"] = "trigger"
+				g.Expect(th.K8sClient.Update(th.Ctx, p)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Policy should remain ready - controller called API again
+			Consistently(func(g Gomega) {
+				p := GetRabbitMQPolicy(mockPolicyName)
+				g.Expect(p.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQPolicyReadyCondition)).To(BeTrue())
+				g.Expect(p.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, "3s", interval).Should(Succeed())
 		})
 	})
 

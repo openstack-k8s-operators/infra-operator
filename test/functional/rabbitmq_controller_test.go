@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	rabbitmqclusterv2 "github.com/rabbitmq/cluster-operator/v2/api/v1beta1"
 
 	//revive:disable-next-line:dot-imports
 
@@ -697,6 +698,73 @@ var _ = Describe("RabbitMQ Controller", func() {
 					g.Expect(svc.OwnerReferences[0].Kind).To(Equal("RabbitMq"))
 					g.Expect(svc.OwnerReferences[0].Name).To(Equal(rabbitmqDefaultName))
 				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("RabbitMQCluster has finalizer to prevent direct deletion", func() {
+		BeforeEach(func() {
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("should prevent direct deletion of RabbitmqCluster until parent is deleted", func() {
+			// Wait for cluster to be created and have the finalizer
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				g.Expect(cluster).NotTo(BeNil())
+				g.Expect(cluster.Finalizers).To(ContainElement("rabbitmq.openstack.org/cluster-finalizer"))
+			}, timeout, interval).Should(Succeed())
+
+			// Try to delete the RabbitmqCluster directly
+			cluster := GetRabbitMQCluster(rabbitmqName)
+			Expect(th.K8sClient.Delete(th.Ctx, cluster)).To(Succeed())
+
+			// Cluster should be stuck in Terminating state (DeletionTimestamp set but still exists)
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				g.Expect(cluster).NotTo(BeNil())
+				g.Expect(cluster.DeletionTimestamp.IsZero()).To(BeFalse(), "Cluster should have DeletionTimestamp set")
+				g.Expect(cluster.Finalizers).To(ContainElement("rabbitmq.openstack.org/cluster-finalizer"))
+			}, timeout, interval).Should(Succeed())
+
+			// Consistently verify cluster is still stuck in Terminating
+			Consistently(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				g.Expect(cluster).NotTo(BeNil())
+				g.Expect(cluster.DeletionTimestamp.IsZero()).To(BeFalse())
+			}, "3s", interval).Should(Succeed())
+
+			// Now delete the parent RabbitMq CR
+			rabbitmq := GetRabbitMQ(rabbitmqName)
+			Expect(th.K8sClient.Delete(th.Ctx, rabbitmq)).To(Succeed())
+
+			// The finalizer should be removed and cluster should be deleted
+			// Check that either the cluster is gone or the finalizer was removed
+			Eventually(func(g Gomega) {
+				cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, rabbitmqName, cluster)
+				// Either cluster is deleted (NotFound) or finalizer is removed
+				if k8s_errors.IsNotFound(err) {
+					// Cluster deleted - success!
+					return
+				}
+				// Cluster still exists - check that finalizer was removed
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cluster.Finalizers).NotTo(ContainElement("rabbitmq.openstack.org/cluster-finalizer"),
+					"Finalizer should be removed when parent RabbitMq is deleted")
+			}, timeout, interval).Should(Succeed())
+
+			// Eventually both should be deleted
+			Eventually(func(g Gomega) {
+				cluster := &rabbitmqclusterv2.RabbitmqCluster{}
+				err := th.K8sClient.Get(th.Ctx, rabbitmqName, cluster)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(), "RabbitmqCluster should be deleted")
+
+				rabbitmq := &rabbitmqv1.RabbitMq{}
+				err = th.K8sClient.Get(th.Ctx, rabbitmqName, rabbitmq)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(), "RabbitMq should be deleted")
 			}, timeout, interval).Should(Succeed())
 		})
 	})

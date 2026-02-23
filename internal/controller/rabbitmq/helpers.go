@@ -35,6 +35,12 @@ func getManagementURL(rabbit *rabbitmqclusterv2.RabbitmqCluster, rabbitSecret *c
 		protocol = "https"
 		managementPort = "15671"
 	}
+
+	// Use explicit management-port field if present (for test mock servers)
+	if mgmtPortBytes, ok := rabbitSecret.Data["management-port"]; ok {
+		managementPort = string(mgmtPortBytes)
+	}
+
 	return fmt.Sprintf("%s://%s:%s", protocol, string(rabbitSecret.Data["host"]), managementPort)
 }
 
@@ -55,4 +61,38 @@ func getTLSCACert(ctx context.Context, h *helper.Helper, rabbit *rabbitmqcluster
 	}
 
 	return caCert, nil
+}
+
+// ClusterReadinessError represents different types of cluster readiness failures
+type ClusterReadinessError struct {
+	ClusterName string
+	Reason      string
+	IsWaiting   bool // true if cluster is starting up, false if it's being deleted
+}
+
+func (e *ClusterReadinessError) Error() string {
+	return e.Reason
+}
+
+// checkClusterReadiness validates that a RabbitMQ cluster is ready for operations
+func checkClusterReadiness(rabbit *rabbitmqclusterv2.RabbitmqCluster) *ClusterReadinessError {
+	if !rabbit.DeletionTimestamp.IsZero() {
+		return &ClusterReadinessError{
+			ClusterName: rabbit.Name,
+			Reason:      fmt.Sprintf("RabbitMQ cluster %s is being deleted", rabbit.Name),
+			IsWaiting:   false,
+		}
+	}
+
+	if rabbit.Status.DefaultUser == nil ||
+		rabbit.Status.DefaultUser.SecretReference == nil ||
+		rabbit.Status.DefaultUser.SecretReference.Name == "" {
+		return &ClusterReadinessError{
+			ClusterName: rabbit.Name,
+			Reason:      fmt.Sprintf("RabbitMQ cluster %s", rabbit.Name),
+			IsWaiting:   true,
+		}
+	}
+
+	return nil
 }
