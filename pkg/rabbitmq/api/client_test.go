@@ -213,3 +213,95 @@ func TestDeletePolicy(t *testing.T) {
 		t.Errorf("DeletePolicy failed: %v", err)
 	}
 }
+
+func TestCreateOrUpdateFederationUpstream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			t.Errorf("Expected PUT request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/parameters/federation-upstream///test-upstream" {
+			t.Errorf("Expected /api/parameters/federation-upstream///test-upstream, got %s", r.URL.Path)
+		}
+
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+
+		// Check that it has the "value" wrapper
+		value, ok := body["value"].(map[string]interface{})
+		if !ok {
+			t.Errorf("Expected 'value' key in body, got: %+v", body)
+		}
+
+		// Verify upstream parameters
+		if value["uri"] != "amqp://user:pass@host:5672/%2F" {
+			t.Errorf("Unexpected uri: %v", value["uri"])
+		}
+		if value["ack-mode"] != "on-confirm" {
+			t.Errorf("Unexpected ack-mode: %v", value["ack-mode"])
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "admin", "admin", false, nil)
+	upstream := FederationUpstream{
+		URI:            "amqp://user:pass@host:5672/%2F",
+		AckMode:        "on-confirm",
+		Expires:        1800000,
+		MaxHops:        1,
+		PrefetchCount:  1000,
+		ReconnectDelay: 5,
+	}
+	err := client.CreateOrUpdateFederationUpstream("/", "test-upstream", upstream)
+	if err != nil {
+		t.Errorf("CreateOrUpdateFederationUpstream failed: %v", err)
+	}
+}
+
+func TestDeleteFederationUpstream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			t.Errorf("Expected DELETE request, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/parameters/federation-upstream///test-upstream" {
+			t.Errorf("Expected /api/parameters/federation-upstream///test-upstream, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "admin", "admin", false, nil)
+	err := client.DeleteFederationUpstream("/", "test-upstream")
+	if err != nil {
+		t.Errorf("DeleteFederationUpstream failed: %v", err)
+	}
+}
+
+func TestFederationUpstreamWithCustomVhost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			t.Errorf("Expected PUT request, got %s", r.Method)
+		}
+		// Default vhost "/" gets encoded in the path
+		// The raw path will show as /// due to URL structure /api/.../vhost/name
+		// but it's properly encoded when sent over HTTP
+		if r.URL.Path != "/api/parameters/federation-upstream///test-upstream" {
+			t.Errorf("Expected /api/parameters/federation-upstream///test-upstream, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "admin", "admin", false, nil)
+	upstream := FederationUpstream{
+		URI:     "amqp://user:pass@host:5672/%2F",
+		AckMode: "on-confirm",
+	}
+	err := client.CreateOrUpdateFederationUpstream("/", "test-upstream", upstream)
+	if err != nil {
+		t.Errorf("CreateOrUpdateFederationUpstream with default vhost failed: %v", err)
+	}
+}

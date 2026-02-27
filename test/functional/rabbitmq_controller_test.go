@@ -306,6 +306,46 @@ var _ = Describe("RabbitMQ Controller", func() {
 		})
 	})
 
+	When("RabbitMQ reconciles with existing additionalPlugins on RabbitmqCluster", func() {
+		BeforeEach(func() {
+			rabbitmq := CreateRabbitMQ(rabbitmqName, GetDefaultRabbitMQSpec())
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("should preserve additionalPlugins set by the federation controller", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Simulate what the federation controller does: add plugins to the RabbitmqCluster
+			Eventually(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				cluster.Spec.Rabbitmq.AdditionalPlugins = []rabbitmqclusterv2.Plugin{
+					"rabbitmq_federation",
+					"rabbitmq_federation_management",
+				}
+				g.Expect(k8sClient.Update(ctx, cluster)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Trigger a reconciliation of the RabbitMq CR by updating it
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				if instance.Annotations == nil {
+					instance.Annotations = map[string]string{}
+				}
+				instance.Annotations["test-trigger"] = "reconcile"
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the plugins are preserved after RabbitMq controller reconciliation
+			Consistently(func(g Gomega) {
+				cluster := GetRabbitMQCluster(rabbitmqName)
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation")))
+				g.Expect(cluster.Spec.Rabbitmq.AdditionalPlugins).To(
+					ContainElement(rabbitmqclusterv2.Plugin("rabbitmq_federation_management")))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("RabbitMQ gets created with a complete statefulset override", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()

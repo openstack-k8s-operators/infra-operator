@@ -78,6 +78,22 @@ type Policy struct {
 	ApplyTo    string                 `json:"apply-to"`
 }
 
+// FederationUpstream represents a RabbitMQ federation upstream parameter
+type FederationUpstream struct {
+	URI            string `json:"uri"`
+	Expires        int32  `json:"expires,omitempty"`
+	MessageTTL     int32  `json:"message-ttl,omitempty"`
+	MaxHops        int32  `json:"max-hops,omitempty"`
+	PrefetchCount  int32  `json:"prefetch-count,omitempty"`
+	ReconnectDelay int32  `json:"reconnect-delay,omitempty"`
+	AckMode        string `json:"ack-mode,omitempty"`
+	TrustUserId    bool   `json:"trust-user-id,omitempty"`
+	Exchange       string `json:"exchange,omitempty"`
+	Queue          string `json:"queue,omitempty"`
+	// Additional parameters can be added here
+	ExtraParams map[string]interface{} `json:"-"`
+}
+
 // NewClient creates a new RabbitMQ Management API client
 func NewClient(baseURL, username, password string, tlsEnabled bool, caCert []byte) *Client {
 	httpClient := &http.Client{
@@ -334,6 +350,89 @@ func (c *Client) DeletePolicy(vhost, name string) error {
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("failed to delete policy %s on vhost %s: status %d, body: %s", name, vhost, resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// CreateOrUpdateFederationUpstream creates or updates a RabbitMQ federation upstream parameter
+func (c *Client) CreateOrUpdateFederationUpstream(vhost, name string, upstream FederationUpstream) error {
+	// Convert struct to map for JSON marshaling
+	// This allows us to include ExtraParams fields
+	upstreamMap := make(map[string]interface{})
+	upstreamMap["uri"] = upstream.URI
+
+	if upstream.Expires != 0 {
+		upstreamMap["expires"] = upstream.Expires
+	}
+	if upstream.MessageTTL != 0 {
+		upstreamMap["message-ttl"] = upstream.MessageTTL
+	}
+	if upstream.MaxHops != 0 {
+		upstreamMap["max-hops"] = upstream.MaxHops
+	}
+	if upstream.PrefetchCount != 0 {
+		upstreamMap["prefetch-count"] = upstream.PrefetchCount
+	}
+	if upstream.ReconnectDelay != 0 {
+		upstreamMap["reconnect-delay"] = upstream.ReconnectDelay
+	}
+	if upstream.AckMode != "" {
+		upstreamMap["ack-mode"] = upstream.AckMode
+	}
+	if upstream.TrustUserId {
+		upstreamMap["trust-user-id"] = upstream.TrustUserId
+	}
+	if upstream.Exchange != "" {
+		upstreamMap["exchange"] = upstream.Exchange
+	}
+	if upstream.Queue != "" {
+		upstreamMap["queue"] = upstream.Queue
+	}
+
+	// Add any extra parameters
+	for k, v := range upstream.ExtraParams {
+		upstreamMap[k] = v
+	}
+
+	// Wrap in "value" field as required by RabbitMQ API
+	body := map[string]interface{}{
+		"value": upstreamMap,
+	}
+
+	encodedVhost := url.PathEscape(vhost)
+	encodedName := url.PathEscape(name)
+	resp, err := c.doRequest("PUT", fmt.Sprintf("/api/parameters/federation-upstream/%s/%s", encodedVhost, encodedName), body)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to create/update federation upstream %s on vhost %s: status %d, body: %s", name, vhost, resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// DeleteFederationUpstream deletes a RabbitMQ federation upstream parameter
+func (c *Client) DeleteFederationUpstream(vhost, name string) error {
+	encodedVhost := url.PathEscape(vhost)
+	encodedName := url.PathEscape(name)
+	resp, err := c.doRequestWithTimeout("DELETE", fmt.Sprintf("/api/parameters/federation-upstream/%s/%s", encodedVhost, encodedName), nil, DeleteTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to delete federation upstream %s on vhost %s: status %d, body: %s", name, vhost, resp.StatusCode, string(body))
 	}
 
 	return nil

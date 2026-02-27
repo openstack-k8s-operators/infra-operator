@@ -87,6 +87,11 @@ const (
 	// The short prefix allows for usernames up to MaxUsernameLength chars
 	UserVhostFinalizerPrefix = "rmquser.openstack.org/u-"
 
+	// FederationVhostFinalizerPrefix - prefix for per-federation finalizers added to vhosts by RabbitMQFederation controller
+	// Full finalizer format: rmqfed.openstack.org/f-<federation-name>
+	// Prevents vhost deletion while federation is active
+	FederationVhostFinalizerPrefix = "rmqfed.openstack.org/f-"
+
 	// MaxFinalizerLength is the Kubernetes limit for finalizer names
 	MaxFinalizerLength = 63
 

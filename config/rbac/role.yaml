@@ -243,6 +243,7 @@ rules:
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqfederations
   - rabbitmqpolicies
   - rabbitmqs
   - rabbitmqusers
@@ -259,6 +260,7 @@ rules:
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqfederations/finalizers
   - rabbitmqpolicies/finalizers
   - rabbitmqs/finalizers
   - rabbitmqusers/finalizers
@@ -269,6 +271,7 @@ rules:
 - apiGroups:
   - rabbitmq.openstack.org
   resources:
+  - rabbitmqfederations/status
   - rabbitmqpolicies/status
   - rabbitmqs/status
   - rabbitmqusers/status
