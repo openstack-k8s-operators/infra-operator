@@ -301,6 +301,7 @@ func ConfigureCluster(
 		"log.console = true",
 		"prometheus.tcp.ip = ::",
 		"management.tcp.ip = ::",
+		"vm_memory_high_watermark.relative = 0.8",
 	}
 	if cluster.Spec.TLS.SecretName != "" {
 		settings = append(settings, "ssl_options.verify = verify_none", "prometheus.ssl.ip = ::")
