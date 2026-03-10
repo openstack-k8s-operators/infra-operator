@@ -169,7 +169,6 @@ func valiateNetworks(
 // - subnet is still there
 // - cidr changed
 // - Vlan changed
-// - gateway changed
 func valiateNetworksChanged(
 	networks []Network,
 	oldNetworks []Network,
@@ -219,14 +218,6 @@ func valiateNetworksChanged(
 				allErrs = append(allErrs, field.Invalid(path.Child("vlan"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "vlan", vlan)))
 			}
 
-			// validate if gateway changed
-			if !equality.Semantic.DeepEqual(_subnet.Gateway, networks[netIdx].Subnets[subnetIdx].Gateway) {
-				gateway := ""
-				if _subnet.Gateway != nil {
-					gateway = *_subnet.Gateway
-				}
-				allErrs = append(allErrs, field.Invalid(path.Child("vlan"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "vlan", gateway)))
-			}
 
 		}
 	}
