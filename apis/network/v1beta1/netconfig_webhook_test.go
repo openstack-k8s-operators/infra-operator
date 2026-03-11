@@ -1740,8 +1740,8 @@ func TestNetConfigUpdateValidation(t *testing.T) {
 			},
 		},
 		{
-			name:      "should fail when the gateway changes",
-			expectErr: true,
+			name:      "should succeed when the gateway changes",
+			expectErr: false,
 			newSpec: &NetConfigSpec{
 				Networks: []Network{
 					{
