@@ -202,6 +202,91 @@ class TestRedfishFencing(unittest.TestCase):
         mock_get.assert_called_once()
 
     @patch('instanceha.requests.post')
+    @patch('instanceha.requests.get')
+    @patch('instanceha.time.sleep')
+    def test_redfish_reset_400_on_action_retries_when_off(self, mock_sleep, mock_get, mock_post):
+        """Test Redfish reset retries On action with 400 when server is OFF.
+
+        Some hardware (e.g. PRIMEQUEST 4400E) returns 400 Bad Request when
+        an On operation is sent too soon after ForceOff, because the system
+        is not yet ready to accept the power-on command even though
+        PowerState is already Off. The retry logic should handle this.
+        """
+        mock_config_manager = Mock()
+        mock_config_manager.get_requests_ssl_config.return_value = False
+
+        # First two POST attempts return 400, third succeeds with 200
+        mock_post.side_effect = [
+            Mock(status_code=400),
+            Mock(status_code=400),
+            Mock(status_code=200),
+        ]
+
+        # GET returns OFF for both 400 responses (server is off but not ready)
+        mock_get_response = Mock()
+        mock_get_response.status_code = 200
+        mock_get_response.json.return_value = {'PowerState': 'Off'}
+        mock_get.return_value = mock_get_response
+
+        result = instanceha._redfish_reset(
+            'http://test-server/redfish/v1/Systems/1', 'user', 'pass', 30,
+            'On', mock_config_manager)
+
+        self.assertTrue(result)
+        self.assertEqual(mock_post.call_count, 3)
+        self.assertEqual(mock_get.call_count, 2)  # Called on each 400
+        self.assertEqual(mock_sleep.call_count, 2)  # Sleep between retries
+
+    @patch('instanceha.requests.post')
+    @patch('instanceha.requests.get')
+    @patch('instanceha.time.sleep')
+    def test_redfish_reset_400_on_action_retry_exhausted(self, mock_sleep, mock_get, mock_post):
+        """Test Redfish reset fails after max retries on 400 for On action."""
+        mock_config_manager = Mock()
+        mock_config_manager.get_requests_ssl_config.return_value = False
+
+        # All POST attempts return 400
+        mock_post.return_value = Mock(status_code=400)
+
+        # GET always returns OFF (server off but never ready)
+        mock_get_response = Mock()
+        mock_get_response.status_code = 200
+        mock_get_response.json.return_value = {'PowerState': 'Off'}
+        mock_get.return_value = mock_get_response
+
+        result = instanceha._redfish_reset(
+            'http://test-server/redfish/v1/Systems/1', 'user', 'pass', 30,
+            'On', mock_config_manager)
+
+        self.assertFalse(result)
+        self.assertEqual(mock_post.call_count, 3)  # MAX_FENCING_RETRIES
+        self.assertEqual(mock_get.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)  # No sleep after last attempt
+
+    @patch('instanceha.requests.post')
+    @patch('instanceha.requests.get')
+    def test_redfish_reset_400_forceoff_already_off(self, mock_get, mock_post):
+        """Test Redfish reset with 400 for ForceOff when already off succeeds immediately."""
+        mock_config_manager = Mock()
+        mock_config_manager.get_requests_ssl_config.return_value = False
+
+        mock_post.return_value = Mock(status_code=400)
+
+        mock_get_response = Mock()
+        mock_get_response.status_code = 200
+        mock_get_response.json.return_value = {'PowerState': 'Off'}
+        mock_get.return_value = mock_get_response
+
+        result = instanceha._redfish_reset(
+            'http://test-server/redfish/v1/Systems/1', 'user', 'pass', 30,
+            'ForceOff', mock_config_manager)
+
+        # ForceOff with 400 and power state OFF should succeed immediately (no retry)
+        self.assertTrue(result)
+        mock_post.assert_called_once()
+        mock_get.assert_called_once()
+
+    @patch('instanceha.requests.post')
     def test_redfish_reset_success(self, mock_post):
         """Test successful Redfish reset."""
         # Mock config manager
