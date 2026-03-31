@@ -1864,9 +1864,27 @@ def _redfish_reset(url, user, passwd, timeout, action, config_mgr):
                 # Check if server is already powered off
                 power_state = _get_power_state('redfish', url=url, user=user, passwd=passwd, timeout=timeout, config_mgr=config_mgr)
                 if power_state == 'OFF':
-                    logging.debug("Redfish reset successful: %s on %s (already off)", action, safe_url)
-                    logging.info("Redfish reset successful: %s (already off)", action)
-                    return True
+                    if action in ['On', 'ForceOn']:
+                        # Server is OFF but not yet ready to accept power-on
+                        # (e.g. PRIMEQUEST 4400E needs time after ForceOff before
+                        # accepting On). Retry with backoff.
+                        if attempt < MAX_FENCING_RETRIES - 1:
+                            logging.warning(
+                                "Redfish reset: %s rejected with %d while server is OFF "
+                                "(attempt %d/%d), server may not be ready yet, retrying...",
+                                action, response.status_code, attempt + 1, MAX_FENCING_RETRIES)
+                            time.sleep(FENCING_RETRY_DELAY_SECONDS * (attempt + 1))
+                            continue
+                        else:
+                            logging.error(
+                                "Redfish reset failed: %s rejected with %d while server is OFF "
+                                "after %d attempts for %s",
+                                action, response.status_code, MAX_FENCING_RETRIES, safe_url)
+                            return False
+                    else:
+                        logging.debug("Redfish reset successful: %s on %s (already off)", action, safe_url)
+                        logging.info("Redfish reset successful: %s (already off)", action)
+                        return True
                 else:
                     logging.error("Redfish reset failed: %s conflict but not OFF (status: %s) for %s", response.status_code, power_state, safe_url)
                     return False
