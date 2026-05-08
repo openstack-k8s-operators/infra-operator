@@ -25,6 +25,11 @@ const (
 	// Status=True means the proxy is active and must be cleared by setting the
 	// clients-reconfigured annotation. Status=False means no proxy is running.
 	RabbitMQProxyActiveCondition condition.Type = "RabbitMQProxyActive"
+
+	// ClusterAvailableCondition indicates that the RabbitMQ cluster has quorum
+	// and can serve traffic. True when ReadyCount >= ceil(Replicas/2).
+	// It never blocks ReadyCondition since quorum is always met before all replicas are ready.
+	ClusterAvailableCondition condition.Type = "ClusterAvailable"
 )
 
 // TransportURL Condition Types used by API objects.
@@ -57,6 +62,16 @@ const (
 
 	// RabbitMQProxyInactiveMessage is the message when the proxy is not active
 	RabbitMQProxyInactiveMessage = "AMQP proxy sidecar is not active"
+
+	//
+	// ClusterAvailable condition messages
+	//
+
+	// ClusterAvailableMessage
+	ClusterAvailableMessage = "RabbitMQ cluster has quorum and can serve traffic"
+
+	// ClusterNotAvailableMessage
+	ClusterNotAvailableMessage = "RabbitMQ cluster does not have quorum (%d/%d replicas ready, need %d)"
 
 	//
 	// TransportURLReady condition messages

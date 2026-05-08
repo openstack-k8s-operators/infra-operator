@@ -394,6 +394,14 @@ func (instance RabbitMq) IsReady() bool {
 	return instance.Status.Conditions.IsTrue(condition.ReadyCondition)
 }
 
+// IsAvailable - returns true if the cluster has quorum and can serve traffic.
+// Unlike IsReady (which requires all replicas), this is true when
+// ReadyCount >= ceil(Replicas/2), allowing TransportURLs to remain
+// available during rolling restarts.
+func (instance RabbitMq) IsAvailable() bool {
+	return instance.Status.Conditions.IsTrue(ClusterAvailableCondition)
+}
+
 // RbacConditionsSet - set the conditions for the rbac object
 func (instance RabbitMq) RbacConditionsSet(c *condition.Condition) {
 	instance.Status.Conditions.Set(c)

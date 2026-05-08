@@ -868,6 +868,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.ReadyCount = sts.Status.ReadyReplicas
 	clusterReady := common_statefulset.IsReady(*sts)
 
+	// ClusterAvailable indicates the cluster has quorum and can serve traffic.
+	// It is a sub-condition of ReadyCondition but never blocks it: quorum
+	// (ceil(Replicas/2)) is always satisfied before all replicas are ready.
+	replicas := ptr.Deref(instance.Spec.Replicas, 1)
+	quorum := replicas/2 + 1
+	if instance.Status.ReadyCount >= quorum && instance.Status.DefaultUser != nil {
+		instance.Status.Conditions.Set(condition.TrueCondition(
+			rabbitmqv1beta1.ClusterAvailableCondition,
+			rabbitmqv1beta1.ClusterAvailableMessage))
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1beta1.ClusterAvailableCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			rabbitmqv1beta1.ClusterNotAvailableMessage,
+			instance.Status.ReadyCount, replicas, quorum))
+	}
+
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 

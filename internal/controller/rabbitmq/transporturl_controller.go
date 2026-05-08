@@ -508,18 +508,8 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	// Wait for RabbitMQ cluster to be ready
-	if err := checkClusterReadiness(rabbit); err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.TransportURLReadyCondition,
-			condition.RequestedReason,
-			condition.SeverityInfo,
-			rabbitmqv1.TransportURLInProgressMessage))
-		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
-	}
-
-	// Get cluster admin secret for connection details
-	if rabbit.Status.DefaultUser == nil {
+	// Wait for RabbitMQ cluster to be available (quorum maintained)
+	if !rabbit.DeletionTimestamp.IsZero() || !rabbit.IsAvailable() {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			rabbitmqv1.TransportURLReadyCondition,
 			condition.RequestedReason,

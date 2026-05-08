@@ -234,26 +234,24 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	// Check if cluster is ready for operations
-	if readinessErr := checkClusterReadiness(rabbit); readinessErr != nil {
-		if readinessErr.IsWaiting {
-			// Cluster is starting up - set waiting condition
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				rabbitmqv1.RabbitMQUserReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
-				rabbitmqv1.RabbitMQUserReadyWaitingMessage,
-				readinessErr.Reason))
-			Log.Info("Waiting for RabbitMQ cluster to be ready", "cluster", instance.Spec.RabbitmqClusterName)
-		} else {
-			// Cluster is being deleted - set error condition
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				rabbitmqv1.RabbitMQUserReadyCondition,
-				condition.ErrorReason,
-				condition.SeverityWarning,
-				rabbitmqv1.RabbitMQUserReadyErrorMessage,
-				readinessErr.Reason))
-		}
+	// Check if cluster is available for operations
+	if !rabbit.DeletionTimestamp.IsZero() {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			rabbitmqv1.RabbitMQUserReadyErrorMessage,
+			fmt.Sprintf("RabbitMQ cluster %s is being deleted", rabbit.Name)))
+		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+	}
+	if !rabbit.IsAvailable() {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			rabbitmqv1.RabbitMQUserReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			rabbitmqv1.RabbitMQUserReadyWaitingMessage,
+			fmt.Sprintf("cluster %s does not have quorum", rabbit.Name)))
+		Log.Info("Waiting for RabbitMQ cluster to be available", "cluster", instance.Spec.RabbitmqClusterName)
 		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
 	}
 
