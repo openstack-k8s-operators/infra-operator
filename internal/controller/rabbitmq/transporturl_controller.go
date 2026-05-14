@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +42,7 @@ import (
 	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	object "github.com/openstack-k8s-operators/lib-common/modules/common/object"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
+	edpm "github.com/openstack-k8s-operators/lib-common/modules/edpm/unstructured"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -82,6 +84,7 @@ func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=cinder.openstack.org;glance.openstack.org;heat.openstack.org;horizon.openstack.org;ironic.openstack.org;keystone.openstack.org;manila.openstack.org;neutron.openstack.org;nova.openstack.org;octavia.openstack.org;ovn.openstack.org;placement.openstack.org;swift.openstack.org;telemetry.openstack.org;designate.openstack.org;barbican.openstack.org;watcher.openstack.org,resources=*,verbs=get;list
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete;
+//+kubebuilder:rbac:groups=dataplane.openstack.org,resources=openstackdataplanenodesets,verbs=get;list;watch
 
 // Reconcile - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.2/pkg/reconcile
 func (r *TransportURLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -312,7 +315,6 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, user, func() error {
 			controllerutil.AddFinalizer(user, perConsumerUserFinalizer)
-			controllerutil.AddFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
 			// Clear orphaned label — this consumer is (re)claiming the user CR
 			labels := user.GetLabels()
 			if labels != nil {
@@ -345,21 +347,34 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		Log.Error(err, "Failed to delete legacy owned resources")
 	}
 
-	// Remove per-consumer finalizer from previously used shared user/vhost CRs
-	// when the TransportURL's spec changes (credential rotation, vhost change, etc.)
+	// Credential rotation: when the user ref changes, defer finalizer removal
+	// until NodeSet deployments push the new credentials to all nodes. This
+	// prevents the old RabbitMQ user from being deleted while computes still
+	// use its credentials.
 	perConsumerFin := rabbitmqv1.TransportURLFinalizerFor(instance.Name)
 	if instance.Status.RabbitmqUserRef != "" && instance.Status.RabbitmqUserRef != userRef {
-		if err := r.removeFinalizerFromCR(ctx, &rabbitmqv1.RabbitMQUser{}, instance.Status.RabbitmqUserRef, instance.Namespace, perConsumerFin); err != nil {
-			return ctrl.Result{}, err
+		// Force-release any earlier pending user first (double rotation edge case)
+		if instance.Status.PreviousRabbitmqUserRef != "" && instance.Status.PreviousRabbitmqUserRef != instance.Status.RabbitmqUserRef {
+			if _, err := r.releasePendingUser(ctx, instance); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
-		// If no other TransportURL uses this user, mark it as orphaned.
-		// The cleanup-blocked finalizer stays, requiring admin approval before deletion.
-		if err := r.markUserOrphaned(ctx, instance.Status.RabbitmqUserRef, instance.Namespace); err != nil {
-			return ctrl.Result{}, err
+		// Only initialize pending release on the first detection — subsequent
+		// reconciles re-enter this block (RabbitmqUserRef not yet updated) and
+		// must not reset NodeSetSynced.
+		if instance.Status.PreviousRabbitmqUserRef != instance.Status.RabbitmqUserRef {
+			instance.Status.PreviousRabbitmqUserRef = instance.Status.RabbitmqUserRef
+			instance.Status.NodeSetSynced = ""
+			Log.Info("Credential rotation detected, deferring old user release",
+				"oldUser", instance.Status.RabbitmqUserRef, "newUser", userRef)
 		}
 	}
 	if instance.Status.RabbitmqVhost != "" && instance.Status.RabbitmqVhost != "/" {
-		oldVhostRef := rabbitmqv1.CanonicalVhostName(instance.Spec.RabbitmqClusterName, instance.Status.RabbitmqVhost)
+		oldClusterName := instance.Status.RabbitmqClusterName
+		if oldClusterName == "" {
+			oldClusterName = instance.Spec.RabbitmqClusterName
+		}
+		oldVhostRef := rabbitmqv1.CanonicalVhostName(oldClusterName, instance.Status.RabbitmqVhost)
 		if oldVhostRef != vhostRef {
 			if err := r.removeFinalizerFromCR(ctx, &rabbitmqv1.RabbitMQVhost{}, oldVhostRef, instance.Namespace, perConsumerFin); err != nil {
 				return ctrl.Result{}, err
@@ -521,6 +536,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 
 	// Update the CR status with actual values used
 	instance.Status.SecretName = secret.Name
+	instance.Status.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
 	instance.Status.RabbitmqUsername = finalUsername
 	instance.Status.RabbitmqVhost = vhostName
 	instance.Status.RabbitmqUserRef = userRef
@@ -534,6 +550,19 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 	Log.Info("Reconciled Service successfully")
+
+	// Release pending old user if deployment has completed
+	if instance.Status.PreviousRabbitmqUserRef != "" {
+		released, err := r.tryReleasePendingUser(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !released {
+			Log.Info("Pending user release waiting for deployment",
+				"pendingUser", instance.Status.PreviousRabbitmqUserRef)
+			return ctrl.Result{RequeueAfter: ConnectionCheckInterval}, nil
+		}
+	}
 
 	// Only TransportURLs with names >61 chars need a periodic requeue because
 	// their finalizer names are truncated+hashed, breaking the watch-based
@@ -606,6 +635,15 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 
 	perConsumerFinalizer := rabbitmqv1.TransportURLFinalizerFor(instance.Name)
 
+	// Release any pending user from a credential rotation that hasn't completed
+	if instance.Status.PreviousRabbitmqUserRef != "" {
+		if err := r.releaseUserFinalizer(ctx, instance.Status.PreviousRabbitmqUserRef, instance.Namespace, perConsumerFinalizer); err != nil {
+			return ctrl.Result{}, err
+		}
+		instance.Status.PreviousRabbitmqUserRef = ""
+		instance.Status.NodeSetSynced = ""
+	}
+
 	// Remove per-consumer finalizer from shared user CR
 	if instance.Spec.Username != "" {
 		vhostName := instance.Spec.Vhost
@@ -619,25 +657,36 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 			if controllerutil.RemoveFinalizer(user, perConsumerFinalizer) {
 				updated = true
 			}
-			if controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
-				updated = true
-			}
-			// Clear orphaned label since we're explicitly releasing this user
-			labels := user.GetLabels()
-			if labels != nil && labels[rabbitmqv1.RabbitMQUserOrphanedLabel] == "true" {
-				delete(labels, rabbitmqv1.RabbitMQUserOrphanedLabel)
-				user.SetLabels(labels)
-				updated = true
+			// Determine orphaned state based on remaining consumer finalizers
+			if user.DeletionTimestamp.IsZero() {
+				hasConsumers := false
+				for _, f := range user.GetFinalizers() {
+					if strings.HasPrefix(f, rabbitmqv1.TransportURLFinalizerPrefix) {
+						hasConsumers = true
+						break
+					}
+				}
+				labels := user.GetLabels()
+				if labels == nil {
+					labels = map[string]string{}
+				}
+				if !hasConsumers {
+					if labels[rabbitmqv1.RabbitMQUserOrphanedLabel] != "true" {
+						labels[rabbitmqv1.RabbitMQUserOrphanedLabel] = "true"
+						user.SetLabels(labels)
+						updated = true
+						Log.Info("Marking user CR as orphaned (no remaining consumers)", "name", userRef)
+					}
+				} else if labels[rabbitmqv1.RabbitMQUserOrphanedLabel] == "true" {
+					delete(labels, rabbitmqv1.RabbitMQUserOrphanedLabel)
+					user.SetLabels(labels)
+					updated = true
+				}
 			}
 			if updated {
 				if err := r.Update(ctx, user); err != nil && !k8s_errors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to remove finalizers from user %s: %w", userRef, err)
+					return ctrl.Result{}, fmt.Errorf("failed to update user %s during delete: %w", userRef, err)
 				}
-			}
-			// Mark orphaned if no other consumers remain — user controller will auto-delete
-			// since cleanup-blocked was removed above.
-			if err := r.markUserOrphaned(ctx, userRef, instance.Namespace); err != nil {
-				return ctrl.Result{}, err
 			}
 		} else if !k8s_errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to get user %s for cleanup: %w", userRef, err)
@@ -687,7 +736,7 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1.TransportURL{}).
 		Owns(&corev1.Secret{}).
 		Watches(
@@ -702,8 +751,18 @@ func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&rabbitmqv1.RabbitMq{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
-		).
-		Complete(r)
+		)
+
+	gk := schema.GroupKind{Group: edpm.NodeSetGVK.Group, Kind: edpm.NodeSetGVK.Kind}
+	if _, err := mgr.GetRESTMapper().RESTMapping(gk, edpm.NodeSetGVK.Version); err == nil {
+		b = b.Watches(
+			edpm.NewNodeSetObject(),
+			handler.EnqueueRequestsFromMapFunc(r.findTransportURLsWithPendingRelease),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		)
+	}
+
+	return b.Complete(r)
 }
 
 func (r *TransportURLReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
@@ -761,6 +820,27 @@ func (r *TransportURLReconciler) findTransportURLsFromFinalizers(_ context.Conte
 	return requests
 }
 
+// findTransportURLsWithPendingRelease maps NodeSet changes to TransportURLs that have a
+// pending user release (waiting for deployment to complete before releasing old credentials).
+func (r *TransportURLReconciler) findTransportURLsWithPendingRelease(ctx context.Context, obj client.Object) []reconcile.Request {
+	turlList := &rabbitmqv1.TransportURLList{}
+	if err := r.List(ctx, turlList, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for _, turl := range turlList.Items {
+		if turl.Status.PreviousRabbitmqUserRef != "" {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      turl.Name,
+					Namespace: turl.Namespace,
+				},
+			})
+		}
+	}
+	return requests
+}
+
 // deleteOrphanedCR deletes a shared user/vhost CR if no active consumer finalizers remain.
 // Consumer finalizers are per-TransportURL (turl.openstack.org/t-*) and per-user on vhosts
 // (rmquser.openstack.org/u-*). External finalizers do NOT block the Delete call — the
@@ -792,41 +872,124 @@ func (r *TransportURLReconciler) deleteOrphanedCR(ctx context.Context, obj clien
 	return nil
 }
 
-// markUserOrphaned labels a shared RabbitMQUser CR as orphaned when no active consumer finalizers remain.
-// Unlike deleteOrphanedCR (which issues a Delete), this sets a label so the CR stays reclaimable
-// by new consumers. The user controller handles actual deletion once an admin removes the
-// cleanup-blocked finalizer.
-func (r *TransportURLReconciler) markUserOrphaned(ctx context.Context, name, namespace string) error {
+// tryReleasePendingUser checks whether it is safe to release the pending old user
+// from a credential rotation. Uses a two-phase state machine:
+//
+// Phase 1 (NodeSetSynced=""): wait for AreSecretHashesInSync to return false,
+// indicating service operators have regenerated config secrets with new
+// credentials (creating a hash mismatch against NodeSet secretHashes).
+//
+// Phase 2 (NodeSetSynced="false"): wait for AreSecretHashesInSync to return
+// true, indicating a NodeSet deployment has completed with the new config
+// secrets.
+//
+// Returns (true, nil) if the user was released.
+func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
 	Log := r.GetLogger(ctx)
+	pendingRef := instance.Status.PreviousRabbitmqUserRef
+
+	// No NodeSets with secretHashes -> no computes affected, release immediately
+	haveNS, err := edpm.HaveNodeSets(ctx, r.Client, instance.Namespace)
+	if err != nil {
+		Log.Error(err, "Failed to check for nodesets")
+		return false, nil
+	}
+	if !haveNS {
+		return r.releasePendingUser(ctx, instance)
+	}
+
+	inSync, info, err := edpm.AreSecretHashesInSync(ctx, r.Client, instance.Namespace)
+	if err != nil {
+		Log.Error(err, "Failed to check nodeset sync status for pending release")
+		return false, nil
+	}
+
+	if instance.Status.NodeSetSynced != "false" {
+		// Phase 1: waiting for config secrets to go out of sync
+		if !inSync {
+			instance.Status.NodeSetSynced = "false"
+			Log.Info("Config regeneration detected, waiting for deployment to complete",
+				"pendingUser", pendingRef, "info", info)
+		} else {
+			Log.Info("Waiting for service operators to regenerate config",
+				"pendingUser", pendingRef)
+		}
+		return false, nil
+	}
+
+	// Phase 2: waiting for deployment to complete
+	if !inSync {
+		Log.Info("Deployment in progress, waiting for completion",
+			"pendingUser", pendingRef, "info", info)
+		return false, nil
+	}
+
+	return r.releasePendingUser(ctx, instance)
+}
+
+// releaseUserFinalizer removes the per-consumer finalizer from a RabbitMQUser
+// and marks it as orphaned if no consumer finalizers remain.
+func (r *TransportURLReconciler) releaseUserFinalizer(ctx context.Context, userRef, namespace, finalizer string) error {
+	Log := r.GetLogger(ctx)
+
 	user := &rabbitmqv1.RabbitMQUser{}
-	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, user); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: userRef, Namespace: namespace}, user); err != nil {
 		if k8s_errors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to get user %s: %w", name, err)
+		return fmt.Errorf("failed to get user %s: %w", userRef, err)
 	}
-	if !user.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	for _, f := range user.GetFinalizers() {
-		if strings.HasPrefix(f, rabbitmqv1.TransportURLFinalizerPrefix) {
-			return nil
+
+	updated := controllerutil.RemoveFinalizer(user, finalizer)
+
+	if user.DeletionTimestamp.IsZero() {
+		hasConsumers := false
+		for _, f := range user.GetFinalizers() {
+			if strings.HasPrefix(f, rabbitmqv1.TransportURLFinalizerPrefix) {
+				hasConsumers = true
+				break
+			}
+		}
+		if !hasConsumers {
+			labels := user.GetLabels()
+			if labels == nil {
+				labels = map[string]string{}
+			}
+			if labels[rabbitmqv1.RabbitMQUserOrphanedLabel] != "true" {
+				labels[rabbitmqv1.RabbitMQUserOrphanedLabel] = "true"
+				user.SetLabels(labels)
+				updated = true
+				Log.Info("Marking user CR as orphaned (no remaining consumers)", "name", userRef)
+			}
 		}
 	}
-	labels := user.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
+
+	if updated {
+		if err := r.Update(ctx, user); err != nil && !k8s_errors.IsNotFound(err) {
+			return fmt.Errorf("failed to release user %s: %w", userRef, err)
+		}
 	}
-	if labels[rabbitmqv1.RabbitMQUserOrphanedLabel] == "true" {
-		return nil
-	}
-	labels[rabbitmqv1.RabbitMQUserOrphanedLabel] = "true"
-	user.SetLabels(labels)
-	Log.Info("Marking user CR as orphaned (no remaining consumers)", "name", name)
-	if err := r.Update(ctx, user); err != nil && !k8s_errors.IsNotFound(err) {
-		return fmt.Errorf("failed to mark user %s as orphaned: %w", name, err)
-	}
+
 	return nil
+}
+
+// releasePendingUser removes the consumer finalizer from the pending user and
+// marks it as orphaned if no consumer finalizers remain.
+// Clears the pending release fields from status.
+func (r *TransportURLReconciler) releasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
+	Log := r.GetLogger(ctx)
+	pendingRef := instance.Status.PreviousRabbitmqUserRef
+	perConsumerFin := rabbitmqv1.TransportURLFinalizerFor(instance.Name)
+
+	Log.Info("Releasing pending user (deployment verified)", "pendingUser", pendingRef)
+
+	if err := r.releaseUserFinalizer(ctx, pendingRef, instance.Namespace, perConsumerFin); err != nil {
+		return false, err
+	}
+
+	instance.Status.PreviousRabbitmqUserRef = ""
+	instance.Status.NodeSetSynced = ""
+	return true, nil
 }
 
 // removeFinalizerFromCR removes a finalizer from a CR by name. NotFound is not an error.

@@ -1,5 +1,7 @@
 #
-# Step 2: Assert rotation started: glance user ready, nova user still exists but finalizer removed
+# Step 2: Assert rotation complete: glance user ready, nova user auto-deleted
+# With no NodeSets in the environment, the user controller verifies credentials
+# are safe to delete and removes the orphaned user CR automatically.
 #
 apiVersion: kuttl.dev/v1beta1
 kind: TestAssert
@@ -40,29 +42,21 @@ commands:
       echo "PASS: User 'glance' exists in RabbitMQ"
   - script: |
       set -e
-      # Old user CR should be marked as orphaned (label set) but NOT deleted,
-      # because cleanup-blocked finalizer requires admin approval before deletion.
-      # The per-consumer finalizer should have been removed by the controller.
-      ORPHANED=$(oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o jsonpath='{.metadata.labels.rabbitmq\.openstack\.org/orphaned}')
-      if [ "$ORPHANED" != "true" ]; then
-        echo "FAIL: Old user CR not marked as orphaned"
+      # Old user CR should be auto-deleted (no NodeSets means credentials are safe to remove)
+      if oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova 2>/dev/null; then
+        echo "FAIL: Old user CR rabbitmq-cred-rot-user-nova still exists"
         oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o yaml
         exit 1
       fi
-      DELTS=$(oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o jsonpath='{.metadata.deletionTimestamp}')
-      if [ -n "$DELTS" ]; then
-        echo "FAIL: Old user CR should NOT have DeletionTimestamp (orphaned label design)"
+      echo "PASS: Old user CR rabbitmq-cred-rot-user-nova auto-deleted"
+  - script: |
+      set -e
+      # Verify old user was deleted from RabbitMQ
+      POD=$(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=rabbitmq-cred-rot -o jsonpath='{.items[0].metadata.name}')
+      USERS=$(oc exec -n $NAMESPACE "$POD" -- rabbitmqctl list_users)
+      if echo "$USERS" | grep -q "nova"; then
+        echo "FAIL: Old user 'nova' still exists in RabbitMQ"
+        echo "Users: $USERS"
         exit 1
       fi
-      FINALIZERS=$(oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o jsonpath='{.metadata.finalizers}')
-      if echo "$FINALIZERS" | grep -q "turl.openstack.org/t-cred-rot-url"; then
-        echo "FAIL: Per-consumer finalizer still present on old user"
-        echo "Finalizers: $FINALIZERS"
-        exit 1
-      fi
-      if ! echo "$FINALIZERS" | grep -q "rabbitmq.openstack.org/cleanup-blocked"; then
-        echo "FAIL: cleanup-blocked finalizer missing from old user"
-        echo "Finalizers: $FINALIZERS"
-        exit 1
-      fi
-      echo "PASS: Old user is orphaned, blocked by cleanup-blocked finalizer"
+      echo "PASS: Old user 'nova' was deleted from RabbitMQ"

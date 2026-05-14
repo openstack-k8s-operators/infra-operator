@@ -171,22 +171,19 @@ const (
 	// RabbitMQUserReadyErrorMessage is the message format for the RabbitMQUserReady condition when an error occurs
 	RabbitMQUserReadyErrorMessage = "RabbitMQ user error occurred %s"
 
-	// RabbitMQUserOrphanedMessage is the message when a user CR is orphaned and awaiting admin approval
-	RabbitMQUserOrphanedMessage = "User has no active consumers. Remove finalizer %s to approve deletion"
-
 	// Internal controller finalizer (from rabbitmquser_controller.go)
 	userControllerFinalizer = "rabbitmquser.openstack.org/finalizer"
 )
 
 // IsInternalFinalizer returns true if the finalizer is managed by RabbitMQ controllers
 // (as opposed to external controllers like dataplane).
-// Note: RabbitMQUserCleanupBlockedFinalizer is intentionally excluded — it must block
-// user deletion as an external-like finalizer requiring manual admin removal.
 func IsInternalFinalizer(finalizer string) bool {
 	return finalizer == UserFinalizer ||
 		finalizer == TransportURLFinalizer ||
 		finalizer == userControllerFinalizer ||
-		strings.HasPrefix(finalizer, TransportURLFinalizerPrefix)
+		finalizer == RabbitMQUserCleanupBlockedFinalizer ||
+		strings.HasPrefix(finalizer, TransportURLFinalizerPrefix) ||
+		strings.HasPrefix(finalizer, UserVhostFinalizerPrefix)
 }
 
 // CanonicalUserName returns the deterministic CR name for a shared user singleton.
