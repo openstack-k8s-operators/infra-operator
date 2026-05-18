@@ -55,6 +55,10 @@ const userFinalizer = "rabbitmquser.openstack.org/finalizer"
 // credentialSecretNameField is the field index for the credential secret
 const credentialSecretNameField = ".spec.secret"
 
+// ConnectionCheckInterval is the polling interval for pending user release checks
+// in the TransportURL controller, used as a fallback alongside the NodeSet watch.
+const ConnectionCheckInterval = 5 * time.Minute
+
 // generatePassword generates a random password
 func generatePassword(length int) (string, error) {
 	bytes := make([]byte, length)
@@ -120,6 +124,9 @@ func (r *RabbitMQUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		err := h.PatchInstance(ctx, instance)
 		if err != nil {
+			if !instance.DeletionTimestamp.IsZero() && k8s_errors.IsNotFound(err) {
+				return
+			}
 			_err = err
 			return
 		}
@@ -205,18 +212,28 @@ func (r *RabbitMQUserReconciler) reconcileNormal(ctx context.Context, instance *
 		}
 	}
 
-	// Check if this user CR has been marked as orphaned (no active consumers)
+	// Check if this user CR has been marked as orphaned (no active consumers).
+	// The TransportURL controller verifies NodeSet deployment completion before
+	// setting this label, so by the time we see it the credentials are safe to delete.
 	if instance.Labels[rabbitmqv1.RabbitMQUserOrphanedLabel] == "true" {
-		if controllerutil.ContainsFinalizer(instance, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				rabbitmqv1.RabbitMQUserReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
-				rabbitmqv1.RabbitMQUserOrphanedMessage,
-				rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer))
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		// Remove cleanup-blocked if present (backward compat with clusters that had it)
+		if controllerutil.RemoveFinalizer(instance, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer) {
+			Log.Info("Removed legacy cleanup-blocked finalizer")
 		}
-		Log.Info("Orphaned user approved for deletion (cleanup-blocked removed)", "user", instance.Name)
+
+		// Re-read to guard against a concurrent reclaim: a new TransportURL may
+		// have removed the orphaned label and added its own finalizer between
+		// the label check above and now.
+		freshUser := &rabbitmqv1.RabbitMQUser{}
+		if err := r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, freshUser); err != nil {
+			return ctrl.Result{}, err
+		}
+		if freshUser.Labels[rabbitmqv1.RabbitMQUserOrphanedLabel] != "true" {
+			Log.Info("User reclaimed by new consumer, skipping deletion")
+			return ctrl.Result{}, nil
+		}
+
+		Log.Info("Orphaned user approved for deletion", "user", instance.Name)
 		if err := r.Delete(ctx, instance); err != nil && !k8s_errors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("failed to delete orphaned user %s: %w", instance.Name, err)
 		}

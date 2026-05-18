@@ -46,6 +46,7 @@ import (
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	appsv1 "k8s.io/api/apps/v1"
 )
 
@@ -1421,4 +1422,75 @@ func GetRabbitMQPolicy(name types.NamespacedName) *rabbitmqv1.RabbitMQPolicy {
 func RabbitMQPolicyConditionGetter(name types.NamespacedName) condition.Conditions {
 	instance := GetRabbitMQPolicy(name)
 	return instance.Status.Conditions
+}
+
+var nodeSetGVR = schema.GroupVersionResource{
+	Group:    "dataplane.openstack.org",
+	Version:  "v1beta1",
+	Resource: "openstackdataplanenodesets",
+}
+
+func CreateNodeSet(name types.NamespacedName) {
+	raw := map[string]any{
+		"apiVersion": "dataplane.openstack.org/v1beta1",
+		"kind":       "OpenStackDataPlaneNodeSet",
+		"metadata": map[string]any{
+			"name":      name.Name,
+			"namespace": name.Namespace,
+		},
+		"spec": map[string]any{
+			"nodeTemplate": map[string]any{},
+			"nodes":        map[string]any{},
+		},
+	}
+	un := &unstructured.Unstructured{Object: raw}
+	Expect(k8sClient.Create(ctx, un)).Should(Succeed())
+}
+
+func DeleteNodeSet(name types.NamespacedName) {
+	un := &unstructured.Unstructured{}
+	un.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "dataplane.openstack.org",
+		Version: "v1beta1",
+		Kind:    "OpenStackDataPlaneNodeSet",
+	})
+	un.SetName(name.Name)
+	un.SetNamespace(name.Namespace)
+	err := k8sClient.Delete(ctx, un)
+	if err != nil && !k8s_errors.IsNotFound(err) {
+		Expect(err).ShouldNot(HaveOccurred())
+	}
+}
+
+func SetNodeSetSecretHashes(name types.NamespacedName, hashes map[string]string) {
+	Eventually(func(g Gomega) {
+		hashesAny := make(map[string]any, len(hashes))
+		for k, v := range hashes {
+			hashesAny[k] = v
+		}
+		raw := map[string]any{
+			"apiVersion": "dataplane.openstack.org/v1beta1",
+			"kind":       "OpenStackDataPlaneNodeSet",
+			"metadata": map[string]any{
+				"name":      name.Name,
+				"namespace": name.Namespace,
+			},
+			"status": map[string]any{
+				"secretHashes": hashesAny,
+			},
+		}
+		un := &unstructured.Unstructured{Object: raw}
+		result, err := dynClient.Resource(nodeSetGVR).Namespace(name.Namespace).ApplyStatus(
+			th.Ctx, name.Name, un, metav1.ApplyOptions{FieldManager: "application/apply-patch"})
+		g.Expect(err).ToNot(HaveOccurred())
+		g.Expect(result).ToNot(BeNil())
+	}, th.Timeout, th.Interval).Should(Succeed())
+}
+
+func GetSecretHash(name types.NamespacedName) string {
+	secret := &corev1.Secret{}
+	Expect(k8sClient.Get(ctx, name, secret)).Should(Succeed())
+	hash, err := oko_secret.Hash(secret)
+	Expect(err).ShouldNot(HaveOccurred())
+	return hash
 }

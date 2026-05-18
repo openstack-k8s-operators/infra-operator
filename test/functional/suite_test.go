@@ -104,6 +104,9 @@ var _ = BeforeSuite(func() {
 		"github.com/k8snetworkplumbingwg/network-attachment-definition-client", "../../go.mod", "artifacts/networks-crd.yaml")
 	Expect(err).ShouldNot(HaveOccurred())
 
+	dataplaneCRDs, err := test.GetDataPlaneCRDDir("../../go.mod")
+	Expect(err).ShouldNot(HaveOccurred())
+
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
 		// Increase this to 60 or 120 seconds for the single-core run
@@ -114,6 +117,7 @@ var _ = BeforeSuite(func() {
 			filepath.Join("..", "..", "config", "crd", "bases"),
 			ocpconfigv1CRDs,
 			frrCRDs,
+			dataplaneCRDs,
 		},
 		CRDInstallOptions: envtest.CRDInstallOptions{
 			Paths: []string{
@@ -165,9 +169,6 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = apiextensionsv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
-	err = rabbitmqv1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
 	//+kubebuilder:scaffold:scheme
 
 	logger = ctrl.Log.WithName("---Test---")

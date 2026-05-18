@@ -52,16 +52,14 @@ const (
 	// reverse mapping and requires a periodic requeue fallback.
 	MaxTransportURLDirectName = maxFinalizerNameSegment - len("t-") // 61
 
-	// RabbitMQUserCleanupBlockedFinalizer - safety finalizer that blocks automatic deletion of RabbitMQUsers.
-	// When a shared user CR is orphaned (no active consumers), the user controller will only
-	// auto-delete it after an admin removes this finalizer, confirming no external services
-	// depend on the RabbitMQ user.
+	// RabbitMQUserCleanupBlockedFinalizer is a legacy finalizer from earlier releases.
+	// No longer added to new CRs. The user controller removes it on sight for backward
+	// compatibility with clusters upgraded from versions that set it.
 	RabbitMQUserCleanupBlockedFinalizer = "rabbitmq.openstack.org/cleanup-blocked"
 
 	// RabbitMQUserOrphanedLabel marks a shared RabbitMQUser CR as having no active consumers.
-	// The TransportURL controller sets this label instead of deleting the CR directly,
-	// keeping the CR reclaimable by new consumers. The user controller auto-deletes
-	// the CR only when this label is present AND the cleanup-blocked finalizer is removed.
+	// The TransportURL controller sets this label after verifying NodeSet deployment
+	// completion, so the user controller can safely auto-delete the CR on sight.
 	RabbitMQUserOrphanedLabel = "rabbitmq.openstack.org/orphaned"
 )
 

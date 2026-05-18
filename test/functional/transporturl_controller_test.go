@@ -18,6 +18,7 @@ package functional_test
 
 import (
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
@@ -908,13 +909,11 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate user being ready
 			SimulateRabbitMQUserReady(oldUserCRName, "/")
 
-			// Verify old user exists and has both finalizers
+			// Verify old user exists and has per-consumer finalizer
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
 				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeTrue())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
-					"User should have cleanup-blocked finalizer to prevent automatic deletion")
 			}, timeout, interval).Should(Succeed())
 
 			// Update the TransportURL spec with new username
@@ -938,18 +937,13 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate new user being ready
 			SimulateRabbitMQUserReady(newUserCRName, "/")
 
-			// Verify old user's per-consumer finalizer was removed and user is marked as orphaned
-			// (shared singleton model: old user is labeled orphaned, not deleted — reclaimable by new consumers)
+			// With no NodeSets in the namespace, the user controller detects that the
+			// orphaned user's credentials are not deployed anywhere and deletes the CR.
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
-				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeFalse())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
-					"Cleanup-blocked finalizer should still be present")
-				g.Expect(user.Labels[rabbitmqv1.RabbitMQUserOrphanedLabel]).To(Equal("true"),
-					"Old user should be labeled as orphaned")
-				g.Expect(user.DeletionTimestamp.IsZero()).To(BeTrue(),
-					"Old user should NOT have DeletionTimestamp — label is used instead of Delete()")
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"Old user CR should be auto-deleted when no NodeSets exist")
 			}, timeout, interval).Should(Succeed())
 
 			// Verify new user is still present and ready
@@ -960,7 +954,7 @@ var _ = Describe("TransportURL controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
-		It("should NOT delete the old user if it has a nodeset finalizer or cleanup-blocked finalizer", func() {
+		It("should NOT delete the old user if it has an external finalizer", func() {
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
 			// Wait for initial RabbitMQUser to be created
@@ -976,15 +970,7 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate user being ready
 			SimulateRabbitMQUserReady(oldUserCRName, "/")
 
-			// Verify user has the cleanup-blocked finalizer (added automatically)
-			Eventually(func(g Gomega) {
-				user := &rabbitmqv1.RabbitMQUser{}
-				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
-					"User should have cleanup-blocked finalizer")
-			}, timeout, interval).Should(Succeed())
-
-			// Add a nodeset finalizer to the old user (simulating external usage)
+			// Add an external finalizer to the old user (simulating external usage)
 			nodesetFinalizer := "dataplane.openstack.org/nodeset-compute"
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
@@ -993,7 +979,7 @@ var _ = Describe("TransportURL controller", func() {
 				g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			// Verify the nodeset finalizer was added
+			// Verify the external finalizer was added
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
@@ -1020,37 +1006,330 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate new user being ready
 			SimulateRabbitMQUserReady(newUserCRName, "/")
 
-			// Verify old user's TransportURL finalizer was removed
+			// With no NodeSets, the user controller verifies credentials are safe to delete
+			// and calls Delete(), but the external finalizer prevents actual removal —
+			// CR stays in Terminating state.
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeFalse())
+				g.Expect(user.DeletionTimestamp.IsZero()).To(BeFalse(), "Old user should be marked for deletion")
+				// External finalizer should still block actual deletion
+				g.Expect(controllerutil.ContainsFinalizer(user, nodesetFinalizer)).To(BeTrue(),
+					"External finalizer should still be present")
 			}, timeout, interval).Should(Succeed())
 
-			// Verify old user is marked as orphaned (label-based) but NOT deleted
-			Eventually(func(g Gomega) {
-				user := &rabbitmqv1.RabbitMQUser{}
-				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
-				// Should NOT have DeletionTimestamp — orphaned label is used instead
-				g.Expect(user.DeletionTimestamp.IsZero()).To(BeTrue(), "Old user should NOT be marked for deletion")
-				// Should have the orphaned label
-				g.Expect(user.Labels[rabbitmqv1.RabbitMQUserOrphanedLabel]).To(Equal("true"), "Old user should have orphaned label")
-				// Should still have both the nodeset finalizer and cleanup-blocked finalizer
-				g.Expect(controllerutil.ContainsFinalizer(user, nodesetFinalizer)).To(BeTrue())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue())
-			}, timeout, interval).Should(Succeed())
-
-			// Cleanup: Remove both finalizers and orphaned label to allow cleanup
+			// Cleanup: Remove external finalizer to allow full deletion
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
 				controllerutil.RemoveFinalizer(user, nodesetFinalizer)
-				controllerutil.RemoveFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)
-				labels := user.GetLabels()
-				delete(labels, rabbitmqv1.RabbitMQUserOrphanedLabel)
-				user.SetLabels(labels)
 				g.Expect(k8sClient.Update(ctx, user)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("username is rotated twice in sequence (double rotation)", func() {
+		var rabbitmqName types.NamespacedName
+		var doubleRotTURLName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-double-rot",
+				Namespace: namespace,
+			}
+			doubleRotTURLName = types.NamespacedName{
+				Name:      "turl-double-rot",
+				Namespace: namespace,
+			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+				"username":            "user-a",
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(doubleRotTURLName, tuSpec))
+		})
+
+		It("should handle double rotation (rotate twice in sequence)", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// --- Phase 1: initial user "user-a" ---
+			userACRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "user-a"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("user-a"))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userACRName, "/")
+
+			// Verify user-a has the per-consumer finalizer
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(doubleRotTURLName.Name))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify TransportURL is ready with user-a
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(doubleRotTURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("user-a"))
+			}, timeout, interval).Should(Succeed())
+
+			// --- Phase 2: rotate to "user-b" ---
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(doubleRotTURLName)
+				tr.Spec.Username = "user-b"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			userBCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "user-b"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("user-b"))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userBCRName, "/")
+
+			// With no NodeSets, user-a should be auto-deleted
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userACRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"user-a should be auto-deleted after rotation to user-b (no NodeSets)")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify TransportURL now uses user-b
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(doubleRotTURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("user-b"))
+			}, timeout, interval).Should(Succeed())
+
+			// --- Phase 3: rotate again to "user-c" ---
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(doubleRotTURLName)
+				tr.Spec.Username = "user-c"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			userCCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "user-c"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userCCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("user-c"))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userCCRName, "/")
+
+			// With no NodeSets, user-b should be auto-deleted
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userBCRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"user-b should be auto-deleted after rotation to user-c (no NodeSets)")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify user-a is still gone
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userACRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"user-a should still be deleted")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify only user-c remains active
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userCCRName, user)).Should(Succeed())
+				g.Expect(user.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(doubleRotTURLName.Name))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify TransportURL is ready with user-c
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(doubleRotTURLName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("user-c"))
+			}, timeout, interval).Should(Succeed())
+
+			th.ExpectCondition(
+				doubleRotTURLName,
+				ConditionGetterFunc(TransportURLConditionGetter),
+				rabbitmqv1.TransportURLReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
+
+	When("credential rotation with NodeSet present (two-phase release)", func() {
+		var rabbitmqName types.NamespacedName
+		var turlName types.NamespacedName
+		var nodesetName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-nodeset-phase",
+				Namespace: namespace,
+			}
+			turlName = types.NamespacedName{
+				Name:      "turl-nodeset-phase",
+				Namespace: namespace,
+			}
+			nodesetName = types.NamespacedName{
+				Name:      "compute-nodeset",
+				Namespace: namespace,
+			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+				"username":            "phase-user-a",
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(turlName, tuSpec))
+
+			CreateNodeSet(nodesetName)
+			DeferCleanup(DeleteNodeSet, nodesetName)
+		})
+
+		It("should wait for NodeSet deployment before releasing old user", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Wait for initial user to be created and simulate ready
+			userACRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "phase-user-a"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("phase-user-a"))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userACRName, "/")
+
+			// Wait for TransportURL to be ready and its secret to exist
+			transportURLSecretName := types.NamespacedName{
+				Name:      "rabbitmq-transport-url-" + turlName.Name,
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("phase-user-a"))
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, transportURLSecretName, s)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Compute hash of the current transport URL secret and set it on the NodeSet.
+			// This simulates a NodeSet that has deployed with the current credentials.
+			initialHash := GetSecretHash(transportURLSecretName)
+			SetNodeSetSecretHashes(nodesetName, map[string]string{
+				transportURLSecretName.Name: initialHash,
+			})
+
+			// --- Trigger credential rotation ---
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				tr.Spec.Username = "phase-user-b"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for new user to be created
+			userBCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "phase-user-b"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal("phase-user-b"))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userBCRName, "/")
+
+			// The transport URL secret now has new credentials (user-b), so its hash
+			// differs from what the NodeSet has. AreSecretHashesInSync returns false.
+			// The controller should detect this (Phase 1 → Phase 2) but NOT release
+			// the old user yet.
+			//
+			// Verify old user-a still exists (not released during Phase 2)
+			Consistently(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(turlName.Name))).To(BeTrue(),
+					"Old user should still have per-consumer finalizer during Phase 2")
+			}, 5*time.Second, interval).Should(Succeed())
+
+			// Verify the TransportURL has PreviousRabbitmqUserRef set
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).ToNot(BeEmpty(),
+					"PreviousRabbitmqUserRef should be set during rotation")
+			}, timeout, interval).Should(Succeed())
+
+			// --- Simulate NodeSet deployment completing ---
+			// Update the NodeSet's secretHashes to match the new (rotated) secret hash
+			newHash := GetSecretHash(transportURLSecretName)
+			SetNodeSetSecretHashes(nodesetName, map[string]string{
+				transportURLSecretName.Name: newHash,
+			})
+
+			// Now AreSecretHashesInSync returns true → Phase 2 completes → old user released
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userACRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"Old user should be deleted after NodeSet deployment completes")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify PreviousRabbitmqUserRef is cleared
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).To(BeEmpty(),
+					"PreviousRabbitmqUserRef should be cleared after release")
+				g.Expect(tr.Status.NodeSetSynced).To(BeEmpty(),
+					"NodeSetSynced should be cleared after release")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify user-b is active and TransportURL is ready
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+				g.Expect(user.Status.Conditions.IsTrue(rabbitmqv1.RabbitMQUserReadyCondition)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			th.ExpectCondition(
+				turlName,
+				ConditionGetterFunc(TransportURLConditionGetter),
+				rabbitmqv1.TransportURLReadyCondition,
+				corev1.ConditionTrue,
+			)
 		})
 	})
 
@@ -1067,6 +1346,9 @@ var _ = Describe("TransportURL controller", func() {
 				Name:      "transporturl-no-owner",
 				Namespace: namespace,
 			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
 
 			// Create RabbitMQCluster first
 			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
@@ -1134,14 +1416,13 @@ var _ = Describe("TransportURL controller", func() {
 			// Simulate new user being ready
 			SimulateRabbitMQUserReady(newUserCRName, "/")
 
-			// Verify old user's per-consumer finalizer is removed but user persists
+			// With no NodeSets, the user controller verifies credentials are safe
+			// to delete and removes the orphaned user CR
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
-				g.Expect(k8sClient.Get(ctx, oldUserCRName, user)).Should(Succeed())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeFalse(),
-					"TransportURL finalizer should be removed")
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue(),
-					"Cleanup-blocked finalizer should still be present")
+				err := k8sClient.Get(ctx, oldUserCRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"Old user CR should be auto-deleted when no NodeSets exist")
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -1430,7 +1711,6 @@ var _ = Describe("TransportURL controller", func() {
 				user := &rabbitmqv1.RabbitMQUser{}
 				g.Expect(k8sClient.Get(ctx, userCRName, user)).Should(Succeed())
 				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeTrue())
-				g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 
 			// Simulate resources ready
@@ -1449,15 +1729,13 @@ var _ = Describe("TransportURL controller", func() {
 			tr := th.GetTransportURL(transportURLName)
 			Expect(k8sClient.Delete(ctx, tr)).Should(Succeed())
 
-			// Verify TransportURL finalizers are removed from user and vhost
+			// Verify TransportURL finalizer is removed from user
 			Eventually(func(g Gomega) {
 				user := &rabbitmqv1.RabbitMQUser{}
 				err := k8sClient.Get(ctx, userCRName, user)
 				if err == nil {
 					g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.TransportURLFinalizerFor(transportURLName.Name))).To(BeFalse(),
 						"TransportURL finalizer should be removed from user")
-					g.Expect(controllerutil.ContainsFinalizer(user, rabbitmqv1.RabbitMQUserCleanupBlockedFinalizer)).To(BeFalse(),
-						"Cleanup-blocked finalizer should be removed from user")
 				}
 			}, timeout, interval).Should(Succeed())
 

@@ -635,7 +635,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		desired := rabbitmq.HeadlessService(instance)
 		headlessSvc.Spec.ClusterIP = desired.Spec.ClusterIP
 		headlessSvc.Spec.PublishNotReadyAddresses = desired.Spec.PublishNotReadyAddresses
-		headlessSvc.Spec.Ports = desired.Spec.Ports
+		mergeServicePorts(&headlessSvc.Spec.Ports, desired.Spec.Ports)
 		headlessSvc.Spec.Selector = desired.Spec.Selector
 		headlessSvc.Labels = desired.Labels
 		if desired.Spec.IPFamilyPolicy != nil {
@@ -659,7 +659,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	csop, err := controllerutil.CreateOrPatch(ctx, r.Client, clientSvc, func() error {
 		desired := rabbitmq.ClientService(instance)
-		clientSvc.Spec.Ports = desired.Spec.Ports
+		mergeServicePorts(&clientSvc.Spec.Ports, desired.Spec.Ports)
 		clientSvc.Spec.Selector = desired.Spec.Selector
 		clientSvc.Spec.Type = desired.Spec.Type
 		// Merge annotations: set our desired ones without removing externally-added
@@ -1772,4 +1772,31 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	}
 
 	return requests
+}
+
+// mergeServicePorts merges desired service ports into existing ports matched by
+// name, preserving server-defaulted fields (NodePort). When port counts differ
+// or a desired port name is not found, the existing slice is replaced entirely.
+func mergeServicePorts(existing *[]corev1.ServicePort, desired []corev1.ServicePort) {
+	if len(*existing) != len(desired) {
+		*existing = desired
+		return
+	}
+
+	existingByName := make(map[string]int, len(*existing))
+	for i := range *existing {
+		existingByName[(*existing)[i].Name] = i
+	}
+
+	for _, d := range desired {
+		idx, ok := existingByName[d.Name]
+		if !ok {
+			*existing = desired
+			return
+		}
+		if d.NodePort == 0 {
+			d.NodePort = (*existing)[idx].NodePort
+		}
+		(*existing)[idx] = d
+	}
 }
