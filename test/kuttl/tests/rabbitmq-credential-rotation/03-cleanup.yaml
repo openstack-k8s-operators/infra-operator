@@ -6,8 +6,8 @@ commands:
     oc delete rabbitmquser -n $NAMESPACE -l app.kubernetes.io/managed-by=transporturl --ignore-not-found
     oc delete rabbitmqvhost -n $NAMESPACE -l app.kubernetes.io/managed-by=transporturl --ignore-not-found
     # Clean up canonical CRs created by the shared singleton model
-    oc delete rabbitmquser rabbitmq-cred-rot-user-nova -n $NAMESPACE --ignore-not-found
-    oc delete rabbitmquser rabbitmq-cred-rot-user-glance -n $NAMESPACE --ignore-not-found
+    oc delete rabbitmquser nova-b562b443 -n $NAMESPACE --ignore-not-found
+    oc delete rabbitmquser glance-b562b443 -n $NAMESPACE --ignore-not-found
     oc delete rabbitmq.rabbitmq.openstack.org rabbitmq-cred-rot -n $NAMESPACE --ignore-not-found
     oc delete pvc -n $NAMESPACE -l app.kubernetes.io/name=rabbitmq-cred-rot --ignore-not-found
     # Clean up Released PVs to avoid stale data on re-runs

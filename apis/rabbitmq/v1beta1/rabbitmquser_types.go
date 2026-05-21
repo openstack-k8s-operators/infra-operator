@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -187,9 +188,10 @@ func IsInternalFinalizer(finalizer string) bool {
 }
 
 // CanonicalUserName returns the deterministic CR name for a shared user singleton.
+// The name is kept short by hashing the cluster+vhost context into 8 hex chars,
+// keeping the human-readable username as a prefix for kubectl readability.
+// Full cluster/vhost/username metadata is available in the CR spec.
 func CanonicalUserName(clusterName, vhostName, username string) string {
-	if vhostName == "/" || vhostName == "" {
-		return fmt.Sprintf("%s-user-%s", clusterName, username)
-	}
-	return fmt.Sprintf("%s-%s-user-%s", clusterName, vhostName, username)
+	hash := sha256.Sum256([]byte(clusterName + "/" + vhostName))
+	return fmt.Sprintf("%s-%x", username, hash[:4])
 }
