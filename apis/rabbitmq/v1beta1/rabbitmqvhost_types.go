@@ -17,6 +17,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -116,6 +117,10 @@ const (
 )
 
 // CanonicalVhostName returns the deterministic CR name for a shared vhost singleton.
+// The name is kept short by hashing the cluster name into 8 hex chars,
+// keeping the human-readable vhost name as a prefix for kubectl readability.
+// Full cluster/vhost metadata is available in the CR spec.
 func CanonicalVhostName(clusterName, vhostName string) string {
-	return fmt.Sprintf("%s-vhost-%s", clusterName, vhostName)
+	hash := sha256.Sum256([]byte(clusterName))
+	return fmt.Sprintf("%s-%x", vhostName, hash[:4])
 }

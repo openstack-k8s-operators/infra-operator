@@ -1966,4 +1966,72 @@ var _ = Describe("TransportURL controller", func() {
 			)
 		})
 	})
+
+	When("TransportURL is created with long cluster, user, and vhost names", func() {
+		var rabbitmqName types.NamespacedName
+		longVhost := "watcher-notifications"
+		longUsername := "watcher-notifications"
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-notifications",
+				Namespace: namespace,
+			}
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+				"username":            longUsername,
+				"vhost":               longVhost,
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, tuSpec))
+		})
+
+		It("should create user and vhost CRs with names under the 63-char label limit", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			vhostCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalVhostName(rabbitmqName.Name, longVhost),
+				Namespace: namespace,
+			}
+			Expect(len(vhostCRName.Name)).To(BeNumerically("<=", 63),
+				"Vhost CR name %q is %d chars, must be <= 63", vhostCRName.Name, len(vhostCRName.Name))
+
+			Eventually(func(g Gomega) {
+				vhost := &rabbitmqv1.RabbitMQVhost{}
+				g.Expect(k8sClient.Get(ctx, vhostCRName, vhost)).Should(Succeed())
+				g.Expect(vhost.Spec.Name).To(Equal(longVhost))
+				g.Expect(vhost.Spec.RabbitmqClusterName).To(Equal(rabbitmqName.Name))
+			}, timeout, interval).Should(Succeed())
+			SimulateRabbitMQVhostReady(vhostCRName)
+
+			userCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, longVhost, longUsername),
+				Namespace: namespace,
+			}
+			Expect(len(userCRName.Name)).To(BeNumerically("<=", 63),
+				"User CR name %q is %d chars, must be <= 63", userCRName.Name, len(userCRName.Name))
+
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userCRName, user)).Should(Succeed())
+				g.Expect(user.Spec.Username).To(Equal(longUsername))
+				g.Expect(user.Spec.RabbitmqClusterName).To(Equal(rabbitmqName.Name))
+			}, timeout, interval).Should(Succeed())
+			SimulateRabbitMQUserReady(userCRName, longVhost)
+
+			th.ExpectCondition(
+				transportURLName,
+				ConditionGetterFunc(TransportURLConditionGetter),
+				rabbitmqv1.TransportURLReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
 })

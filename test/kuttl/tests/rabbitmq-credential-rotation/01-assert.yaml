@@ -25,13 +25,13 @@ commands:
       echo "PASS: Transport URL contains nova username"
   - script: |
       set -e
-      # Verify the RabbitMQUser was created (canonical naming: <cluster>-user-<username>)
-      READY=$(oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+      # Verify the RabbitMQUser was created (canonical naming: <username>-<sha8>)
+      READY=$(oc get rabbitmquser -n $NAMESPACE nova-b562b443 -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
       if [ "$READY" != "True" ]; then
         echo "FAIL: RabbitMQUser not ready"
         exit 1
       fi
-      USERNAME=$(oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o jsonpath='{.status.username}')
+      USERNAME=$(oc get rabbitmquser -n $NAMESPACE nova-b562b443 -o jsonpath='{.status.username}')
       if [ "$USERNAME" != "nova" ]; then
         echo "FAIL: Expected username 'nova', got: '$USERNAME'"
         exit 1

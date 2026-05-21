@@ -43,12 +43,12 @@ commands:
   - script: |
       set -e
       # Old user CR should be auto-deleted (no NodeSets means credentials are safe to remove)
-      if oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova 2>/dev/null; then
-        echo "FAIL: Old user CR rabbitmq-cred-rot-user-nova still exists"
-        oc get rabbitmquser -n $NAMESPACE rabbitmq-cred-rot-user-nova -o yaml
+      if oc get rabbitmquser -n $NAMESPACE nova-b562b443 2>/dev/null; then
+        echo "FAIL: Old user CR nova-b562b443 still exists"
+        oc get rabbitmquser -n $NAMESPACE nova-b562b443 -o yaml
         exit 1
       fi
-      echo "PASS: Old user CR rabbitmq-cred-rot-user-nova auto-deleted"
+      echo "PASS: Old user CR nova-b562b443 auto-deleted"
   - script: |
       set -e
       # Verify old user was deleted from RabbitMQ
