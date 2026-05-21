@@ -10,55 +10,13 @@ Tests critical error handling including:
 """
 
 import os
-import sys
 import unittest
 import tempfile
 import yaml
 from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime
 
-# Mock OpenStack dependencies
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    class NotFound(Exception):
-        pass
-    class Conflict(Exception):
-        pass
-    class Forbidden(Exception):
-        pass
-    class Unauthorized(Exception):
-        pass
-    novaclient_exceptions = MagicMock()
-    novaclient_exceptions.NotFound = NotFound
-    novaclient_exceptions.Conflict = Conflict
-    novaclient_exceptions.Forbidden = Forbidden
-    novaclient_exceptions.Unauthorized = Unauthorized
-    sys.modules['novaclient.exceptions'] = novaclient_exceptions
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-
-    # Create discovery failure exception
-    class DiscoveryFailure(Exception):
-        pass
-
-    discovery_module = MagicMock()
-    discovery_module.DiscoveryFailure = DiscoveryFailure
-
-    exceptions_module = MagicMock()
-    exceptions_module.discovery = discovery_module
-
-    sys.modules['keystoneauth1.exceptions'] = exceptions_module
-    sys.modules['keystoneauth1.exceptions.discovery'] = discovery_module
-
-# Add module path
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
+import conftest  # noqa: F401
 import instanceha
 
 
@@ -235,9 +193,8 @@ class TestNovaAPIExceptions(unittest.TestCase):
                         auth_url='http://auth', user_domain_name='default', project_domain_name='default',
                         region_name='test-region'
                     )
-                    result = instanceha.nova_login(credentials)
-
-                    self.assertIsNone(result)
+                    with self.assertRaises(instanceha.NovaConnectionError):
+                        instanceha.nova_login(credentials)
 
     def test_nova_login_unauthorized(self):
         """Test Nova login with unauthorized exception."""
@@ -258,48 +215,21 @@ class TestNovaAPIExceptions(unittest.TestCase):
                         auth_url='http://auth', user_domain_name='default', project_domain_name='default',
                         region_name='test-region'
                     )
-                    result = instanceha.nova_login(credentials)
-
-                    self.assertIsNone(result)
+                    with self.assertRaises(instanceha.NovaConnectionError):
+                        instanceha.nova_login(credentials)
 
 
 class TestServiceDisableValidation(unittest.TestCase):
     """Test service disable operation validation."""
 
-    def test_host_disable_missing_connection(self):
-        """Test _host_disable with missing connection."""
+    def test_host_disable_force_down_failure(self):
+        """Test _host_disable returns False when force_down raises."""
+        mock_connection = Mock()
+        mock_connection.services.force_down.side_effect = Exception("API error")
         mock_service = Mock()
         mock_service.id = 'svc-123'
         mock_service.host = 'test-host'
-
-        result = instanceha._host_disable(None, mock_service)
-
-        self.assertFalse(result)
-
-    def test_host_disable_missing_service(self):
-        """Test _host_disable with missing service."""
-        mock_connection = Mock()
-
-        result = instanceha._host_disable(mock_connection, None)
-
-        self.assertFalse(result)
-
-    def test_host_disable_service_missing_id(self):
-        """Test _host_disable when service object is missing id attribute."""
-        mock_connection = Mock()
-        mock_service = Mock(spec=[])  # No attributes
-        del mock_service.id  # Ensure no id attribute
-
-        result = instanceha._host_disable(mock_connection, mock_service)
-
-        self.assertFalse(result)
-
-    def test_host_disable_service_missing_host(self):
-        """Test _host_disable when service object is missing host attribute."""
-        mock_connection = Mock()
-        mock_service = Mock()
-        mock_service.id = 'svc-123'
-        delattr(mock_service, 'host')
+        mock_service.binary = 'nova-compute'
 
         result = instanceha._host_disable(mock_connection, mock_service)
 
@@ -327,7 +257,7 @@ class TestEvacuationTimeouts(unittest.TestCase):
         time_values = [0, 0.5, 2] + [2] * 10  # Extra values for logging calls
         with patch('instanceha.time.sleep'):  # Speed up test
             with patch('instanceha.MAX_EVACUATION_TIMEOUT_SECONDS', 1):
-                with patch('instanceha.time.time', side_effect=time_values):  # Simulate timeout
+                with patch('instanceha.time.monotonic', side_effect=time_values):  # Simulate timeout
                     result = instanceha._server_evacuate_future(mock_connection, mock_server)
 
         self.assertFalse(result)
@@ -347,8 +277,8 @@ class TestEvacuationTimeouts(unittest.TestCase):
         ]
 
         with patch('instanceha.time.sleep'):
-            with patch('instanceha.MAX_EVACUATION_RETRIES', 3):
-                result = instanceha._server_evacuate_future(mock_connection, mock_server)
+            result = instanceha._server_evacuate_future(mock_connection, mock_server,
+                                                        max_retries=3)
 
         self.assertFalse(result)
 

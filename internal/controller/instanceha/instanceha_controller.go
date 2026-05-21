@@ -42,14 +42,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 
 	"github.com/openstack-k8s-operators/lib-common/modules/common"
-	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
-	helper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 
@@ -88,6 +88,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile -
@@ -95,7 +96,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	Log := r.GetLogger(ctx)
 
 	instance := &instancehav1.InstanceHa{}
-	err := r.Get(context.TODO(), req.NamespacedName, instance)
+	err := r.Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			Log.Info("InstanceHa CR not found")
@@ -129,10 +130,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	// Always patch the instance status when exiting this function so we can persist any changes.
 	defer func() {
-		// Don't update the status, if reconciler Panics
-		if r := recover(); r != nil {
-			Log.Info(fmt.Sprintf("panic during reconcile %v\n", r))
-			panic(r)
+		if panicVal := recover(); panicVal != nil {
+			Log.Error(fmt.Errorf("panic: %v", panicVal), "panic during reconcile, not updating status")
+			panic(panicVal)
 		}
 		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
 		// update the Ready condition based on the sub conditions
@@ -190,6 +190,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			APIGroups: []string{""},
 			Resources: []string{"pods"},
 			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"events"},
+			Verbs:     []string{"create", "patch"},
 		},
 	}
 	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
@@ -321,8 +326,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			Log.Error(err, fmt.Sprintf("could not fetch configmap %s", instance.Spec.InstanceHaConfigMap))
 			return ctrl.Result{}, err
 		}
+	} else {
+		configVars[instance.Spec.InstanceHaConfigMap] = env.SetValue(configMapHash)
 	}
-	configVars[instance.Spec.InstanceHaConfigMap] = env.SetValue(configMapHash)
+
+	// Application Credential handling (passive mode: user provides the AC secret)
+	acSecretName := ""
+	if instance.Spec.Auth.ApplicationCredentialSecret != "" {
+		acSecretName = instance.Spec.Auth.ApplicationCredentialSecret
+		_, acSecretHash, err := secret.GetSecret(ctx, helper, acSecretName, instance.Namespace)
+		if err != nil {
+			if k8s_errors.IsNotFound(err) {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.InputReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					instancehav1.InstanceHaACSecretWaitingMessage))
+				return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+			}
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.InputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.InputReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		configVars[acSecretName] = env.SetValue(acSecretHash)
+	}
 
 	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, condition.InputReadyMessage)
 
@@ -400,7 +431,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Create netattachment
 	nadList := []networkv1.NetworkAttachmentDefinition{}
 	for _, netAtt := range instance.Spec.NetworkAttachments {
-		nad, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
+		nadObj, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				// Since the net-attach-def CR should have been manually created by the user and referenced in the spec,
@@ -423,8 +454,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return ctrl.Result{}, err
 		}
 
-		if nad != nil {
-			nadList = append(nadList, *nad)
+		if nadObj != nil {
+			nadList = append(nadList, *nadObj)
 		}
 	}
 
@@ -434,7 +465,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			instance.Spec.NetworkAttachments, err)
 	}
 
-	// TODO add check to make sure there is only a single copy of instanceha using the same OpenStackCloud
 	cloud := instance.Spec.OpenStackCloud
 
 	containerImage, err := r.GetContainerImage(ctx, instance.Spec.ContainerImage, instance)
@@ -474,7 +504,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// remove LastAppliedTopology from the .Status
 		instance.Status.LastAppliedTopology = nil
 	}
-	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology), time.Duration(5)*time.Second)
+	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology, acSecretName), time.Duration(5)*time.Second)
 	sfres, sferr := deployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
@@ -526,6 +556,7 @@ const (
 	fencingSecretField         = ".spec.fencingSecret"
 	instanceHaConfigMapField   = ".spec.instanceHaConfigMap"
 	topologyField              = ".spec.topologyRef.Name"
+	acSecretField              = ".spec.auth.applicationCredentialSecret" // #nosec G101
 )
 
 var allWatchFields = []string{
@@ -535,6 +566,7 @@ var allWatchFields = []string{
 	fencingSecretField,
 	instanceHaConfigMapField,
 	topologyField,
+	acSecretField,
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -601,6 +633,17 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return nil
 		}
 		return []string{cr.Spec.TopologyRef.Name}
+	}); err != nil {
+		return err
+	}
+
+	// index acSecretField
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, acSecretField, func(rawObj client.Object) []string {
+		cr := rawObj.(*instancehav1.InstanceHa)
+		if cr.Spec.Auth.ApplicationCredentialSecret == "" {
+			return nil
+		}
+		return []string{cr.Spec.Auth.ApplicationCredentialSecret}
 	}); err != nil {
 		return err
 	}
@@ -690,5 +733,5 @@ func (r *Reconciler) GetContainerImage(
 		return cmImage, nil
 	}
 
-	return "", nil
+	return "", fmt.Errorf("no container image found: key 'instanceha-image' not in ConfigMap %s and RELATED_IMAGE_INFRA_INSTANCE_HA_IMAGE_URL_DEFAULT not set", instanceHaConfigMapName)
 }

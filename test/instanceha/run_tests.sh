@@ -82,6 +82,13 @@ helper_functions_tests_passed=0
 functional_tests_passed=0
 integration_tests_passed=0
 region_isolation_tests_passed=0
+coverage_gaps_tests_passed=0
+orchestrated_evacuation_tests_passed=0
+k8s_events_tests_passed=0
+thread_safety_tests_passed=0
+heartbeat_detection_tests_passed=0
+heartbeat_scale_tests_passed=0
+aggregate_threshold_tests_passed=0
 
 # Run core unit tests
 echo -e "${BLUE}Running Core Unit Tests...${NC}"
@@ -182,13 +189,73 @@ fi
 echo
 echo
 
+# Run coverage gaps tests
+echo -e "${BLUE}Running Coverage Gaps Tests...${NC}"
+if run_test_file "test_coverage_gaps.py" "Coverage Gaps Tests"; then
+    coverage_gaps_tests_passed=1
+fi
+
+# Run orchestrated evacuation tests
+echo -e "${BLUE}Running Orchestrated Evacuation Tests...${NC}"
+if run_test_file "test_orchestrated_evacuation.py" "Orchestrated Evacuation Tests"; then
+    orchestrated_evacuation_tests_passed=1
+fi
+
+echo
+echo
+
+# Run K8s events tests
+echo -e "${BLUE}Running K8s Events Tests...${NC}"
+if run_test_file "test_k8s_events.py" "K8s Events Tests"; then
+    k8s_events_tests_passed=1
+fi
+
+echo
+echo
+
+# Run thread safety tests
+echo -e "${BLUE}Running Thread Safety Tests...${NC}"
+if run_test_file "test_thread_safety.py" "Thread Safety Tests"; then
+    thread_safety_tests_passed=1
+fi
+
+echo
+echo
+
+# Run heartbeat detection tests
+echo -e "${BLUE}Running Heartbeat Detection Tests...${NC}"
+if run_test_file "test_heartbeat_detection.py" "Heartbeat Detection Tests"; then
+    heartbeat_detection_tests_passed=1
+fi
+
+echo
+echo
+
+# Run heartbeat scale tests
+echo -e "${BLUE}Running Heartbeat Scale Tests...${NC}"
+if run_test_file "test_heartbeat_scale.py" "Heartbeat Scale Tests"; then
+    heartbeat_scale_tests_passed=1
+fi
+
+echo
+echo
+
+# Run aggregate threshold tests
+echo -e "${BLUE}Running Aggregate Threshold Tests...${NC}"
+if run_test_file "test_aggregate_threshold.py" "Aggregate Threshold Tests"; then
+    aggregate_threshold_tests_passed=1
+fi
+
+echo
+echo
+
 # Summary
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}            Test Summary                ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
-total_passed=$((unit_core_tests_passed + fencing_tests_passed + kdump_tests_passed + security_tests_passed + critical_error_tests_passed + evacuation_workflow_tests_passed + config_features_tests_passed + helper_functions_tests_passed + functional_tests_passed + integration_tests_passed + region_isolation_tests_passed))
-total_tests=11
+total_passed=$((unit_core_tests_passed + fencing_tests_passed + kdump_tests_passed + security_tests_passed + critical_error_tests_passed + evacuation_workflow_tests_passed + config_features_tests_passed + helper_functions_tests_passed + functional_tests_passed + integration_tests_passed + region_isolation_tests_passed + coverage_gaps_tests_passed + orchestrated_evacuation_tests_passed + k8s_events_tests_passed + thread_safety_tests_passed + heartbeat_detection_tests_passed + heartbeat_scale_tests_passed + aggregate_threshold_tests_passed))
+total_tests=18
 
 if [ $unit_core_tests_passed -eq 1 ]; then
     echo -e "${GREEN}[PASS] Core Unit Tests: PASSED${NC}"
@@ -254,6 +321,48 @@ if [ $region_isolation_tests_passed -eq 1 ]; then
     echo -e "${GREEN}[PASS] Region Isolation Tests: PASSED${NC}"
 else
     echo -e "${RED}[FAIL] Region Isolation Tests: FAILED${NC}"
+fi
+
+if [ $coverage_gaps_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Coverage Gaps Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Coverage Gaps Tests: FAILED${NC}"
+fi
+
+if [ $orchestrated_evacuation_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Orchestrated Evacuation Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Orchestrated Evacuation Tests: FAILED${NC}"
+fi
+
+if [ $k8s_events_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] K8s Events Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] K8s Events Tests: FAILED${NC}"
+fi
+
+if [ $thread_safety_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Thread Safety Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Thread Safety Tests: FAILED${NC}"
+fi
+
+if [ $heartbeat_detection_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Heartbeat Detection Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Heartbeat Detection Tests: FAILED${NC}"
+fi
+
+if [ $heartbeat_scale_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Heartbeat Scale Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Heartbeat Scale Tests: FAILED${NC}"
+fi
+
+if [ $aggregate_threshold_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Aggregate Threshold Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Aggregate Threshold Tests: FAILED${NC}"
 fi
 
 echo

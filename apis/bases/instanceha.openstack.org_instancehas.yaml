@@ -52,6 +52,17 @@ spec:
           spec:
             description: InstanceHaSpec defines the desired state of InstanceHa
             properties:
+              auth:
+                description: Auth - Parameters related to authentication
+                properties:
+                  applicationCredentialSecret:
+                    description: |-
+                      ApplicationCredentialSecret - name of an existing Secret containing
+                      Application Credential ID and Secret (AC_ID, AC_SECRET keys).
+                      When set, the controller mounts this secret and enables AC-based
+                      authentication instead of password-based clouds.yaml/secure.yaml.
+                    type: string
+                type: object
               caBundleSecretName:
                 description: CaBundleSecretName - holding the CA certs in a pre-created
                   bundle file
@@ -79,6 +90,12 @@ spec:
                 description: InstanceHaConfigMap is the name of the ConfigMap containing
                   the InstanceHa config file
                 type: string
+              instanceHaHeartbeatPort:
+                default: 7411
+                description: InstanceHaHeartbeatPort is the UDP port for compute node
+                  heartbeat packets
+                format: int32
+                type: integer
               instanceHaKdumpPort:
                 default: 7410
                 format: int32
@@ -98,7 +115,7 @@ spec:
                 type: object
               openStackCloud:
                 default: default
-                description: OpenStackClould is the name of the Cloud to use as per
+                description: OpenStackCloud is the name of the Cloud to use as per
                   clouds.yaml (will be set to "default" if empty)
                 type: string
               openStackConfigMap:

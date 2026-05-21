@@ -8,62 +8,18 @@ Tests for helper functions that coordinate evacuation logic:
 - _count_evacuable_hosts
 """
 
-import os
-import sys
 import time
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 from collections import defaultdict
 
-# Mock OpenStack dependencies
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    # Create actual exception classes for novaclient
-    class NotFound(Exception):
-        pass
-    class Conflict(Exception):
-        pass
-    class Forbidden(Exception):
-        pass
-    class Unauthorized(Exception):
-        pass
-    novaclient_exceptions = MagicMock()
-    novaclient_exceptions.NotFound = NotFound
-    novaclient_exceptions.Conflict = Conflict
-    novaclient_exceptions.Forbidden = Forbidden
-    novaclient_exceptions.Unauthorized = Unauthorized
-    sys.modules['novaclient.exceptions'] = novaclient_exceptions
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-
-    # Create discovery failure exception
-    class DiscoveryFailure(Exception):
-        pass
-
-    discovery_module = MagicMock()
-    discovery_module.DiscoveryFailure = DiscoveryFailure
-
-    exceptions_module = MagicMock()
-    exceptions_module.discovery = discovery_module
-
-    sys.modules['keystoneauth1.exceptions'] = exceptions_module
-    sys.modules['keystoneauth1.exceptions.discovery'] = discovery_module
-
-# Add module path
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
+import conftest  # noqa: F401
 import instanceha
 
 
 class TestCleanupFilteredHosts(unittest.TestCase):
-    """Test _cleanup_filtered_hosts function (line 2515)."""
+    """Test _cleanup_filtered_hosts function."""
 
     def test_cleanup_filtered_hosts_basic(self):
         """Test basic cleanup of filtered hosts."""
@@ -146,7 +102,7 @@ class TestCleanupFilteredHosts(unittest.TestCase):
 
 
 class TestFilterProcessingHosts(unittest.TestCase):
-    """Test _filter_processing_hosts function (line 2527)."""
+    """Test _filter_processing_hosts function."""
 
     def test_filter_processing_hosts_basic(self):
         """Test basic filtering of hosts already being processed."""
@@ -166,7 +122,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
         to_resume = []
 
         # Mark host1 as already being processed
-        service.hosts_processing['host1'] = time.time()
+        service.hosts_processing['host1'] = time.monotonic()
 
         result = instanceha._filter_processing_hosts(service, compute_nodes, to_resume)
         compute_filtered, resume_filtered, marked, current_time = result
@@ -189,7 +145,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
         service = instanceha.InstanceHAService(mock_config)
 
         # Add an expired entry (more than max timeout + padding ago)
-        old_time = time.time() - 500  # Way in the past
+        old_time = time.monotonic() - 500  # Way in the past
         service.hosts_processing['old-host'] = old_time
 
         svc1 = Mock()
@@ -247,7 +203,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
         service = instanceha.InstanceHAService(mock_config)
 
         # Mark a host as being processed
-        service.hosts_processing['resume-host'] = time.time()
+        service.hosts_processing['resume-host'] = time.monotonic()
 
         svc_resume = Mock()
         svc_resume.host = 'resume-host.example.com'
@@ -262,7 +218,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
 
 class TestPrepareEvacuationResources(unittest.TestCase):
-    """Test _prepare_evacuation_resources function (line 2568)."""
+    """Test _prepare_evacuation_resources function."""
 
     def test_prepare_evacuation_resources_basic(self):
         """Test basic resource preparation for evacuation."""
@@ -433,7 +389,7 @@ class TestPrepareEvacuationResources(unittest.TestCase):
 
 
 class TestCountEvacuableHosts(unittest.TestCase):
-    """Test _count_evacuable_hosts function (line 2679)."""
+    """Test _count_evacuable_hosts function."""
 
     def test_count_evacuable_hosts_basic(self):
         """Test basic counting of evacuable hosts."""
@@ -456,14 +412,10 @@ class TestCountEvacuableHosts(unittest.TestCase):
         mock_conn.aggregates.list.return_value = [agg1, agg2]
 
         # Create mock services
-        svc1 = Mock()
-        svc1.host = 'host1'
-        svc2 = Mock()
-        svc2.host = 'host2'
-        svc3 = Mock()
-        svc3.host = 'host3'
-        svc4 = Mock()
-        svc4.host = 'host4'
+        svc1 = Mock(host='host1', status='enabled', forced_down=False)
+        svc2 = Mock(host='host2', status='enabled', forced_down=False)
+        svc3 = Mock(host='host3', status='enabled', forced_down=False)
+        svc4 = Mock(host='host4', status='enabled', forced_down=False)
 
         services = [svc1, svc2, svc3, svc4]
 
@@ -483,8 +435,7 @@ class TestCountEvacuableHosts(unittest.TestCase):
 
         mock_conn.aggregates.list.return_value = []
 
-        svc1 = Mock()
-        svc1.host = 'host1'
+        svc1 = Mock(host='host1', status='enabled', forced_down=False)
         services = [svc1]
 
         count = instanceha._count_evacuable_hosts(mock_conn, service, services)
@@ -501,13 +452,13 @@ class TestCountEvacuableHosts(unittest.TestCase):
         # Simulate exception when listing aggregates
         mock_conn.aggregates.list.side_effect = Exception("API Error")
 
-        svc1 = Mock()
-        svc2 = Mock()
+        svc1 = Mock(status='enabled', forced_down=False)
+        svc2 = Mock(status='enabled', forced_down=False)
         services = [svc1, svc2]
 
         count = instanceha._count_evacuable_hosts(mock_conn, service, services)
 
-        # Should fallback to total number of services
+        # Should fallback to total number of active services
         self.assertEqual(count, 2)
 
     def test_count_evacuable_hosts_multiple_aggregates(self):
@@ -530,12 +481,9 @@ class TestCountEvacuableHosts(unittest.TestCase):
 
         mock_conn.aggregates.list.return_value = [agg1, agg2]
 
-        svc1 = Mock()
-        svc1.host = 'host1'
-        svc2 = Mock()
-        svc2.host = 'host2'
-        svc3 = Mock()
-        svc3.host = 'host3'
+        svc1 = Mock(host='host1', status='enabled', forced_down=False)
+        svc2 = Mock(host='host2', status='enabled', forced_down=False)
+        svc3 = Mock(host='host3', status='enabled', forced_down=False)
 
         services = [svc1, svc2, svc3]
 

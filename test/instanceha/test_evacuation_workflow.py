@@ -7,43 +7,12 @@ Tests critical evacuation flow paths including:
 - Process service step failure handling
 """
 
-import os
-import sys
+import threading
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 
-# Mock OpenStack dependencies
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    class NotFound(Exception):
-        pass
-    class Conflict(Exception):
-        pass
-    class Forbidden(Exception):
-        pass
-    class Unauthorized(Exception):
-        pass
-    novaclient_exceptions = MagicMock()
-    novaclient_exceptions.NotFound = NotFound
-    novaclient_exceptions.Conflict = Conflict
-    novaclient_exceptions.Forbidden = Forbidden
-    novaclient_exceptions.Unauthorized = Unauthorized
-    sys.modules['novaclient.exceptions'] = novaclient_exceptions
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions.discovery'] = MagicMock()
-
-# Add module path
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
+import conftest  # noqa: F401
 import instanceha
 
 
@@ -147,9 +116,10 @@ class TestPostEvacuationRecoveryErrors(unittest.TestCase):
         self.mock_conn = Mock()
         self.mock_service = Mock()
         self.mock_service.config = Mock()
-        self.mock_service.config.is_leave_disabled_enabled = Mock(return_value=False)
+        self.mock_service.config.get_config_value.return_value = False
         self.mock_service.kdump_fenced_hosts = set()
         self.mock_service.kdump_hosts_checking = {}
+        self.mock_service.kdump_lock = threading.Lock()
 
         self.mock_failed_service = Mock()
         self.mock_failed_service.host = 'test-host.example.com'
@@ -331,6 +301,86 @@ class TestProcessServiceStepFailures(unittest.TestCase):
 
         # Should succeed when all steps succeed
         self.assertTrue(result)
+
+
+class TestReservedHostReturnOnPartialFailure(unittest.TestCase):
+    """Test reserved host return behavior when evacuation partially fails."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.mock_conn = Mock()
+        self.mock_service = Mock()
+        self.mock_service.config = Mock()
+        self.mock_service.config.get_config_value = Mock(
+            side_effect=lambda key: {
+                'FORCE_RESERVED_HOST_EVACUATION': True,
+                'RESERVED_HOSTS': True,
+            }.get(key, False))
+        self.mock_service.processing_lock = Mock()
+        self.mock_service.hosts_processing = {}
+
+        self.mock_failed_service = Mock()
+        self.mock_failed_service.host = 'compute-a.example.com'
+        self.mock_failed_service.id = 'svc-123'
+        self.mock_failed_service.forced_down = False
+        self.mock_failed_service.status = 'enabled'
+
+    def test_partial_failure_keeps_reserved_host_with_vms(self):
+        """Reserved host with VMs on it should NOT be returned to pool."""
+        vms_on_target = [Mock(id='vm-1'), Mock(id='vm-2')]
+        self.mock_conn.servers.list.return_value = vms_on_target
+
+        with patch('instanceha._get_nova_connection', return_value=self.mock_conn), \
+             patch('instanceha._host_fence', return_value=True), \
+             patch('instanceha._host_disable', return_value=True), \
+             patch('instanceha._manage_reserved_hosts',
+                   return_value=instanceha.ReservedHostResult(success=True, hostname='compute-b')), \
+             patch('instanceha._host_evacuate', return_value=False), \
+             patch('instanceha._return_reserved_host') as mock_return, \
+             patch('instanceha.track_host_processing'):
+            result = instanceha.process_service(
+                self.mock_failed_service, [], resume=False, service=self.mock_service)
+
+        self.assertFalse(result)
+        mock_return.assert_not_called()
+        self.mock_conn.servers.list.assert_called_once_with(
+            search_opts={'host': 'compute-b', 'all_tenants': 1})
+
+    def test_total_failure_returns_empty_reserved_host(self):
+        """Reserved host with no VMs should be returned to pool."""
+        self.mock_conn.servers.list.return_value = []
+
+        with patch('instanceha._get_nova_connection', return_value=self.mock_conn), \
+             patch('instanceha._host_fence', return_value=True), \
+             patch('instanceha._host_disable', return_value=True), \
+             patch('instanceha._manage_reserved_hosts',
+                   return_value=instanceha.ReservedHostResult(success=True, hostname='compute-b')), \
+             patch('instanceha._host_evacuate', return_value=False), \
+             patch('instanceha._return_reserved_host') as mock_return, \
+             patch('instanceha.track_host_processing'):
+            result = instanceha.process_service(
+                self.mock_failed_service, [], resume=False, service=self.mock_service)
+
+        self.assertFalse(result)
+        mock_return.assert_called_once_with(self.mock_conn, 'compute-b', [], self.mock_service)
+
+    def test_api_failure_checking_vms_keeps_reserved_host(self):
+        """If VM check fails, err on safe side and keep reserved host."""
+        self.mock_conn.servers.list.side_effect = Exception("Nova API error")
+
+        with patch('instanceha._get_nova_connection', return_value=self.mock_conn), \
+             patch('instanceha._host_fence', return_value=True), \
+             patch('instanceha._host_disable', return_value=True), \
+             patch('instanceha._manage_reserved_hosts',
+                   return_value=instanceha.ReservedHostResult(success=True, hostname='compute-b')), \
+             patch('instanceha._host_evacuate', return_value=False), \
+             patch('instanceha._return_reserved_host') as mock_return, \
+             patch('instanceha.track_host_processing'):
+            result = instanceha.process_service(
+                self.mock_failed_service, [], resume=False, service=self.mock_service)
+
+        self.assertFalse(result)
+        mock_return.assert_not_called()
 
 
 if __name__ == '__main__':

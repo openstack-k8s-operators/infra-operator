@@ -28,4 +28,7 @@ const (
 
 	// InstanceHaFencingSecretWaitingMessage
 	InstanceHaFencingSecretWaitingMessage = "Instance HA waiting for Fencing secret"
+
+	// InstanceHaACSecretWaitingMessage
+	InstanceHaACSecretWaitingMessage = "Instance HA waiting for Application Credential secret"
 )
