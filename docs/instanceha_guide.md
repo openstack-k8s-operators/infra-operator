@@ -250,7 +250,7 @@ spec:
   # UDP port for kdump messages (default: 7410)
   instanceHaKdumpPort: 7410
 
-  # UDP port for heartbeat messages (default: 7411, set 0 to disable)
+  # UDP port for heartbeat messages (default: 7411)
   instanceHaHeartbeatPort: 7411
 
   # Optional: Application Credential authentication (see Authentication section)
@@ -274,7 +274,7 @@ spec:
 
 ### Network Attachments
 
-The `networkAttachments` field lists Multus NetworkAttachmentDefinition CRs to attach to the InstanceHA pod. Each entry adds an additional network interface. The UDP listeners (kdump and heartbeat) bind to `0.0.0.0`, so they accept packets on any attached interface.
+The `networkAttachments` field lists Multus NetworkAttachmentDefinition CRs to attach to the InstanceHA pod. Each entry adds an additional network interface. The UDP listeners (kdump and heartbeat) bind to `::` (dual-stack), so they accept both IPv4 and IPv6 packets on any attached interface.
 
 A common pattern is to separate heartbeat traffic from the API network. Heartbeat packets are small and frequent — putting them on the same network as the Nova API can add noise, and a congested API network could delay heartbeats enough to trigger false positives. Using a dedicated network for heartbeat avoids both problems:
 
@@ -312,6 +312,43 @@ spec:
 Compute nodes then send their heartbeat packets to the InstanceHA pod's IP on the `heartbeat-net` network (e.g., `172.20.0.x:7411`), while the Nova API traffic flows through `internalapi` as usual.
 
 When only a single `networkAttachments` entry is provided (the typical case), all traffic — Nova API, kdump, and heartbeat — shares that interface.
+
+### Stable IP for UDP Listeners
+
+By default, the InstanceHA pod receives a dynamic IP from the Multus IPAM pool. If the pod restarts, it may get a different IP, and compute nodes sending kdump or heartbeat packets to the old address will fail until reconfigured.
+
+To provide a stable IP that survives pod restarts, create a MetalLB-backed LoadBalancer Service that fronts the InstanceHA UDP ports. Compute nodes send packets to the Service's external IP, and MetalLB routes them to the pod regardless of its current address.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: instanceha-udp
+  namespace: openstack
+  annotations:
+    metallb.universe.tf/address-pool: internalapi
+    metallb.universe.tf/allow-shared-ip: internalapi
+    metallb.universe.tf/loadBalancerIPs: 172.17.0.80
+spec:
+  type: LoadBalancer
+  selector:
+    service: instanceha
+  ports:
+  - name: kdump
+    port: 7410
+    targetPort: 7410
+    protocol: UDP
+  - name: heartbeat
+    port: 7411
+    targetPort: 7411
+    protocol: UDP
+```
+
+Replace `172.17.0.80` with an IP from your `internalapi` MetalLB address pool. The `allow-shared-ip` annotation lets this Service share the same IP with other OpenStack services (e.g., keystone, nova, cinder) that already use the `internalapi` pool — since the InstanceHA ports (7410/UDP, 7411/UDP) don't conflict with any existing service ports, sharing is safe and avoids consuming an additional IP. If you prefer a dedicated IP, pick an unused address and remove the `allow-shared-ip` annotation.
+
+> **Note:** The `address-pool` value must match the actual MetalLB IPAddressPool name. In a standard openstack-k8s-operators deployment this is `internalapi`. You can verify the pool name with `oc get ipaddresspools -n metallb-system`.
+
+Then configure compute nodes to send kdump and heartbeat packets to that IP instead of the pod IP.
 
 ### Required Secrets and ConfigMaps
 
@@ -463,7 +500,7 @@ compute-1:
   uuid: System.Embedded.1  # Redfish system ID
 ```
 
-Redfish operations retry up to 3 times with per-request timeout of `FENCING_TIMEOUT` (clamped to 5–300 seconds). All URLs are validated to prevent SSRF attacks (localhost and link-local addresses are blocked).
+Redfish operations attempt up to 3 times with per-request timeout of `FENCING_TIMEOUT` (configurable range: 5–120 seconds). All URLs are validated to prevent SSRF attacks (localhost and link-local addresses are blocked).
 
 ### Metal3 (BMH) Configuration
 
@@ -525,7 +562,7 @@ config:
 | false | false | true | Only instances on hosts in tagged aggregates |
 | true | true | true | Tagged flavor OR tagged image, AND host must be in tagged aggregate |
 
-When all three filters are enabled but no resources carry the tag, all instances are evacuated (fail-open behavior ensures evacuation works out of the box before tagging is configured).
+When `TAGGED_FLAVORS` and/or `TAGGED_IMAGES` are enabled but no flavors or images carry the tag, all instances pass the flavor/image filter. This fail-open behavior ensures evacuation works out of the box before tagging is configured. However, `TAGGED_AGGREGATES` is fail-closed: if no aggregates carry the evacuable tag, no hosts pass the aggregate filter and no evacuations occur.
 
 ---
 
@@ -598,6 +635,53 @@ config:
 
 Each compute node must run a heartbeat sender that periodically sends a UDP packet to the InstanceHA pod. The packet format is a 4-byte magic number (`0x48425631`) followed by the hostname. See `docs/instanceha_heartbeat_performance.md` for a reference sender script and scalability benchmarks (tested to 1000 nodes).
 
+The recommended way to deploy the heartbeat sender is via the `instanceha-monitoring` EDPM service:
+
+**1. Create an OpenStackDataPlaneService CR:**
+
+```yaml
+apiVersion: dataplane.openstack.org/v1beta1
+kind: OpenStackDataPlaneService
+metadata:
+  name: instanceha-monitoring
+spec:
+  playbook: osp.edpm.instanceha_monitoring
+```
+
+**2. Add the service to your OpenStackDataPlaneNodeSet:**
+
+```yaml
+apiVersion: dataplane.openstack.org/v1beta1
+kind: OpenStackDataPlaneNodeSet
+metadata:
+  name: openstack-edpm
+spec:
+  services:
+    - download-cache
+    - bootstrap
+    - configure-network
+    # ... existing services ...
+    - nova
+    - instanceha-monitoring
+```
+
+**3. Set the required variables:**
+
+Pass the variables via `nodeTemplate.ansible.ansibleVars` or per-node overrides in the nodeset:
+
+```yaml
+spec:
+  nodeTemplate:
+    ansible:
+      ansibleVars:
+        edpm_instanceha_monitoring_heartbeat_enabled: true
+        edpm_instanceha_monitoring_heartbeat_ip: "<instanceha-ip>"
+        edpm_instanceha_monitoring_heartbeat_port: 7411
+        edpm_instanceha_monitoring_heartbeat_interval: 30
+```
+
+The `edpm_instanceha_monitoring_heartbeat_ip` must be the InstanceHA pod's IP on the heartbeat network. To ensure this IP remains stable across pod restarts, expose the heartbeat port via a MetalLB LoadBalancer Service and use the Service's external IP here. See [Stable IP for UDP Listeners](#stable-ip-for-udp-listeners).
+
 For large deployments, consider placing heartbeat traffic on a dedicated network attachment to isolate it from Nova API traffic. See [Network Attachments](#network-attachments) for an example.
 
 ---
@@ -622,6 +706,8 @@ Each compute node needs `fence_kdump` configured in `/etc/kdump.conf`:
 fence_kdump_nodes <instanceha-pod-ip>
 fence_kdump_args -p 7410
 ```
+
+To ensure this IP remains stable across pod restarts, expose the kdump port via a MetalLB LoadBalancer Service. See [Stable IP for UDP Listeners](#stable-ip-for-udp-listeners).
 
 ### InstanceHA Configuration
 
@@ -719,7 +805,7 @@ Each instance is fully independent — no cross-region communication or coordina
 | `fencingSecret` | string | `"fencing-secret"` | Secret with `fencing.yaml` |
 | `instanceHaConfigMap` | string | `"instanceha-config"` | ConfigMap with `config.yaml` |
 | `instanceHaKdumpPort` | int32 | `7410` | UDP port for kdump messages |
-| `instanceHaHeartbeatPort` | int32 | `7411` | UDP port for heartbeat messages (0 to disable) |
+| `instanceHaHeartbeatPort` | int32 | `7411` | UDP port for heartbeat messages |
 | `auth.applicationCredentialSecret` | string | none | Secret with `AC_ID` and `AC_SECRET` keys |
 | `nodeSelector` | map | none | Kubernetes node placement constraints |
 | `networkAttachments` | []string | none | Additional Multus network attachments |
@@ -755,7 +841,7 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 | `TAGGED_IMAGES` | bool | true | Filter by image tag |
 | `TAGGED_FLAVORS` | bool | true | Filter by flavor tag |
 | `TAGGED_AGGREGATES` | bool | true | Filter by aggregate tag (also affects threshold calculation and reserved host matching) |
-| `SKIP_SERVERS_WITH_NAME` | list | `""` (empty) | Server name glob patterns (comma-separated) to exclude from evacuation |
+| `SKIP_SERVERS_WITH_NAME` | list | `[]` (empty) | Server name glob patterns (comma-separated) to exclude from evacuation |
 | `EVACUATION_RETRIES` | int | 5 (range: 1–20) | Max per-instance evacuation retry attempts before giving up |
 
 #### Host Recovery
@@ -851,11 +937,11 @@ The agent exposes three HTTP endpoints on port 8080:
 oc get pods -n openstack -l service=instanceha
 
 # View agent logs
-oc logs -n openstack deployment/instanceha-instanceha
+oc logs -n openstack deployment/instanceha
 
 # View K8s events
 oc describe instanceha instanceha -n openstack
 
 # Scrape Prometheus metrics
-oc exec deployment/instanceha-instanceha -- curl -s http://localhost:8080/metrics
+oc exec deployment/instanceha -- curl -s http://localhost:8080/metrics
 ```

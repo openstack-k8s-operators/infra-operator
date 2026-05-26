@@ -13,3 +13,4 @@ spec:
   #fencingSecret:
   #instanceHaConfigMap:
   #instanceHaKdumpPort:
+  #instanceHaHeartbeatPort:
