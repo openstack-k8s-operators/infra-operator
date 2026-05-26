@@ -23,6 +23,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -30,14 +31,14 @@ import (
 	instancehav1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 )
 
-// nolint:unused
-// log is for logging in this package.
 var instancehalog = logf.Log.WithName("instanceha-resource")
 
 // SetupInstanceHaWebhookWithManager registers the webhook for InstanceHa in the manager.
 func SetupInstanceHaWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr).For(&instancehav1beta1.InstanceHa{}).
-		WithValidator(&InstanceHaCustomValidator{}).
+		WithValidator(&InstanceHaCustomValidator{
+			Client: mgr.GetClient(),
+		}).
 		WithDefaulter(&InstanceHaCustomDefaulter{}).
 		Complete()
 }
@@ -82,31 +83,31 @@ func (d *InstanceHaCustomDefaulter) Default(_ context.Context, obj runtime.Objec
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as this struct is used only for temporary operations and does not need to be deeply copied.
 type InstanceHaCustomValidator struct {
-	// TODO(user): Add more fields as needed for validation
+	Client client.Client
 }
 
 var _ webhook.CustomValidator = &InstanceHaCustomValidator{}
 
 // ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type InstanceHa.
-func (v *InstanceHaCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (v *InstanceHaCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	instanceha, ok := obj.(*instancehav1beta1.InstanceHa)
 	if !ok {
 		return nil, fmt.Errorf("expected a InstanceHa object but got %T", obj)
 	}
 	instancehalog.Info("Validation for InstanceHa upon creation", "name", instanceha.GetName())
 
-	return instanceha.ValidateCreate()
+	return instanceha.ValidateCreate(ctx, v.Client)
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type InstanceHa.
-func (v *InstanceHaCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (v *InstanceHaCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	instanceha, ok := newObj.(*instancehav1beta1.InstanceHa)
 	if !ok {
 		return nil, fmt.Errorf("expected a InstanceHa object for the newObj but got %T", newObj)
 	}
 	instancehalog.Info("Validation for InstanceHa upon update", "name", instanceha.GetName())
 
-	return instanceha.ValidateUpdate(oldObj)
+	return instanceha.ValidateUpdate(ctx, v.Client, oldObj)
 }
 
 // ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type InstanceHa.

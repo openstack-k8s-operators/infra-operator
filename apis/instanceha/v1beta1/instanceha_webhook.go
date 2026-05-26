@@ -20,8 +20,12 @@ limitations under the License.
 package v1beta1
 
 import (
+	"context"
+	"fmt"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -60,38 +64,39 @@ func (spec *InstanceHaSpec) Default() {
 		spec.ContainerImage = instanceHaDefaults.ContainerImageURL
 	}
 	if spec.OpenStackCloud == "" {
-                spec.OpenStackCloud = OpenStackCloud
-        }
-        if spec.OpenStackConfigMap == "" {
-                spec.OpenStackConfigMap = "openstack-config"
-        }
-        if spec.OpenStackConfigSecret == "" {
-                spec.OpenStackConfigSecret = "openstack-config-secret"
-        }
-        if spec.FencingSecret == "" {
-                spec.FencingSecret = "fencing-secret"
-        }
-        if spec.InstanceHaConfigMap == "" {
-                spec.InstanceHaConfigMap = "instanceha-config"
-        }
-        if spec.InstanceHaKdumpPort == 0 {
-                spec.InstanceHaKdumpPort = 7410
-        }
+		spec.OpenStackCloud = OpenStackCloud
+	}
+	if spec.OpenStackConfigMap == "" {
+		spec.OpenStackConfigMap = "openstack-config"
+	}
+	if spec.OpenStackConfigSecret == "" {
+		spec.OpenStackConfigSecret = "openstack-config-secret"
+	}
+	if spec.FencingSecret == "" {
+		spec.FencingSecret = "fencing-secret"
+	}
+	if spec.InstanceHaConfigMap == "" {
+		spec.InstanceHaConfigMap = "instanceha-config"
+	}
+	if spec.InstanceHaKdumpPort == 0 {
+		spec.InstanceHaKdumpPort = 7410
+	}
+	if spec.InstanceHaHeartbeatPort == 0 {
+		spec.InstanceHaHeartbeatPort = 7411
+	}
+
 }
 
-var _ webhook.Validator = &InstanceHa{}
-
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *InstanceHa) ValidateCreate() (admission.Warnings, error) {
+// ValidateCreate validates the InstanceHa resource on creation.
+func (r *InstanceHa) ValidateCreate(ctx context.Context, c client.Client) (admission.Warnings, error) {
 	instancehalog.Info("validate create", "name", r.Name)
 
 	var allErrs field.ErrorList
 	var allWarn []string
 	basePath := field.NewPath("spec")
 
-	// When a TopologyRef CR is referenced, fail if a different Namespace is
-	// referenced because is not supported
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -102,16 +107,15 @@ func (r *InstanceHa) ValidateCreate() (admission.Warnings, error) {
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *InstanceHa) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+func (r *InstanceHa) ValidateUpdate(ctx context.Context, c client.Client, old runtime.Object) (admission.Warnings, error) {
 	instancehalog.Info("validate update", "name", r.Name)
 
 	var allErrs field.ErrorList
 	var allWarn []string
 	basePath := field.NewPath("spec")
 
-	// When a TopologyRef CR is referenced, fail if a different Namespace is
-	// referenced because is not supported
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
+	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -121,10 +125,43 @@ func (r *InstanceHa) ValidateUpdate(old runtime.Object) (admission.Warnings, err
 	return allWarn, nil
 }
 
+// validateUniqueOpenStackCloud rejects the CR if another InstanceHa in the same
+// namespace already targets the same OpenStackCloud value.
+func (r *InstanceHa) validateUniqueOpenStackCloud(
+	ctx context.Context,
+	c client.Client,
+	basePath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+
+	instanceHaList := &InstanceHaList{}
+	if err := c.List(ctx, instanceHaList, client.InNamespace(r.Namespace)); err != nil {
+		allErrs = append(allErrs, field.InternalError(
+			basePath.Child("openStackCloud"),
+			fmt.Errorf("failed to list InstanceHa resources: %w", err)))
+		return allErrs
+	}
+
+	for _, existing := range instanceHaList.Items {
+		if existing.Name == r.Name {
+			continue
+		}
+		if existing.Spec.OpenStackCloud == r.Spec.OpenStackCloud {
+			allErrs = append(allErrs, field.Forbidden(
+				basePath.Child("openStackCloud"),
+				fmt.Sprintf(
+					"InstanceHa %q already manages OpenStackCloud %q in namespace %q",
+					existing.Name, r.Spec.OpenStackCloud, r.Namespace)))
+			break
+		}
+	}
+
+	return allErrs
+}
+
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
 func (r *InstanceHa) ValidateDelete() (admission.Warnings, error) {
 	instancehalog.Info("validate delete", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object deletion.
 	return nil, nil
 }

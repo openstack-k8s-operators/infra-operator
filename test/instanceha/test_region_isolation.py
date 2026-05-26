@@ -20,26 +20,10 @@ import logging
 from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime, timedelta
 
-# Mock OpenStack dependencies before importing instanceha
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    sys.modules['novaclient.exceptions'] = MagicMock()
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions.discovery'] = MagicMock()
+import conftest  # noqa: F401
 
 # Suppress warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
-
-# Add the module path for testing
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
 
 import instanceha
 
@@ -374,7 +358,7 @@ class TestRegionIsolation(unittest.TestCase):
                     mock_client_r2.region_name = 'RegionTwo'
 
                     # Make nova_login return the appropriate client based on region
-                    def nova_login_side_effect(credentials):
+                    def nova_login_side_effect(credentials, ca_bundle=None):
                         if credentials.region_name == 'RegionOne':
                             return mock_client_r1
                         elif credentials.region_name == 'RegionTwo':

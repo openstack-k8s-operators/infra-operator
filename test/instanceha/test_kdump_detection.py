@@ -11,7 +11,6 @@ Tests for kdump crash detection functionality:
 #!/usr/bin/env python3
 
 import os
-import sys
 import unittest
 import tempfile
 import yaml
@@ -28,44 +27,10 @@ from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime, timedelta
 from io import StringIO
 
-# Mock OpenStack dependencies before importing instanceha
-# This allows tests to run without novaclient, keystoneauth1, etc.
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    # Create actual exception classes for novaclient
-    class NotFound(Exception):
-        pass
-    class Conflict(Exception):
-        pass
-    class Forbidden(Exception):
-        pass
-    class Unauthorized(Exception):
-        pass
-    novaclient_exceptions = MagicMock()
-    novaclient_exceptions.NotFound = NotFound
-    novaclient_exceptions.Conflict = Conflict
-    novaclient_exceptions.Forbidden = Forbidden
-    novaclient_exceptions.Unauthorized = Unauthorized
-    sys.modules['novaclient.exceptions'] = novaclient_exceptions
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions.discovery'] = MagicMock()
-
-# Add the module path for testing
-# Calculate the path to instanceha.py relative to this test file
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
 # Suppress configuration warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
 
-# Import the module under test
+import conftest  # noqa: F401
 import instanceha
 
 # Re-suppress logging after import (instanceha sets its own level)
@@ -81,7 +46,7 @@ class TestKdumpFunctionality(unittest.TestCase):
         self.mock_service = Mock()
         self.mock_service.config.get_config_value.return_value = 10  # KDUMP_TIMEOUT
         self.mock_service.config.get_workers.return_value = 4
-        self.mock_service.UDP_IP = '0.0.0.0'
+        self.mock_service.udp_ip = '0.0.0.0'
         self.mock_service.config.get_udp_port.return_value = 7410
 
         # Create a mock service for kdump testing with proper config
@@ -224,20 +189,17 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service_obj.id = 'service-123'
         mock_service_obj.status = 'disabled'
 
-        # Create service instance and mark host as kdump fenced
+        # Mark host as kdump fenced — power-on should be skipped
+        # because the host is still dumping memory
         mock_service_instance = instanceha.InstanceHAService(Mock())
-        mock_service_instance.config = self.mock_service.config
-        mock_service_instance.config.is_leave_disabled_enabled.return_value = False
+        mock_service_instance.config.get_config_value.return_value = False
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 
-        with patch('instanceha._host_fence') as mock_fence, \
-             patch('instanceha._host_enable', return_value=True):
+        with patch('instanceha._host_fence') as mock_fence:
             result = instanceha._post_evacuation_recovery(mock_conn, mock_service_obj, mock_service_instance)
 
-            # Verify power on was NOT called
+            # Power-on skipped: kdump final_action determines host behavior
             mock_fence.assert_not_called()
-            # Note: kdump_fenced_hosts cleanup now happens in _host_enable when force-down is unset
-            # Since _host_enable is mocked here, the cleanup doesn't happen in this test
             self.assertTrue(result)
 
     def test_post_evacuation_recovery_normal_host_power_on(self):
@@ -248,25 +210,22 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service_obj.id = 'service-123'
         mock_service_obj.status = 'disabled'
 
-        # Create service instance without kdump fencing
         mock_service_instance = instanceha.InstanceHAService(Mock())
-        mock_service_instance.config = self.mock_service.config
-        mock_service_instance.config.is_leave_disabled_enabled.return_value = False
+        mock_service_instance.config.get_config_value.return_value = False
 
-        with patch('instanceha._host_fence', return_value=True) as mock_fence, \
-             patch('instanceha._host_enable', return_value=True):
+        with patch('instanceha._host_fence', return_value=True) as mock_fence:
             result = instanceha._post_evacuation_recovery(mock_conn, mock_service_obj, mock_service_instance)
 
-            # Verify power on WAS called
+            # Non-kdump host should be powered on after evacuation
             mock_fence.assert_called_once_with('compute-01.example.com', 'on', mock_service_instance)
             self.assertTrue(result)
 
     def test_kdump_fenced_hosts_cleanup_on_recovery(self):
-        """Test that kdump_fenced_hosts is properly cleaned up after recovery."""
+        """Test that kdump_hosts_checking is cleaned up after recovery for kdump-fenced hosts."""
         mock_service_instance = instanceha.InstanceHAService(Mock())
-        mock_service_instance.config = self.mock_service.config
+        mock_service_instance.config.get_config_value.return_value = False
 
-        # Add multiple hosts to kdump_fenced_hosts and tracking dicts
+        # Two kdump-fenced hosts; only compute-01 will be recovered
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
         mock_service_instance.kdump_fenced_hosts.add('compute-02')
         mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.time()
@@ -279,15 +238,13 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service_obj.host = 'compute-01.example.com'
         mock_service_obj.id = 'service-123'
         mock_service_obj.status = 'disabled'
-        mock_service_instance.config.is_leave_disabled_enabled.return_value = False
 
-        with patch('instanceha._host_enable', return_value=True):
-            instanceha._post_evacuation_recovery(mock_conn, mock_service_obj, mock_service_instance)
+        instanceha._post_evacuation_recovery(mock_conn, mock_service_obj, mock_service_instance)
 
-            # Only kdump_hosts_checking is cleaned up in _post_evacuation_recovery
-            # kdump_fenced_hosts and kdump_hosts_timestamp are cleaned up in _host_enable when force-down is unset
-            self.assertNotIn('compute-01', mock_service_instance.kdump_hosts_checking)
-            self.assertIn('compute-02', mock_service_instance.kdump_hosts_checking)
+        # Only compute-01's checking entry should be cleaned up;
+        # kdump_fenced_hosts and timestamps are cleaned up later in _host_enable
+        self.assertNotIn('compute-01', mock_service_instance.kdump_hosts_checking)
+        self.assertIn('compute-02', mock_service_instance.kdump_hosts_checking)
 
     def test_kdump_disabled_reason_marker(self):
         """Test that kdump-fenced hosts get special disabled_reason marker."""
@@ -311,11 +268,13 @@ class TestKdumpFunctionality(unittest.TestCase):
         """Test that re-enablement is delayed when kdump messages are recent."""
         mock_conn = Mock()
         mock_config = Mock()
-        mock_config.is_leave_disabled_enabled.return_value = False
-        mock_config.is_force_enable_enabled.return_value = False
+        mock_config.get_config_value.side_effect = lambda key: {
+            'LEAVE_DISABLED': False, 'FORCE_ENABLE': False,
+        }.get(key, Mock())
 
         service = instanceha.InstanceHAService(mock_config)
-        service.kdump_hosts_timestamp['compute-01'] = time.time() - 30  # 30s ago, under 60s threshold
+        # 30s ago — under the 60s kdump cooldown threshold
+        service.kdump_hosts_timestamp['compute-01'] = time.time() - 30
 
         mock_svc = Mock()
         mock_svc.host = 'compute-01.example.com'
@@ -323,23 +282,25 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_svc.disabled_reason = 'instanceha evacuation (kdump): 2025-01-01'
         mock_svc.status = 'disabled'
 
-        # Mock migrations to be complete
+        # No active migrations — would normally allow re-enable
         mock_conn.migrations.list.return_value = []
 
         with patch('instanceha._host_enable') as mock_enable:
             instanceha._process_reenabling(mock_conn, service, [mock_svc])
-            # Should NOT attempt to enable (too soon after kdump message)
+            # Blocked: kdump cooldown hasn't elapsed yet
             mock_enable.assert_not_called()
 
     def test_kdump_reenable_allowed_after_delay(self):
         """Test that re-enablement proceeds after 60s delay from last kdump message."""
         mock_conn = Mock()
         mock_config = Mock()
-        mock_config.is_leave_disabled_enabled.return_value = False
-        mock_config.is_force_enable_enabled.return_value = False
+        mock_config.get_config_value.side_effect = lambda key: {
+            'LEAVE_DISABLED': False, 'FORCE_ENABLE': False,
+        }.get(key, Mock())
 
         service = instanceha.InstanceHAService(mock_config)
-        service.kdump_hosts_timestamp['compute-01'] = time.time() - 65  # 65s ago, over 60s threshold
+        # 65s ago — past the 60s kdump cooldown threshold
+        service.kdump_hosts_timestamp['compute-01'] = time.time() - 65
 
         mock_svc = Mock()
         mock_svc.host = 'compute-01.example.com'
@@ -347,12 +308,12 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_svc.disabled_reason = 'instanceha evacuation (kdump): 2025-01-01'
         mock_svc.status = 'disabled'
 
-        # Mock migrations to be complete
+        # No active migrations
         mock_conn.migrations.list.return_value = []
 
         with patch('instanceha._host_enable') as mock_enable:
             instanceha._process_reenabling(mock_conn, service, [mock_svc])
-            # Should attempt to enable (enough time passed)
+            # Allowed: kdump cooldown has elapsed, no migrations pending
             mock_enable.assert_called_once_with(mock_conn, mock_svc, reenable=True, service=service)
 
     def test_kdump_marker_cleanup_on_force_down_unset(self):
@@ -391,7 +352,7 @@ class TestKdumpIntegration(unittest.TestCase):
         self.mock_service = Mock()
         self.mock_service.config.get_config_value.return_value = 10
         self.mock_service.config.get_workers.return_value = 2
-        self.mock_service.UDP_IP = '127.0.0.1'
+        self.mock_service.udp_ip = '127.0.0.1'
         self.mock_service.config.get_udp_port.return_value = 7411  # Different port for testing
 
     def tearDown(self):
@@ -631,25 +592,26 @@ class TestKdumpIntegration(unittest.TestCase):
 
     def test_post_evacuation_recovery_updates_disabled_reason_for_stale_service(self):
         """Test that disabled_reason is updated even when service object is stale (not yet disabled)."""
-        # Simulate a kdump-fenced host: service object is stale (shows 'enabled' status)
-        # but _host_disable was just called, so it's actually disabled in Nova
         mock_conn = Mock()
         failed_service = Mock()
         failed_service.host = 'compute-01.example.com'
         failed_service.id = 'service-123'
-        failed_service.status = 'enabled'  # Stale - shows pre-disable status
+        failed_service.status = 'enabled'
 
         mock_service_instance = instanceha.InstanceHAService(Mock())
-        mock_service_instance.config.is_leave_disabled_enabled.return_value = False
+        mock_service_instance.config.get_config_value.return_value = False
 
-        # Call post_evacuation_recovery
-        result = instanceha._post_evacuation_recovery(mock_conn, failed_service, mock_service_instance, resume=True)
+        # Service status='enabled' simulates a stale cached object — the host was
+        # disabled by _host_disable but process_service's service object wasn't refreshed
+        with patch('instanceha._host_fence', return_value=True) as mock_fence:
+            result = instanceha._post_evacuation_recovery(mock_conn, failed_service, mock_service_instance, resume=True)
 
-        # Should succeed
         self.assertTrue(result)
 
-        # disabled_reason should be updated even though status shows 'enabled'
-        # (service object is stale, but we know _host_disable was just called)
+        # Power-on should be called even for resume (orphaned host recovery)
+        mock_fence.assert_called_once_with('compute-01.example.com', 'on', mock_service_instance)
+
+        # disabled_reason updated regardless of stale status — uses service ID directly
         mock_conn.services.disable_log_reason.assert_called_once()
         call_args = mock_conn.services.disable_log_reason.call_args[0]
         self.assertEqual(call_args[0], 'service-123')
@@ -664,16 +626,17 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.status = 'disabled'
 
         mock_service_instance = instanceha.InstanceHAService(Mock())
-        mock_service_instance.config.is_leave_disabled_enabled.return_value = False
+        mock_service_instance.config.get_config_value.return_value = False
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 
-        # Call post_evacuation_recovery with resume=True
-        result = instanceha._post_evacuation_recovery(mock_conn, failed_service, mock_service_instance, resume=True)
+        with patch('instanceha._host_fence') as mock_fence:
+            result = instanceha._post_evacuation_recovery(mock_conn, failed_service, mock_service_instance, resume=True)
 
-        # Should succeed
         self.assertTrue(result)
 
-        # disabled_reason should have both "evacuation complete" AND "(kdump)" marker
+        # Kdump-fenced host should NOT be powered on (still dumping)
+        mock_fence.assert_not_called()
+
         mock_conn.services.disable_log_reason.assert_called_once()
         call_args = mock_conn.services.disable_log_reason.call_args[0]
         self.assertEqual(call_args[0], 'service-123')

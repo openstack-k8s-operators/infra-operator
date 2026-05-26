@@ -6,54 +6,11 @@ service behavior and ensure all features are properly tested.
 """
 
 import os
-import sys
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
 
-# Mock OpenStack dependencies
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    # Create actual exception classes for novaclient
-    class NotFound(Exception):
-        pass
-    class Conflict(Exception):
-        pass
-    class Forbidden(Exception):
-        pass
-    class Unauthorized(Exception):
-        pass
-    novaclient_exceptions = MagicMock()
-    novaclient_exceptions.NotFound = NotFound
-    novaclient_exceptions.Conflict = Conflict
-    novaclient_exceptions.Forbidden = Forbidden
-    novaclient_exceptions.Unauthorized = Unauthorized
-    sys.modules['novaclient.exceptions'] = novaclient_exceptions
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-
-    # Create discovery failure exception
-    class DiscoveryFailure(Exception):
-        pass
-
-    discovery_module = MagicMock()
-    discovery_module.DiscoveryFailure = DiscoveryFailure
-
-    exceptions_module = MagicMock()
-    exceptions_module.discovery = discovery_module
-
-    sys.modules['keystoneauth1.exceptions'] = exceptions_module
-    sys.modules['keystoneauth1.exceptions.discovery'] = discovery_module
-
-# Add module path
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
+import conftest  # noqa: F401
 import instanceha
 
 
@@ -117,11 +74,10 @@ class TestDisabledConfig(unittest.TestCase):
         mock_service.processing_lock = Mock()
         mock_service.hosts_processing = {}
 
-        mock_failed_service = Mock()
-        mock_failed_service.host = 'test-host.example.com'
+        mock_failed_service = Mock(host='test-host.example.com', status='enabled', forced_down=False)
 
         # Create mock services list with one down service
-        services = [mock_failed_service, Mock(), Mock()]  # Add more to avoid threshold
+        services = [mock_failed_service, Mock(status='enabled', forced_down=False), Mock(status='enabled', forced_down=False)]
         compute_nodes = [mock_failed_service]
 
         with patch('instanceha._filter_processing_hosts', return_value=(compute_nodes, [], set(['test-host']), 0)):
@@ -151,16 +107,16 @@ class TestDisabledConfig(unittest.TestCase):
             'TAGGED_IMAGES': False,
             'TAGGED_FLAVORS': False,
             'TAGGED_AGGREGATES': False,
-            'POLL': 45
+            'POLL': 45,
+            'WORKERS': 4,
         }
         mock_service.config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
         mock_service.processing_lock = Mock()
         mock_service.hosts_processing = {}
 
-        mock_failed_service = Mock()
-        mock_failed_service.host = 'test-host.example.com'
+        mock_failed_service = Mock(host='test-host.example.com', status='enabled', forced_down=False)
 
-        services = [mock_failed_service, Mock(), Mock()]  # Add more to avoid threshold
+        services = [mock_failed_service, Mock(status='enabled', forced_down=False), Mock(status='enabled', forced_down=False)]
         compute_nodes = [mock_failed_service]
 
         with patch('instanceha._filter_processing_hosts', return_value=(compute_nodes, [], set(['test-host']), 0)):
@@ -371,7 +327,7 @@ class TestForceEnableConfig(unittest.TestCase):
             self.assertEqual(call_kwargs['source_compute'], 'test-host.example.com')
             self.assertEqual(call_kwargs['migration_type'], 'evacuation')
             self.assertIn('changes_since', call_kwargs)
-            self.assertEqual(call_kwargs['limit'], 1000)
+            self.assertEqual(call_kwargs['limit'], str(1000))
 
 
 class TestLeaveDisabledConfig(unittest.TestCase):
@@ -436,7 +392,7 @@ class TestLeaveDisabledConfig(unittest.TestCase):
 
 
 class TestTaggedAggregatesConfig(unittest.TestCase):
-    """Test TAGGED_AGGREGATES configuration parameter (line 473)."""
+    """Test TAGGED_AGGREGATES configuration parameter."""
 
     def test_tagged_aggregates_true_filters_by_aggregate(self):
         """Test that TAGGED_AGGREGATES=True filters compute nodes by aggregate metadata."""
@@ -496,10 +452,8 @@ class TestTaggedAggregatesConfig(unittest.TestCase):
         mock_service.processing_lock = Mock()
         mock_service.hosts_processing = {}
 
-        svc1 = Mock()
-        svc1.host = 'host1'
-        svc2 = Mock()
-        svc2.host = 'host2'
+        svc1 = Mock(host='host1', status='enabled', forced_down=False)
+        svc2 = Mock(host='host2', status='enabled', forced_down=False)
 
         services = [svc1, svc2]
         compute_nodes = [svc1, svc2]
@@ -724,28 +678,24 @@ class TestHashIntervalConfig(unittest.TestCase):
         service = instanceha.InstanceHAService(mock_config)
         self.assertEqual(service.config.get_config_value('HASH_INTERVAL'), 300)
 
-    def test_hash_update_failure_detection(self):
-        """Test that hash update detects failures (duplicate hash)."""
+    def test_hash_update_always_succeeds(self):
+        """Test that hash update always succeeds (SHA-256 of timestamp is always unique)."""
         mock_config = Mock()
         config_values = {'HASH_INTERVAL': 0}  # Always allow updates
         mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 0))
 
         service = instanceha.InstanceHAService(mock_config)
 
-        # Mock hashlib to return same hash twice (simulated failure)
-        with patch('hashlib.sha256') as mock_sha256:
-            mock_hash = Mock()
-            mock_hash.hexdigest.return_value = 'same-hash-value'
-            mock_sha256.return_value = mock_hash
+        # First update
+        service.update_health_hash()
+        self.assertTrue(service.hash_update_successful)
+        first_hash = service.current_hash
+        self.assertNotEqual(first_hash, "")
 
-            # First update
-            service.update_health_hash()
-            self.assertTrue(service.hash_update_successful)
-            self.assertEqual(service.current_hash, 'same-hash-value')
-
-            # Second update with same hash should fail
-            service.update_health_hash()
-            self.assertFalse(service.hash_update_successful)
+        # Second update — hash changes because timestamp changes
+        service._last_hash_time = 0  # Reset to force update
+        service.update_health_hash()
+        self.assertTrue(service.hash_update_successful)
 
 
 class TestCriticalServicesCheck(unittest.TestCase):

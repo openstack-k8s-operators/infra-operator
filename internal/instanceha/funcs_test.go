@@ -52,7 +52,7 @@ func TestDeploymentDisabledEnvVar(t *testing.T) {
 			labels := map[string]string{"app": "instanceha"}
 			annotations := map[string]string{}
 
-			dep := Deployment(instance, labels, annotations, "default", "hash123", "test-image:latest", nil)
+			dep := Deployment(instance, labels, annotations, "default", "hash123", "test-image:latest", nil, "")
 
 			// Find the INSTANCEHA_DISABLED env var
 			var found bool

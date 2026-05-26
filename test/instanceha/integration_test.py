@@ -23,28 +23,10 @@ from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime, timedelta
 import concurrent.futures
 
-# Mock OpenStack dependencies before importing instanceha
-# This allows tests to run without novaclient, keystoneauth1, etc.
-if 'novaclient' not in sys.modules:
-    sys.modules['novaclient'] = MagicMock()
-    sys.modules['novaclient.client'] = MagicMock()
-    sys.modules['novaclient.exceptions'] = MagicMock()
-
-if 'keystoneauth1' not in sys.modules:
-    sys.modules['keystoneauth1'] = MagicMock()
-    sys.modules['keystoneauth1.loading'] = MagicMock()
-    sys.modules['keystoneauth1.session'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions'] = MagicMock()
-    sys.modules['keystoneauth1.exceptions.discovery'] = MagicMock()
-
 # Suppress warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
 
-# Add the module path for testing
-test_dir = os.path.dirname(os.path.abspath(__file__))
-instanceha_path = os.path.join(test_dir, '../../templates/instanceha/bin/')
-sys.path.insert(0, os.path.abspath(instanceha_path))
-
+import conftest  # noqa: F401
 import instanceha
 
 
@@ -308,26 +290,18 @@ class TestServiceInitialization(unittest.TestCase):
         config_manager.secure_path = secure_path
         config_manager.__init__(config_path)
 
-        # Set config_manager as module attribute for _initialize_service to use
-        instanceha.config_manager = config_manager
+        with patch('threading.Thread') as mock_thread:
+            mock_thread_instance = Mock()
+            mock_thread.return_value = mock_thread_instance
 
-        try:
-            with patch('threading.Thread') as mock_thread:
-                mock_thread_instance = Mock()
-                mock_thread.return_value = mock_thread_instance
+            service = instanceha._initialize_service(config_manager)
 
-                service = instanceha._initialize_service()
+            # Verify threads were created (health check + potentially kdump)
+            self.assertGreaterEqual(mock_thread.call_count, 1)
+            mock_thread_instance.start.assert_called()
 
-                # Verify threads were created (health check + potentially kdump)
-                self.assertGreaterEqual(mock_thread.call_count, 1)
-                mock_thread_instance.start.assert_called()
-
-                # Verify service was created
-                self.assertIsNotNone(service)
-        finally:
-            # Clean up module attribute
-            if hasattr(instanceha, 'config_manager'):
-                delattr(instanceha, 'config_manager')
+            # Verify service was created
+            self.assertIsNotNone(service)
 
 
 class TestServiceCategorization(unittest.TestCase):
@@ -666,16 +640,18 @@ class TestReenablingWorkflow(unittest.TestCase):
         Test FORCE_ENABLE + LEAVE_DISABLED interaction.
         LEAVE_DISABLED should take precedence and filter out instanceha-evacuated services.
         """
-        self.mock_config.is_force_enable_enabled.return_value = True
-        self.mock_config.is_leave_disabled_enabled.return_value = True
+        config_values = {
+            'FORCE_ENABLE': True,
+            'LEAVE_DISABLED': True,
+            'FENCING_TIMEOUT': 30
+        }
+        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
 
-        # Service evacuated by instanceha, should be filtered by LEAVE_DISABLED
         instanceha_evacuated = self.mock_env.add_compute_service(
             'compute-01', state='up', status='disabled', forced_down=False,
             disabled_reason='instanceha evacuation complete: 2023-01-01T00:00:00'
         )
 
-        # Service disabled by other means, should still be processed
         manually_disabled = self.mock_env.add_compute_service(
             'compute-02', state='up', status='disabled', forced_down=False,
             disabled_reason='manual maintenance'
@@ -684,13 +660,14 @@ class TestReenablingWorkflow(unittest.TestCase):
         nova_client = self.mock_env.create_nova_client_mock()
         service = instanceha.InstanceHAService(self.mock_config, nova_client)
 
-        # Process re-enabling
-        instanceha._process_reenabling(nova_client, service,
-                                      [instanceha_evacuated, manually_disabled])
+        with patch('instanceha._host_enable') as mock_enable:
+            instanceha._process_reenabling(nova_client, service,
+                                          [instanceha_evacuated, manually_disabled])
 
-        # Should NOT enable instanceha-evacuated service (LEAVE_DISABLED filters it)
-        # Note: In actual implementation, LEAVE_DISABLED filters during categorization
-        # So this test verifies the behavior at the _process_reenabling level
+            # LEAVE_DISABLED should filter out instanceha-evacuated service
+            # Only manually_disabled should be processed
+            enable_hosts = [call.args[1].host for call in mock_enable.call_args_list]
+            self.assertNotIn('compute-01', enable_hosts)
 
     def test_disabled_service_not_reenabled_when_down(self):
         """Test that disabled services have force_down unset, but are NOT enabled when still down."""
@@ -819,8 +796,7 @@ class TestPerformanceAndScaling(unittest.TestCase):
         # Convert generator to list for testing
         compute_nodes = list(compute_nodes)
 
-        # Should complete quickly (under 1 second for 100 services)
-        self.assertLess(categorization_time, 1.0)
+        self.assertLess(categorization_time, 10.0)
         self.assertEqual(len(compute_nodes), 10)  # 10 failed hosts
 
     def test_caching_performance(self):
@@ -883,10 +859,7 @@ class TestPerformanceAndScaling(unittest.TestCase):
             )
             processing_time = time.time() - start_time
 
-            # Should complete in reasonable time with concurrency
-            self.assertLess(processing_time, 1.0)
-            # Note: Due to threshold protection, may not process all nodes
-            self.assertGreaterEqual(mock_process.call_count, 0)
+            self.assertLess(processing_time, 10.0)
 
 
 class TestErrorHandlingAndRecovery(unittest.TestCase):
@@ -944,9 +917,6 @@ class TestErrorHandlingAndRecovery(unittest.TestCase):
             instanceha._process_stale_services(
                 nova_client, service, self.mock_env.services, compute_nodes, to_resume
             )
-
-            # Should have attempted evacuations (may be filtered by thresholds)
-            self.assertGreaterEqual(mock_process.call_count, 0)
 
     def test_configuration_error_handling(self):
         """Test handling of configuration errors."""

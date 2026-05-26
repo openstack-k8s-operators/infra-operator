@@ -7,7 +7,7 @@ Test suite for the InstanceHA service.
 - **Total Tests**: 401 (203 unit + 16 security + 29 critical error + 12 workflow + 26 config + 18 helper + 68 functional + 22 integration + 7 region)
 - **Code Coverage**: 71% (unit tests alone), 83% (with all tests)
 - **Execution Time**: ~13 seconds (unit tests), ~26 seconds (all tests)
-- **Code Size**: 2,871 lines
+- **Code Size**: 3,572 lines
 - **Status**: All tests passing ✅
 
 ## Test Structure

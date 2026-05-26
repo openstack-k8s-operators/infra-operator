@@ -32,9 +32,9 @@ rules:
   - ""
   resources:
   - events
-  - pods/exec
   verbs:
   - create
+  - patch
 - apiGroups:
   - ""
   resources:
@@ -53,6 +53,12 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
 - apiGroups:
   - apps
   resources:
