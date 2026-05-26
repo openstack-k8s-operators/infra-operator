@@ -1,0 +1,10 @@
+#
+# Step 1: Create vhost first (must exist before user due to webhook validation)
+#
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMQVhost
+metadata:
+  name: del-deps-vhost
+spec:
+  rabbitmqClusterName: rabbitmq-del-deps
+  name: del-test-vhost

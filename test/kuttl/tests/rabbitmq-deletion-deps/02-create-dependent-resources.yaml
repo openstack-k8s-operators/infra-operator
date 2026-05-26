@@ -1,14 +1,6 @@
 #
-# Step 1: Create vhost, user, policy, and TransportURL
+# Step 2: Create user, policy, and TransportURL (vhost must already exist)
 #
-apiVersion: rabbitmq.openstack.org/v1beta1
-kind: RabbitMQVhost
-metadata:
-  name: del-deps-vhost
-spec:
-  rabbitmqClusterName: rabbitmq-del-deps
-  name: del-test-vhost
----
 apiVersion: rabbitmq.openstack.org/v1beta1
 kind: RabbitMQUser
 metadata:

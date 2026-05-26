@@ -1,5 +1,5 @@
 #
-# Step 2: After deletion, all resources should be gone
+# Step 3: After deletion, all resources should be gone
 #
 apiVersion: rabbitmq.openstack.org/v1beta1
 kind: RabbitMQPolicy

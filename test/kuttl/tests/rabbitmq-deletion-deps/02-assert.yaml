@@ -1,0 +1,18 @@
+#
+# Step 2: Assert all dependent resources are ready
+#
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 120
+commands:
+  - script: |
+      set -e
+      for res in "rabbitmquser/del-deps-user" "rabbitmqpolicy/del-deps-policy" "transporturl/del-deps-url"; do
+        READY=$(oc get -n $NAMESPACE "$res" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+        if [ "$READY" != "True" ]; then
+          echo "FAIL: $res not ready"
+          oc get -n $NAMESPACE "$res" -o yaml
+          exit 1
+        fi
+        echo "PASS: $res is ready"
+      done

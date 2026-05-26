@@ -1,5 +1,5 @@
 #
-# Step 2: Delete the RabbitMq cluster while dependent resources still exist.
+# Step 3: Delete the RabbitMq cluster while dependent resources still exist.
 # Then delete the dependent resources. All should clean up gracefully.
 #
 apiVersion: kuttl.dev/v1beta1
