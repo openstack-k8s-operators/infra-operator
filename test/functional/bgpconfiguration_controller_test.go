@@ -26,6 +26,7 @@ import (
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -571,6 +572,152 @@ var _ = Describe("BGPConfiguration controller", func() {
 					g.Expect(frr.Spec.BGP.Routers[0].Prefixes).To(ContainElement("172.67.0.102/32")) // Predictable IP
 				}, timeout, interval).Should(Succeed())
 			})
+		})
+	})
+
+	When("FRR migration namespace exists (OpenShift 4.20+ migration)", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+		var migrationNS *corev1.Namespace
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+
+			// Use a unique namespace name to avoid envtest namespace leak
+			migrationNSName := "frr-migration-" + namespace
+			migrationNS = th.CreateNamespace(migrationNSName)
+			bgpReconciler.FRRMigrationNamespace = migrationNSName
+			DeferCleanup(func() {
+				bgpReconciler.FRRMigrationNamespace = ""
+			})
+
+			migrationFRRCfgName := types.NamespacedName{Namespace: migrationNS.Name, Name: "worker-0"}
+			migrationFRRCfg := CreateFRRConfiguration(migrationFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(migrationFRRCfg).To(Not(BeNil()))
+
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = migrationNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, migrationFRRCfg)
+		})
+
+		It("should create FRRConfiguration in the migration namespace instead of metallb-system", func() {
+			pod := th.GetPod(podName)
+			Expect(pod).To(Not(BeNil()))
+
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: migrationNS.Name, Name: podFrrName.Name})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Namespace).To(Equal(migrationNS.Name))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+
+			frr := &frrk8sv1.FRRConfiguration{}
+			Consistently(func(g Gomega) {
+				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName.Name}, frr)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("existing FRRConfigurations in old namespace get migrated to new namespace", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var metallbNS *corev1.Namespace
+
+		BeforeEach(func() {
+			metallbNS = th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+
+			meallbFRRCfgName := types.NamespacedName{Namespace: metallbNS.Name, Name: "worker-0"}
+			meallbFRRCfg := CreateFRRConfiguration(meallbFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(meallbFRRCfg).To(Not(BeNil()))
+
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(metallbNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = metallbNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, meallbFRRCfg)
+		})
+
+		It("should migrate FRRConfigurations from old namespace and clean up", func() {
+			// First verify the FRRConfiguration exists in the old namespace
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: metallbNS.Name, Name: podFrrName.Name})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+
+			// Now simulate OCP 4.20 upgrade: create the migration namespace and
+			// add the reference FRRConfiguration there
+			migrationNSName := "frr-migration-" + namespace
+			migrationNS := th.CreateNamespace(migrationNSName)
+			migrationFRRCfg := CreateFRRConfiguration(
+				types.NamespacedName{Namespace: migrationNS.Name, Name: "worker-0"},
+				GetMetalLBFRRConfigurationSpec("worker-0"),
+			)
+			Expect(migrationFRRCfg).To(Not(BeNil()))
+
+			bgpReconciler.FRRMigrationNamespace = migrationNSName
+			DeferCleanup(func() {
+				bgpReconciler.FRRMigrationNamespace = ""
+			})
+			DeferCleanup(th.DeleteInstance, migrationFRRCfg)
+
+			// Trigger a reconcile by updating the pod
+			pod := th.GetPod(podName)
+			if pod.Annotations == nil {
+				pod.Annotations = map[string]string{}
+			}
+			pod.Annotations["trigger-reconcile"] = "true"
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Update(ctx, pod)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify FRRConfiguration is created in the new namespace
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{
+					Namespace: migrationNS.Name,
+					Name:      podFrrName.Name,
+				})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+
+			// Verify old FRRConfiguration in metallb-system is cleaned up
+			Eventually(func(g Gomega) {
+				frr := &frrk8sv1.FRRConfiguration{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: metallbNS.Name,
+					Name:      podFrrName.Name,
+				}, frr)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 })

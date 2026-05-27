@@ -69,15 +69,16 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client // You'll be using this client in your tests.
-	dynClient *dynamic.DynamicClient
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancel    context.CancelFunc
-	logger    logr.Logger
-	namespace string
-	th        *infra_test.TestHelper
+	cfg           *rest.Config
+	k8sClient     client.Client // You'll be using this client in your tests.
+	dynClient     *dynamic.DynamicClient
+	testEnv       *envtest.Environment
+	ctx           context.Context
+	cancel        context.CancelFunc
+	logger        logr.Logger
+	namespace     string
+	th            *infra_test.TestHelper
+	bgpReconciler *network_ctrl.BGPConfigurationReconciler
 )
 
 func TestAPIs(t *testing.T) {
@@ -255,11 +256,12 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(context.Background(), k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
-	err = (&network_ctrl.BGPConfigurationReconciler{
+	bgpReconciler = &network_ctrl.BGPConfigurationReconciler{
 		Client:  k8sManager.GetClient(),
 		Scheme:  k8sManager.GetScheme(),
 		Kclient: kclient,
-	}).SetupWithManager(context.Background(), k8sManager)
+	}
+	err = bgpReconciler.SetupWithManager(context.Background(), k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&rabbitmq_ctrl.TransportURLReconciler{
