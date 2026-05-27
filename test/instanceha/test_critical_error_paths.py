@@ -244,6 +244,7 @@ class TestEvacuationTimeouts(unittest.TestCase):
         mock_connection = Mock()
         mock_server = Mock()
         mock_server.id = 'server-123'
+        setattr(mock_server, 'OS-EXT-STS:task_state', None)
 
         # Mock evacuation to succeed
         mock_connection.servers.evacuate.return_value = (Mock(status_code=200, reason='OK'), {})
@@ -267,6 +268,7 @@ class TestEvacuationTimeouts(unittest.TestCase):
         mock_connection = Mock()
         mock_server = Mock()
         mock_server.id = 'server-123'
+        setattr(mock_server, 'OS-EXT-STS:task_state', None)
 
         # Mock evacuation to succeed
         mock_connection.servers.evacuate.return_value = (Mock(status_code=200, reason='OK'), {})

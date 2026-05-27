@@ -125,6 +125,11 @@ class MockServerManager:
             servers.append(server)
         return servers
 
+    def reset_state(self, server, state):
+        """Reset server state."""
+        if server in self.servers_data:
+            self.servers_data[server]['status'] = state.upper()
+
     def evacuate(self, server, host=None):
         """Evacuate a server.
 
@@ -156,6 +161,7 @@ class MockServerManager:
             'host': kwargs.get('host', 'compute-0'),
             'flavor': kwargs.get('flavor', {'id': 'flavor-1', 'extra_specs': {}}),
             'image': kwargs.get('image', {'id': 'image-1'}),
+            'OS-EXT-STS:task_state': kwargs.get('task_state', None),
         }
         self.servers_data[server_id] = server_data
         return server_id

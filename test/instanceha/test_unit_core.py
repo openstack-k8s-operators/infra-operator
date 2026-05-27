@@ -1365,7 +1365,8 @@ class TestSecretExposure(unittest.TestCase):
                         'auth_url': 'http://keystone:5000/v3',
                         'user_domain_name': 'Default',
                         'project_domain_name': 'Default'
-                    }
+                    },
+                    'region_name': 'regionOne'
                 }
             }
         }
@@ -1462,6 +1463,7 @@ class TestSecretExposure(unittest.TestCase):
 
             self._assert_no_secrets_in_logs()
 
+    @patch.dict(os.environ, {'OS_CLOUD': 'testcloud'})
     def test_create_connection_exception_no_secret_exposure(self):
         """Test that create_connection exceptions don't expose passwords."""
         # Clear log capture
@@ -1609,6 +1611,7 @@ class TestSecretExposure(unittest.TestCase):
 
         self._assert_no_secrets_in_logs()
 
+    @patch.dict(os.environ, {'OS_CLOUD': 'testcloud'})
     def test_get_nova_connection_exception_no_secret_exposure(self):
         """Test that _get_nova_connection exceptions don't expose passwords."""
         # Clear log capture
@@ -1630,6 +1633,7 @@ class TestSecretExposure(unittest.TestCase):
 
             self._assert_no_secrets_in_logs()
 
+    @patch.dict(os.environ, {'OS_CLOUD': 'testcloud'})
     def test_establish_nova_connection_exception_no_secret_exposure(self):
         """Test that _establish_nova_connection exceptions don't expose passwords."""
         # Clear log capture
@@ -2691,6 +2695,7 @@ class TestFunctionalIntegration(unittest.TestCase):
         server1.name = 'test-server-1'
         server1.image = {'id': 'image-1'}
         server1.flavor = {'id': 'flavor-1'}
+        setattr(server1, 'OS-EXT-STS:task_state', None)
         nova_state['servers'].append(server1)
 
         # Create service and config
@@ -2757,6 +2762,7 @@ class TestFunctionalIntegration(unittest.TestCase):
             server.name = f'test-server-{i}'
             server.image = {'id': 'image-1'}
             server.flavor = {'id': 'flavor-1'}
+            setattr(server, 'OS-EXT-STS:task_state', None)
             nova_state['servers'].append(server)
 
         # Create service
@@ -2841,6 +2847,7 @@ class TestFunctionalIntegration(unittest.TestCase):
             server.host = f'compute-{i}.example.com'
             server.status = 'ACTIVE'
             server.name = f'test-server-{i}'
+            setattr(server, 'OS-EXT-STS:task_state', None)
             # First 3 have evacuable tag, last 2 don't
             if i < 3:
                 server.image = {'id': 'image-1'}
@@ -3204,6 +3211,7 @@ class TestAdvancedIntegration(unittest.TestCase):
         """Test smart evacuation tracks migration status to completion."""
         conn = Mock()
         server = Mock(id='server-123', status='ACTIVE', host='compute-01')
+        setattr(server, 'OS-EXT-STS:task_state', None)
 
         # Mock evacuation response
         response = Mock(status_code=200, reason='OK')
@@ -3229,6 +3237,7 @@ class TestAdvancedIntegration(unittest.TestCase):
         """Test smart evacuation handles timeout correctly."""
         conn = Mock()
         server = Mock(id='server-456', status='ACTIVE')
+        setattr(server, 'OS-EXT-STS:task_state', None)
 
         response = Mock(status_code=200, reason='OK')
         conn.servers.evacuate.return_value = (response, {})
@@ -3249,6 +3258,7 @@ class TestAdvancedIntegration(unittest.TestCase):
         """Test smart evacuation retries on errors."""
         conn = Mock()
         server = Mock(id='server-789', status='ACTIVE')
+        setattr(server, 'OS-EXT-STS:task_state', None)
 
         response = Mock(status_code=200, reason='OK')
         conn.servers.evacuate.return_value = (response, {})
