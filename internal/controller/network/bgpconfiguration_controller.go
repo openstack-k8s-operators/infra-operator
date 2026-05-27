@@ -384,7 +384,7 @@ func (r *BGPConfigurationReconciler) reconcileDelete(ctx context.Context, instan
 
 	if frrNamespace != instance.Spec.FRRConfigurationNamespace {
 		if err := r.cleanupOldNamespaceFRRConfigurations(ctx, instance, instance.Spec.FRRConfigurationNamespace); err != nil {
-			Log.Error(err, "Failed to cleanup FRRConfigurations from old namespace", "namespace", instance.Spec.FRRConfigurationNamespace)
+			return ctrl.Result{}, fmt.Errorf("error cleaning up FRRConfigurations from old namespace %s: %w", instance.Spec.FRRConfigurationNamespace, err)
 		}
 	}
 
