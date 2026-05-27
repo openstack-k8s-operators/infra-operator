@@ -713,10 +713,13 @@ class TestMonitorEvacuation(unittest.TestCase):
         if monotonic_values is None:
             monotonic_values = [start_time + i for i in range(len(status_sequence) + 5)]
 
+        conn = Mock()
+        conn.servers.evacuate.return_value = (Mock(status_code=200, reason='OK'), {})
+
         with patch('instanceha.time.sleep'):
             with patch('instanceha.time.monotonic', side_effect=monotonic_values):
                 with patch('instanceha._server_evacuation_status', side_effect=status_sequence):
-                    return instanceha._monitor_evacuation(Mock(), 'srv-1', 'resp-1', start_time)
+                    return instanceha._monitor_evacuation(conn, 'srv-1', 'resp-1', start_time)
 
     def test_immediate_completion(self):
         status = Mock(completed=True, error=False)
