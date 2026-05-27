@@ -44,7 +44,7 @@ tens of MiB range.
 
 ## UDP Listener Throughput
 
-The listener is a single-threaded blocking `recvmsg` loop. It processes
+The listener is a single-threaded blocking `recvfrom` loop. It processes
 incoming heartbeat packets serially: validate magic number, decode
 hostname from the payload, and write the timestamp under the lock.
 Throughput is independent of THRESHOLD since the listener processes all

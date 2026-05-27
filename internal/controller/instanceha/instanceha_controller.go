@@ -128,7 +128,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// when a condition's state doesn't change.
 	savedConditions := instance.Status.Conditions.DeepCopy()
 
-	// Always patch the instance status when exiting this function so we can persist any changes.
+	// Patch the instance status when exiting this function so we can persist any changes,
+	// unless a panic occurred during reconciliation.
 	defer func() {
 		if panicVal := recover(); panicVal != nil {
 			Log.Error(fmt.Errorf("panic: %v", panicVal), "panic during reconcile, not updating status")

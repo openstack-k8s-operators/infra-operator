@@ -5,8 +5,6 @@
 InstanceHA is a high-availability service for OpenStack that automatically detects and evacuates instances from failed compute nodes.
 
 **Version**: 2.5
-**Code Size**: 3,645 lines
-**Test Suite**: 656 tests across 17 test suites
 
 ## Table of Contents
 
@@ -134,7 +132,7 @@ _config_map: Dict[str, ConfigItem] = {
     'HASH_INTERVAL': ConfigItem('int', 60, 30, 300),
     'ORCHESTRATED_RESTART': ConfigItem('bool', False),
     'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
-    'EVACUATION_RETRIES': ConfigItem('int', 5, 1, 20),
+    'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),  # DEFAULT_EVACUATION_RETRIES = 5
 }
 ```
 
@@ -297,16 +295,22 @@ def track_host_processing(service: 'InstanceHAService', hostname: str):
 **UDP Socket Management**:
 ```python
 class UDPSocketManager:
-    """Context manager for UDP socket with proper resource cleanup."""
+    """Context manager for UDP socket with proper resource cleanup.
+    Supports IPv4, IPv6, and dual-stack (::) binding."""
     def __init__(self, udp_ip, udp_port, label='UDP'):
         self.udp_ip = udp_ip
         self.udp_port = udp_port
         self.label = label
+        self.socket = None
 
     def __enter__(self):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        info = socket.getaddrinfo(self.udp_ip or '::', self.udp_port,
+                                  type=socket.SOCK_DGRAM)[0]
+        self.socket = socket.socket(info[0], info[1])
+        if info[0] == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         self.socket.settimeout(1.0)
-        self.socket.bind((self.udp_ip, self.udp_port))
+        self.socket.bind(info[4])
         return self.socket
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -539,12 +543,12 @@ process_service(failed_service, reserved_hosts, resume, service)
     │             Called for kdump-fenced (not yet disabled)
     │
     ├─ 3. Manage Reserved Hosts
-    │   └─ _manage_reserved_hosts(conn, failed_service, reserved_hosts)
+    │   └─ _manage_reserved_hosts(conn, failed_service, reserved_hosts, service)
     │       ├─ Match by aggregate or zone
     │       └─ Enable matching reserved host
     │
     ├─ 4. Evacuate Servers
-    │   └─ _host_evacuate(connection, failed_service, service)
+    │   └─ _host_evacuate(connection, failed_service, service, target_host=None)
     │       ├─ Get evacuable images/flavors
     │       ├─ List servers on host
     │       ├─ Filter evacuable servers (ACTIVE, ERROR, SHUTOFF)
@@ -1082,7 +1086,7 @@ In addition, each event emission site also increments a corresponding Prometheus
 - `POD_NAMESPACE` environment variable set
 - `INSTANCEHA_CR_NAME` environment variable set to the InstanceHa CR name
 - `POD_NAME` environment variable set (used as `reportingInstance`)
-- RBAC: the operator ClusterRole must have `create` and `patch` permissions on `events`
+- RBAC: the pod's namespaced Role must have `create` and `patch` permissions on `events`
 
 ### Event Catalog
 
@@ -1649,6 +1653,12 @@ This ensures orphaned hosts are not left powered off indefinitely after a pod cr
 
 Emits `OrphanedHostRecovered` (Warning) for each recovered host.
 
+### Known Limitations
+
+**Lock reconciliation scope**: The VM unlock sweep at startup only checks servers on hosts that are `forced_down AND state='down'`. This covers the realistic crash scenario (pod dies mid-evacuation while the host is still fenced). However, if the pod crashes after evacuation succeeds and post-recovery clears `forced_down`, but before the `finally` block unlocks the VMs, the locked VMs on their new (healthy) hosts would not be found by the reconciliation. This window is extremely narrow — the `finally` block in `_server_evacuate_future` runs per-server immediately after each evacuation completes, so the crash would need to occur between the evacuation completing and the `finally` executing. In practice, a SIGKILL (OOM, node crash) during concurrent evacuation would leave VMs on hosts that are still `forced_down`, which the current reconciliation handles correctly.
+
+A broader scan (checking all servers with `locked_reason == LOCK_REASON_EVACUATION` regardless of host state) would close this theoretical gap but requires listing all servers in the cloud at startup, which may be expensive on large deployments.
+
 ---
 
 ## Graceful Shutdown
@@ -1826,10 +1836,6 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
 
 ## Testing
 
-### Test Statistics
-
-- **Total Tests**: 656 across 17 test suites
-
 ### Test Categories
 
 **1. Core Unit Tests** (`test_unit_core.py`):
@@ -1938,6 +1944,17 @@ Core unit tests covering:
 - Branching logic: `_host_evacuate` orchestrated/smart/traditional routing
 - Configuration: `ORCHESTRATED_RESTART` config key validation
 
+**18. Aggregate Threshold Tests** (`test_aggregate_threshold.py`):
+- Per-aggregate failure limit enforcement via `instanceha:max_failures` metadata
+- Multi-aggregate host membership and most-restrictive-limit selection
+- Interaction with global THRESHOLD percentage check
+
+**19. IPv6 UDP Tests** (`test_ipv6_udp.py`):
+- UDPSocketManager binding to IPv6 loopback, wildcard, and IPv4 addresses
+- Heartbeat reception over IPv6 (single, multiple, native byte order)
+- Kdump reception over IPv6 (single, multiple, invalid magic rejection)
+- Dual-stack (`::`) listener accepting both IPv4 and IPv6 packets
+
 ### Coverage by Component
 
 | Component | Coverage |
@@ -1978,24 +1995,75 @@ with patch('instanceha.time.sleep'):
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: instanceha
+  name: instanceha          # matches the InstanceHa CR .metadata.name
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   template:
     spec:
+      serviceAccountName: instanceha-instanceha
+      securityContext:
+        fsGroup: 42401
+      terminationGracePeriodSeconds: 30
       containers:
       - name: instanceha
-        image: quay.io/openstack-k8s-operators/instanceha:latest
+        image: <resolved from infra-instanceha-config ConfigMap or RELATED_IMAGE env var>
+        command: ["/usr/bin/python3", "-u", "/var/lib/instanceha/instanceha.py"]
+        securityContext:
+          runAsUser: 42401
+          runAsGroup: 42401
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
         env:
         - name: OS_CLOUD
-          value: overcloud
+          value: default                # from spec.openStackCloud
+        - name: CONFIG_HASH
+          value: <hash of all input configmaps/secrets>
+        - name: INSTANCEHA_DISABLED
+          value: "False"                # from spec.disabled
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INSTANCEHA_CR_NAME
+          value: instanceha             # the CR name
+        - name: HEARTBEAT_PORT          # only set when > 0
+          value: "7411"
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+          name: metrics
+        - containerPort: 7410
+          protocol: UDP
+          name: kdump
+        - containerPort: 7411
+          protocol: UDP
+          name: heartbeat
         volumeMounts:
-        - name: config
-          mountPath: /var/lib/instanceha
-        - name: clouds
-          mountPath: /home/cloud-admin/.config/openstack
-        - name: fencing
-          mountPath: /secrets
+        - name: openstack-config
+          mountPath: /home/cloud-admin/.config/openstack/clouds.yaml
+          subPath: clouds.yaml
+        - name: openstack-config-secret
+          mountPath: /home/cloud-admin/.config/openstack/secure.yaml
+          subPath: secure.yaml
+        - name: fencing-secret
+          mountPath: /secrets/fencing.yaml
+          subPath: fencing.yaml
+        - name: instanceha-script
+          mountPath: /var/lib/instanceha/instanceha.py
+          subPath: instanceha.py
+          readOnly: true
+        - name: instanceha-config
+          mountPath: /var/lib/instanceha/config.yaml
+          subPath: config.yaml
+          readOnly: true
         livenessProbe:
           httpGet:
             path: /
@@ -2011,15 +2079,24 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 10
       volumes:
-      - name: config
+      - name: openstack-config
         configMap:
-          name: instanceha-config
-      - name: clouds
+          name: openstack-config          # from spec.openStackConfigMap
+      - name: openstack-config-secret
         secret:
-          secretName: clouds-yaml
-      - name: fencing
+          secretName: openstack-config-secret  # from spec.openStackConfigSecret
+          defaultMode: 0440
+      - name: fencing-secret
         secret:
-          secretName: fencing-credentials
+          secretName: fencing-secret       # from spec.fencingSecret
+          defaultMode: 0440
+      - name: instanceha-script
+        configMap:
+          name: instanceha-sh              # auto-generated: <cr-name>-sh
+          defaultMode: 0644
+      - name: instanceha-config
+        configMap:
+          name: instanceha-config          # from spec.instanceHaConfigMap
 ```
 
 ---
@@ -2148,8 +2225,8 @@ config:
 ```
 
 **Notes**:
-- Value of `0` disables threshold checking
-- Value of `100` blocks all evacuations
+- Value of `0` blocks all evacuations (any failure percentage exceeds 0%)
+- Value of `100` disables threshold checking (nothing can exceed 100%)
 - Aggregate-aware calculation uses only evacuable hosts as denominator
 
 ---
@@ -3004,8 +3081,8 @@ config:
 
 ## References
 
-- **Code**: `instanceha.py` (3,572 lines)
-- **Tests**: 656 tests across 17 test suites
+- **Code**: `instanceha.py`
+- **Tests**:
   - `test_unit_core.py` (core unit tests)
   - `test_fencing_agents.py` (fencing agent tests)
   - `test_kdump_detection.py` (kdump detection tests)
@@ -3023,6 +3100,8 @@ config:
   - `test_orchestrated_evacuation.py` (orchestrated evacuation tests)
   - `test_heartbeat_detection.py` (heartbeat detection tests)
   - `test_heartbeat_scale.py` (heartbeat scale tests)
+  - `test_aggregate_threshold.py` (per-aggregate failure threshold tests)
+  - `test_ipv6_udp.py` (IPv6 UDP listener tests)
 - **Documentation**:
   - This file (instanceha_architecture.md)
   - [instanceha_guide.md](instanceha_guide.md) — Operator deployment and configuration guide
