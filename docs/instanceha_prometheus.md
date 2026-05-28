@@ -6,6 +6,8 @@ InstanceHA exposes Prometheus metrics at `:8080/metrics` on the workload pod, co
 
 The metrics are served by the `prometheus_client` Python library on the same HTTP server used for liveness and readiness probes. No sidecar or additional container is needed.
 
+When pod-level TLS is enabled, the metrics endpoint serves over **HTTPS**. The openstack-operator creates a cert-manager Certificate producing a TLS secret (`cert-instanceha-metrics`), which the infra-operator mounts into the pod. The Python HTTP server wraps its socket with TLS automatically when the certificate files are present.
+
 ---
 
 ## Prerequisites
@@ -14,6 +16,34 @@ The metrics are served by the `prometheus_client` Python library on the same HTT
 - **Prometheus Operator** installed in the cluster (ships with OpenShift as the cluster monitoring stack, or install via [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack))
 - **Alertmanager** configured for alert routing (email, Slack, PagerDuty, etc.)
 - **Grafana** (optional) for dashboards
+
+---
+
+## TLS Configuration
+
+When `OpenStackControlPlane` has pod-level TLS enabled (`spec.tls.podLevel.enabled: true`), the openstack-operator automatically provisions a cert-manager Certificate for the InstanceHA metrics endpoint. This produces a Kubernetes TLS secret (`cert-instanceha-metrics`) containing `tls.crt`, `tls.key`, and `ca.crt`.
+
+The infra-operator InstanceHA controller **auto-detects** this secret: if the default secret `cert-instanceha-metrics` exists in the namespace, TLS is enabled automatically without any configuration on the InstanceHa CR. The controller:
+1. Validates the TLS secret exists and is well-formed
+2. Mounts the certificate at `/etc/pki/tls/certs/metrics.crt` and the key at `/etc/pki/tls/private/metrics.key`
+3. Sets `METRICS_TLS_CERT` and `METRICS_TLS_KEY` environment variables
+4. Switches liveness and readiness probes to HTTPS
+
+The Python process detects these environment variables and wraps the HTTP server socket with TLS. A single wildcard certificate (`*.NAMESPACE.svc`) covers all InstanceHA instances in a namespace.
+
+To use a custom TLS secret instead of the auto-detected default, set `metricsTLS.secretName` in the InstanceHa CR:
+
+```yaml
+apiVersion: instanceha.openstack.org/v1beta1
+kind: InstanceHa
+metadata:
+  name: instanceha
+spec:
+  metricsTLS:
+    secretName: my-custom-metrics-cert
+```
+
+When the telemetry-operator is deployed, its `ScrapeConfig` automatically switches to `scheme: HTTPS` with the appropriate TLS configuration when `PrometheusTLS` is enabled — no manual changes are needed.
 
 ---
 
@@ -95,8 +125,9 @@ curl -sk -H "Authorization: Bearer $TOKEN" \
 
 ```bash
 # Scrape metrics directly from the pod
+# Use https and -k when TLS is enabled
 oc exec -n openstack deployment/instanceha-instanceha -- \
-  curl -s http://localhost:8080/metrics
+  curl -sk https://localhost:8080/metrics
 
 # Query a specific metric in Prometheus
 # (via Prometheus UI or API)
@@ -299,13 +330,17 @@ promtool check rules instanceha-prometheusrule.yaml
 ### Verify Metrics Endpoint
 
 ```bash
-# Scrape all metrics from the pod
+# Scrape all metrics from the pod (HTTP, when TLS is not enabled)
 oc exec -n openstack deployment/instanceha-instanceha -- \
   curl -s http://localhost:8080/metrics
 
+# When TLS is enabled, use HTTPS with -k to skip certificate verification
+oc exec -n openstack deployment/instanceha-instanceha -- \
+  curl -sk https://localhost:8080/metrics
+
 # Check a specific metric family
 oc exec -n openstack deployment/instanceha-instanceha -- \
-  curl -s http://localhost:8080/metrics | grep instanceha_poll_cycles_total
+  curl -sk https://localhost:8080/metrics | grep instanceha_poll_cycles_total
 ```
 
 Expected output (counters start at zero, increment over time):
@@ -319,16 +354,16 @@ instanceha_poll_cycles_total{result="error"} 0.0
 
 ### Verify Poll Loop Metrics
 
-After the pod has been running for a few poll cycles:
+After the pod has been running for a few poll cycles (use `https` and `-k` when TLS is enabled):
 
 ```bash
 # Should show increasing success count
 oc exec -n openstack deployment/instanceha-instanceha -- \
-  curl -s http://localhost:8080/metrics | grep poll_cycles
+  curl -sk https://localhost:8080/metrics | grep poll_cycles
 
 # Should show 0 consecutive failures (healthy state)
 oc exec -n openstack deployment/instanceha-instanceha -- \
-  curl -s http://localhost:8080/metrics | grep poll_consecutive_failures
+  curl -sk https://localhost:8080/metrics | grep poll_consecutive_failures
 ```
 
 ### Simulate a Nova API Failure
@@ -353,8 +388,9 @@ Fencing and evacuation counters only increment during actual host failures. To v
 
 ```bash
 # Check that the metric families are registered (even if values are 0)
+# Use https and -k when TLS is enabled
 oc exec -n openstack deployment/instanceha-instanceha -- \
-  curl -s http://localhost:8080/metrics | grep "^instanceha_" | grep "# TYPE"
+  curl -sk https://localhost:8080/metrics | grep "^instanceha_" | grep "# TYPE"
 ```
 
 Expected output:
@@ -482,36 +518,22 @@ When the [telemetry-operator](https://github.com/openstack-k8s-operators/telemet
 | OpenShift user workload monitoring | `prometheus-user-workload` in `openshift-user-workload-monitoring` | `thanos-querier` route in `openshift-monitoring` |
 | telemetry-operator (COO) | `prometheus-metric-storage` in `openstack` | `metric-storage-prometheus.openstack.svc:9090` |
 
-The PodMonitor approach described above places InstanceHA metrics in the OpenShift user workload Prometheus. If you want InstanceHA metrics alongside other OpenStack metrics (Ceilometer, RabbitMQ, node-exporter, OVN) in the COO Prometheus, create a `ScrapeConfig` CR instead.
+### Automatic Discovery (default)
 
-### Creating a ScrapeConfig for COO Prometheus
+The telemetry-operator **automatically discovers and scrapes InstanceHA metrics** — no manual configuration is required. The infra-operator creates a Kubernetes Service (`<instance-name>-metrics`) with the labels `metrics: enabled` and `service: instanceha`. The telemetry-operator's `MetricStorage` controller watches for Services with these labels and automatically generates a `ScrapeConfig` CR named `telemetry-instanceha` targeting port 8080.
 
-The COO Prometheus only picks up CRs with the label `service: metricStorage`. Create a `ScrapeConfig` targeting the InstanceHA pod:
+This works the same way as the OVN metrics integration. When a `MetricStorage` CR exists in the namespace:
 
-```yaml
-apiVersion: monitoring.rhobs/v1alpha1
-kind: ScrapeConfig
-metadata:
-  name: instanceha-metrics
-  namespace: openstack
-  labels:
-    service: metricStorage
-spec:
-  scrapeInterval: 30s
-  metricsPath: /metrics
-  staticConfigs:
-    - targets:
-        - "<instanceha-pod-ip>:8080"
-```
+1. The telemetry-operator discovers the InstanceHA metrics Service via label selectors
+2. A `ScrapeConfig` CR is created with the target `<service-name>.<namespace>.svc:8080`
+3. The COO Prometheus picks up the `ScrapeConfig` and begins scraping
+4. If the InstanceHA Service is deleted or recreated, the `ScrapeConfig` is automatically reconciled
 
-To discover the pod IP dynamically:
+To verify the automatic scrapeconfig was created:
 
 ```bash
-POD_IP=$(oc get pod -n openstack -l service=instanceha -o jsonpath='{.items[0].status.podIP}')
-echo "Target: ${POD_IP}:8080"
+oc get scrapeconfig -n openstack telemetry-instanceha -o yaml
 ```
-
-> **Note**: The COO `ScrapeConfig` uses static targets (IP:port), not label-based pod discovery like a `PodMonitor`. If the InstanceHA pod is rescheduled and gets a new IP, the `ScrapeConfig` must be updated. For automatic discovery, consider requesting native InstanceHA support in the telemetry-operator — the OVN metrics integration uses a label-based service discovery pattern that could be extended to InstanceHA.
 
 ### Alert Rules for COO Prometheus
 
@@ -532,7 +554,7 @@ spec:
 ### Which Approach to Use
 
 - **OpenShift user workload monitoring only** (no telemetry-operator): Use the PodMonitor approach from [Enabling Scraping](#enabling-scraping). This is simpler and uses automatic pod discovery.
-- **telemetry-operator deployed**: Use the ScrapeConfig approach if you want all OpenStack metrics in a single Prometheus. You can also use both approaches simultaneously — the PodMonitor and ScrapeConfig target different Prometheus instances and do not conflict.
+- **telemetry-operator deployed** (default): InstanceHA metrics are automatically scraped by the COO Prometheus alongside other OpenStack metrics (Ceilometer, RabbitMQ, node-exporter, OVN). No manual configuration needed. You can also deploy the PodMonitor simultaneously — it targets the OpenShift user workload Prometheus and does not conflict with the COO scrapeconfig.
 - **Querying across both**: OpenShift's `thanos-querier` route aggregates the cluster and user workload Prometheus instances. The COO Prometheus is separate and must be queried directly at `metric-storage-prometheus.openstack.svc:9090`.
 
 ---

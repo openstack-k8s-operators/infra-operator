@@ -40,6 +40,7 @@ import (
 
 	k8s_networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	frrk8sv1 "github.com/metallb/frr-k8s/api/v1beta1"
+	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
@@ -1493,4 +1494,39 @@ func GetSecretHash(name types.NamespacedName) string {
 	hash, err := oko_secret.Hash(secret)
 	Expect(err).ShouldNot(HaveOccurred())
 	return hash
+}
+
+func CreateInstanceHaConfig(namespace string, spec map[string]any) client.Object {
+	name := "instanceha-" + uuid.New().String()[:25]
+
+	raw := map[string]any{
+		"apiVersion": "instanceha.openstack.org/v1beta1",
+		"kind":       "InstanceHa",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"spec": spec,
+	}
+
+	return th.CreateUnstructured(raw)
+}
+
+func GetDefaultInstanceHaSpec() map[string]any {
+	return map[string]any{
+		"containerImage": "test-instanceha-image:latest",
+	}
+}
+
+func GetInstanceHa(name types.NamespacedName) *instancehav1.InstanceHa {
+	instance := &instancehav1.InstanceHa{}
+	Eventually(func(g Gomega) {
+		g.Expect(k8sClient.Get(ctx, name, instance)).Should(Succeed())
+	}, timeout, interval).Should(Succeed())
+	return instance
+}
+
+func InstanceHaConditionGetter(name types.NamespacedName) condition.Conditions {
+	instance := GetInstanceHa(name)
+	return instance.Status.Conditions
 }

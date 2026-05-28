@@ -115,6 +115,11 @@ type InstanceHaSpec struct {
 	// +kubebuilder:validation:Optional
 	// Auth - Parameters related to authentication
 	Auth AuthSpec `json:"auth,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	//+operator-sdk:csv:customresourcedefinitions:type=spec
+	// MetricsTLS - Parameters related to TLS for the metrics endpoint
+	MetricsTLS tls.SimpleService `json:"metricsTLS,omitempty"`
 }
 
 // InstanceHaStatus defines the observed state of InstanceHa
