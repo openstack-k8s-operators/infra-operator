@@ -190,7 +190,9 @@ groups:
 
 #### Scraping Configuration
 
-The InstanceHA pod exposes metrics on TCP port 8080. To scrape with Prometheus, create a `PodMonitor` or `ServiceMonitor`:
+The InstanceHA pod exposes metrics on TCP port 8080. The infra-operator automatically creates a Kubernetes Service (`<instance-name>-metrics`) with the labels `metrics: enabled` and `service: instanceha`, which the telemetry-operator discovers and scrapes via the COO Prometheus. **No manual configuration is needed when the telemetry-operator is deployed.**
+
+For environments using OpenShift user workload monitoring instead of (or in addition to) the telemetry-operator, create a `PodMonitor`:
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1

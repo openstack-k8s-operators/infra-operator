@@ -1393,6 +1393,14 @@ class InstanceHAService(CloudConnectionProvider):
 
         try:
             server = HTTPServer(('', HEALTH_CHECK_PORT), HealthHandler)
+            tls_cert = os.getenv('METRICS_TLS_CERT')
+            tls_key = os.getenv('METRICS_TLS_KEY')
+            if tls_cert and tls_key:
+                import ssl
+                ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ssl_ctx.load_cert_chain(tls_cert, tls_key)
+                server.socket = ssl_ctx.wrap_socket(server.socket, server_side=True)
+                logging.info("Metrics endpoint serving over HTTPS on port %d", HEALTH_CHECK_PORT)
             server.serve_forever()
         except OSError as e:
             logging.error('Health check server failed to bind to port %d: %s',

@@ -55,6 +55,7 @@ import (
 
 	commondeployment "github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
+	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
@@ -80,6 +81,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/finalizers,verbs=update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 // service account, role, rolebinding
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
@@ -164,6 +166,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		condition.UnknownCondition(condition.RoleReadyCondition, condition.InitReason, condition.RoleReadyInitMessage),
 		condition.UnknownCondition(condition.RoleBindingReadyCondition, condition.InitReason, condition.RoleBindingReadyInitMessage),
 		condition.UnknownCondition(condition.NetworkAttachmentsReadyCondition, condition.InitReason, condition.NetworkAttachmentsReadyInitMessage),
+		condition.UnknownCondition(condition.CreateServiceReadyCondition, condition.InitReason, condition.CreateServiceReadyInitMessage),
 	)
 	instance.Status.Conditions.Init(&cl)
 	instance.Status.ObservedGeneration = instance.Generation
@@ -369,8 +372,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
-				// Since the CA cert secret should have been manually created by the user and provided in the spec,
-				// we treat this as a warning because it means that the service will not be able to start.
 				instance.Status.Conditions.Set(condition.FalseCondition(
 					condition.TLSInputReadyCondition,
 					condition.ErrorReason,
@@ -388,6 +389,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		}
 
 		configVars[instance.Spec.CaBundleSecretName] = env.SetValue(secretHash)
+	}
+
+	metricsTLSExplicit := instance.Spec.MetricsTLS.Enabled()
+	if !metricsTLSExplicit {
+		certName := instanceha.DefaultMetricsCertSecret
+		instance.Spec.MetricsTLS.SecretName = &certName
+	}
+
+	hash, err := instance.Spec.MetricsTLS.ValidateCertSecret(ctx, helper, instance.Namespace)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			if metricsTLSExplicit {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.TLSInputReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					condition.TLSInputReadyWaitingMessage, err.Error()))
+				return ctrl.Result{}, nil
+			}
+			// Auto-detect: default cert not found, proceed without TLS
+			instance.Spec.MetricsTLS.SecretName = nil
+		} else {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.TLSInputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.TLSInputErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+	} else {
+		configVars[tls.TLSHashName+"_metrics"] = env.SetValue(hash)
 	}
 
 	// all cert input checks out so report InputReady
@@ -505,6 +538,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// remove LastAppliedTopology from the .Status
 		instance.Status.LastAppliedTopology = nil
 	}
+	commonsvc, err := commonservice.NewService(instanceha.MetricsService(instance), time.Duration(5)*time.Second, nil)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.CreateServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.CreateServiceReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+	sres, serr := commonsvc.CreateOrPatch(ctx, helper)
+	if serr != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.CreateServiceReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.CreateServiceReadyErrorMessage,
+			serr.Error()))
+		return sres, serr
+	}
+	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+
 	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology, acSecretName), time.Duration(5)*time.Second)
 	sfres, sferr := deployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
@@ -558,6 +613,7 @@ const (
 	instanceHaConfigMapField   = ".spec.instanceHaConfigMap"
 	topologyField              = ".spec.topologyRef.Name"
 	acSecretField              = ".spec.auth.applicationCredentialSecret" // #nosec G101
+	metricsTLSField            = ".spec.metricsTLS.secretName"            // #nosec G101
 )
 
 var allWatchFields = []string{
@@ -568,6 +624,7 @@ var allWatchFields = []string{
 	instanceHaConfigMapField,
 	topologyField,
 	acSecretField,
+	metricsTLSField,
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -649,9 +706,21 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
+	// index metricsTLSField
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &instancehav1.InstanceHa{}, metricsTLSField, func(rawObj client.Object) []string {
+		cr := rawObj.(*instancehav1.InstanceHa)
+		if cr.Spec.MetricsTLS.SecretName == nil {
+			return []string{instanceha.DefaultMetricsCertSecret}
+		}
+		return []string{*cr.Spec.MetricsTLS.SecretName}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&instancehav1.InstanceHa{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).

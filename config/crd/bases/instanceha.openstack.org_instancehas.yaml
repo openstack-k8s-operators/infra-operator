@@ -100,6 +100,18 @@ spec:
                 default: 7410
                 format: int32
                 type: integer
+              metricsTLS:
+                description: MetricsTLS - Parameters related to TLS for the metrics
+                  endpoint
+                properties:
+                  caBundleSecretName:
+                    description: CaBundleSecretName - holding the CA certs in a pre-created
+                      bundle file
+                    type: string
+                  secretName:
+                    description: SecretName - holding the cert, key for the service
+                    type: string
+                type: object
               networkAttachments:
                 description: |-
                   NetworkAttachments is a list of NetworkAttachment resource names to expose

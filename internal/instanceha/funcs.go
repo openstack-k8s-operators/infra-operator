@@ -17,6 +17,7 @@ import (
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 
 	"fmt"
 	appsv1 "k8s.io/api/apps/v1"
@@ -101,6 +102,27 @@ func Deployment(
 	if instance.Spec.CaBundleSecretName != "" {
 		volumes = append(volumes, instance.Spec.CreateVolume())
 		volumeMounts = append(volumeMounts, instance.Spec.CreateVolumeMounts(nil)...)
+	}
+
+	// add metrics TLS cert if defined
+	if instance.Spec.MetricsTLS.Enabled() {
+		certSecretName := DefaultMetricsCertSecret
+		if instance.Spec.MetricsTLS.SecretName != nil && *instance.Spec.MetricsTLS.SecretName != "" {
+			certSecretName = *instance.Spec.MetricsTLS.SecretName
+		}
+		metricsSvc := tls.Service{
+			SecretName: certSecretName,
+			CertMount:  ptr.To(MetricsCertPath),
+			KeyMount:   ptr.To(MetricsKeyPath),
+		}
+		volumes = append(volumes, metricsSvc.CreateVolume("metrics-certs"))
+		volumeMounts = append(volumeMounts, metricsSvc.CreateVolumeMounts("metrics-certs")...)
+
+		envVars["METRICS_TLS_CERT"] = env.SetValue(MetricsCertPath)
+		envVars["METRICS_TLS_KEY"] = env.SetValue(MetricsKeyPath)
+
+		livenessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
+		readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
 	}
 
 	dep := &appsv1.Deployment{
