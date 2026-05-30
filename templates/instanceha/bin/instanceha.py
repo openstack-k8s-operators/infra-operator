@@ -1519,10 +1519,7 @@ class UDPSocketManager:
 def _resolve_hostname_dns(data, address, label):
     """Resolve hostname via reverse DNS lookup (kdump listener)."""
     try:
-        ip = address[0]
-        if ip.startswith('::ffff:'):
-            ip = ip[7:]
-        return _extract_hostname(socket.gethostbyaddr(ip)[0])
+        return _extract_hostname(socket.gethostbyaddr(address[0])[0])
     except socket.herror:
         logging.warning(
             '%s packet from %s but reverse DNS lookup failed. '
@@ -1610,6 +1607,9 @@ def _udp_listener(service, port, label, magic_numbers, min_packet_size,
             while not stop_event.is_set():
                 try:
                     data, address = sock.recvfrom(4096)
+                    # Normalize IPv4-mapped IPv6 addresses (::ffff:1.2.3.4 -> 1.2.3.4)
+                    if address[0].startswith('::ffff:'):
+                        address = (address[0][7:],) + address[1:]
 
                     if len(data) < min_packet_size:
                         continue
