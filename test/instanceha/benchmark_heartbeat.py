@@ -17,6 +17,7 @@ requests/limits.
 """
 
 import cProfile
+import hmac as hmac_mod
 import io
 import os
 import pstats
@@ -42,6 +43,7 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 THRESHOLD_PERCENT = int(os.environ.get('THRESHOLD_PERCENT', '5'))
 MAX_DOWN_HOSTS = int(NODE_COUNT * THRESHOLD_PERCENT / 100)  # 50
 POLL_INTERVAL_SECONDS = 45
+_TEST_HMAC_KEY = b'\x01' * 32
 
 
 def _find_free_port():
@@ -56,12 +58,15 @@ def _make_service(heartbeat_timeout=120):
     service = instanceha.InstanceHAService(mock_config)
     service.heartbeat_hosts_timestamp.clear()
     service.udp_ip = '127.0.0.1'
+    service.heartbeat_hmac_keys = [_TEST_HMAC_KEY]
     return service
 
 
 def _send_heartbeat(sock, port, hostname):
-    magic = struct.pack('I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-    payload = magic + hostname.encode('utf-8')
+    payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+    payload += struct.pack('!Q', int(time.time()))
+    payload += hostname.encode('utf-8')
+    payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
     sock.sendto(payload, ('127.0.0.1', port))
 
 
@@ -89,18 +94,20 @@ def _start_listener(service, port):
                 service.heartbeat_listener_start_time = time.time()
             listener_started.set()
 
+        hmac_keys = service.heartbeat_hmac_keys
+
         instanceha._udp_listener(
             service,
             port=port,
             label='Heartbeat',
-            magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-            min_packet_size=5,
+            magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+            min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
             lock=service.heartbeat_lock,
             timestamps=service.heartbeat_hosts_timestamp,
             stop_event=service.heartbeat_listener_stop_event,
             cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
             cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-            resolve_hostname=instanceha._resolve_hostname_packet,
+            resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=hmac_keys),
             on_start=on_start,
         )
 

@@ -22,6 +22,7 @@ package v1beta1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -84,7 +85,12 @@ func (spec *InstanceHaSpec) Default() {
 	if spec.InstanceHaHeartbeatPort == 0 {
 		spec.InstanceHaHeartbeatPort = 7411
 	}
-
+	if spec.MetricsTLS.MinTLSVersion == "" {
+		spec.MetricsTLS.MinTLSVersion = "1.2"
+	}
+	if spec.MetricsTLS.CipherSuites == "" {
+		spec.MetricsTLS.CipherSuites = "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"
+	}
 }
 
 // ValidateCreate validates the InstanceHa resource on creation.
@@ -97,6 +103,7 @@ func (r *InstanceHa) ValidateCreate(ctx context.Context, c client.Client) (admis
 
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
+	allErrs = append(allErrs, r.validateCipherSuites(basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -116,6 +123,7 @@ func (r *InstanceHa) ValidateUpdate(ctx context.Context, c client.Client, old ru
 
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
+	allErrs = append(allErrs, r.validateCipherSuites(basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -156,6 +164,33 @@ func (r *InstanceHa) validateUniqueOpenStackCloud(
 		}
 	}
 
+	return allErrs
+}
+
+// validateCipherSuites rejects cipher strings that would result in unencrypted connections.
+func (r *InstanceHa) validateCipherSuites(basePath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	ciphers := r.Spec.MetricsTLS.CipherSuites
+	if ciphers == "" {
+		return allErrs
+	}
+	fldPath := basePath.Child("metricsTLS", "cipherSuites")
+	upper := strings.ToUpper(ciphers)
+	for _, token := range strings.Split(upper, ":") {
+		trimmed := strings.TrimLeft(token, "+")
+		switch trimmed {
+		case "NULL", "ENULL", "ANULL":
+			allErrs = append(allErrs, field.Invalid(fldPath, ciphers,
+				fmt.Sprintf("cipher string must not include %q without a '!' prefix", token)))
+		case "ALL":
+			allErrs = append(allErrs, field.Invalid(fldPath, ciphers,
+				"cipher string must not use 'ALL' (includes NULL ciphers); use 'HIGH' instead"))
+		}
+		if strings.HasPrefix(trimmed, "@SECLEVEL=0") {
+			allErrs = append(allErrs, field.Invalid(fldPath, ciphers,
+				"cipher string must not use '@SECLEVEL=0' (disables all security requirements)"))
+		}
+	}
 	return allErrs
 }
 

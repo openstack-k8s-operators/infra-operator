@@ -238,7 +238,7 @@ class TestServiceInitialization(unittest.TestCase):
         # Verify service initialization
         self.assertIsNotNone(service.config)
         self.assertEqual(service.current_hash, "")
-        self.assertTrue(service.hash_update_successful)
+        self.assertFalse(service.hash_update_successful)
         self.assertIsNotNone(service._cache_lock)
 
     def test_nova_connection_establishment(self):

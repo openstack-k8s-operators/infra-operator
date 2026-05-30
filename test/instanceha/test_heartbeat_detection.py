@@ -2,12 +2,13 @@
 Heartbeat detection tests for InstanceHA.
 
 Tests for compute node heartbeat functionality:
-- Packet parsing and hostname extraction (_resolve_hostname_packet)
+- HBV2 packet parsing with HMAC-SHA256 (_resolve_hostname_packet)
 - Heartbeat filtering logic (_filter_reachable_hosts)
 - Heartbeat port configuration (get_heartbeat_port)
 - Heartbeat lock concurrency
 """
 
+import hmac as hmac_mod
 import os
 import unittest
 import time
@@ -25,71 +26,89 @@ import instanceha
 logging.getLogger().setLevel(logging.CRITICAL)
 
 
+_TEST_HMAC_KEY = b'\x01' * 32
+
+
 class TestResolveHostnamePacket(unittest.TestCase):
-    """Test _resolve_hostname_packet hostname extraction from UDP packets."""
+    """Test _resolve_hostname_packet hostname extraction from HBV2 UDP packets."""
 
     def _make_packet(self, hostname_bytes):
-        magic = struct.pack('I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        return magic + hostname_bytes
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()))
+        payload += hostname_bytes
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
+        return payload
 
     def test_valid_hostname(self):
         data = self._make_packet(b'compute-01')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertEqual(result, 'compute-01')
 
     def test_valid_fqdn_extracts_short_name(self):
         data = self._make_packet(b'compute-01.example.com')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertEqual(result, 'compute-01')
 
     def test_invalid_utf8(self):
         data = self._make_packet(b'\xff\xfe\xfd\xfc')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertIsNone(result)
 
     def test_empty_hostname(self):
-        data = self._make_packet(b'')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()))
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
+        result = instanceha._resolve_hostname_packet(payload, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertIsNone(result)
 
     def test_hostname_too_long(self):
         long_name = b'a' * (instanceha.USERNAME_MAX_LENGTH + 1)
         data = self._make_packet(long_name)
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertIsNone(result)
 
     def test_hostname_max_length_accepted(self):
         name = b'a' * instanceha.USERNAME_MAX_LENGTH
         data = self._make_packet(name)
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertIsNotNone(result)
 
     def test_invalid_hostname_characters(self):
         data = self._make_packet(b'host; rm -rf /')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertIsNone(result)
 
     def test_null_padded_hostname(self):
         data = self._make_packet(b'compute-01\x00\x00\x00')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertEqual(result, 'compute-01')
 
     def test_hostname_with_underscores(self):
         data = self._make_packet(b'compute_node_01')
-        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat')
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
         self.assertEqual(result, 'compute_node_01')
 
-    def test_magic_number_native_byte_order(self):
-        magic_native = struct.pack('I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        magic_network = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+    def test_bad_hmac_rejected(self):
+        data = self._make_packet(b'compute-01')
+        bad_key = b'\x02' * 32
+        result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[bad_key])
+        self.assertIsNone(result)
 
-        native_val = struct.unpack('I', magic_native)[0]
-        network_val = struct.unpack('!I', magic_network)[0]
+    def test_stale_timestamp_rejected(self):
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()) - 700)
+        payload += b'compute-01'
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
+        result = instanceha._resolve_hostname_packet(payload, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
+        self.assertIsNone(result)
 
-        self.assertTrue(
-            native_val == instanceha.HEARTBEAT_MAGIC_NUMBER or
-            network_val == instanceha.HEARTBEAT_MAGIC_NUMBER
-        )
+    def test_future_timestamp_rejected(self):
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()) + 120)
+        payload += b'compute-01'
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
+        result = instanceha._resolve_hostname_packet(payload, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[_TEST_HMAC_KEY])
+        self.assertIsNone(result)
 
 
 class TestFilterReachableHosts(unittest.TestCase):

@@ -1259,39 +1259,47 @@ Each metric increment is co-located with the corresponding `_emit_k8s_event()` c
 
 ### 2. Heartbeat Detection
 
-**Purpose**: Dual-channel failure detection — distinguish host-level failures from nova-compute crashes by listening for heartbeat packets from compute nodes.
+**Purpose**: Dual-channel failure detection — distinguish host-level failures from nova-compute crashes by listening for HMAC-authenticated heartbeat packets from compute nodes.
 
 **Architecture**:
 - Background UDP listener thread (port 7411, configurable)
-- Magic number validation (`0x48425631`, 4 bytes)
+- HBV2 protocol: magic number validation (`0x48425632`), HMAC-SHA256 verification, timestamp freshness check
 - UTF-8 hostname extraction with regex validation
 - Timestamp tracking per host
 
 **Configuration**: `CHECK_HEARTBEAT: true`, `HEARTBEAT_TIMEOUT: 120`
 
 **Behavior**:
-1. Compute nodes send UDP heartbeat packets every 30s (via systemd timer + `instanceha-heartbeat.py`)
-2. InstanceHA records timestamps in `heartbeat_hosts_timestamp`
-3. When Nova reports a host as down, `_filter_reachable_hosts` checks:
+1. Compute nodes send HMAC-authenticated UDP heartbeat packets every 30s (via systemd timer + `instanceha-heartbeat.py`)
+2. The listener verifies each packet's HMAC-SHA256 signature and timestamp freshness (rejects packets older than 120s)
+3. InstanceHA records timestamps in `heartbeat_hosts_timestamp`
+4. When Nova reports a host as down, `_filter_reachable_hosts` checks:
    - If heartbeat received within `HEARTBEAT_TIMEOUT` seconds → host OS is alive → skip fencing (only nova-compute crashed)
    - If no heartbeat → host is genuinely down → proceed with fencing and evacuation
-4. **Grace period**: During the first `HEARTBEAT_TIMEOUT` seconds after listener startup, all hosts bypass heartbeat filtering (no heartbeat history exists yet)
+5. **Grace period**: During the first `HEARTBEAT_TIMEOUT` seconds after listener startup, all hosts bypass heartbeat filtering (no heartbeat history exists yet)
 
-**Packet Format**:
+**Packet Format (HBV2)**:
 ```
-Bytes 0-3: Magic number 0x48425631 (unsigned int, native or network byte order)
-Bytes 4+:  Hostname (UTF-8, short hostname without domain)
+Bytes 0-3:   Magic number 0x48425632 (uint32, network byte order)
+Bytes 4-11:  Timestamp (uint64, network byte order, Unix epoch seconds)
+Bytes 12-N:  Hostname (UTF-8, short hostname without domain)
+Last 32B:    HMAC-SHA256 digest (over bytes 0 through N-32)
 ```
+
+Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 
 **Compute-Side Deployment** (edpm-ansible `edpm_instanceha_monitoring` role):
-- `instanceha-heartbeat.py` — Python script using stdlib only (socket, struct)
+- `instanceha-heartbeat.py` — Python script using stdlib only (socket, struct, hmac)
 - `instanceha-heartbeat.timer` — systemd timer (OnBootSec=10s, OnUnitActiveSec=30s)
 - Runs as `nobody:nobody` (no root required for UDP send)
+- HMAC key mounted from the `<instance-name>-heartbeat-hmac` secret via EDPM dataSource
 
 **Security**:
+- HMAC-SHA256 authentication prevents heartbeat spoofing
+- Timestamp-based replay protection (120s window)
 - Hostname validated against `VALIDATION_PATTERNS['hostname']` regex
 - Maximum hostname length enforced
-- Packets from any source accepted (same trust model as kdump, mitigated by dedicated network)
+- Key rotation supported via current + previous key slots
 
 ---
 
@@ -1739,9 +1747,8 @@ finally:
 
 **Password Handling**:
 ```python
-# IPMI: Use environment variable
-env = os.environ.copy()
-env['IPMITOOL_PASSWORD'] = passwd
+# IPMI: Minimal environment with only PATH and password
+env = {'PATH': os.environ.get('PATH', '/usr/bin:/usr/sbin'), 'IPMITOOL_PASSWORD': passwd}
 cmd = ["ipmitool", "-U", login, "-E", ...]  # -E uses env var
 ```
 
@@ -1755,18 +1762,39 @@ _SECRET_PATTERNS = {
     'application_credential_secret': re.compile(r'\bapplication_credential_secret=[^\s)\'\"]+', re.IGNORECASE),
     'application_credential_id': re.compile(r'\bapplication_credential_id=[^\s)\'\"]+', re.IGNORECASE),
     'auth': re.compile(r'\bauth=[^\s)\'\"]+', re.IGNORECASE),
+    'json_password': re.compile(r'("(?:password|passwd|token|secret|credential|...)")\s*:\s*"[^"]*"', re.IGNORECASE),
 }
 
 def _safe_log_exception(msg: str, e: Exception, include_traceback: bool = False) -> None:
     safe_msg = str(e)
     for secret_word, pattern in _SECRET_PATTERNS.items():
-        safe_msg = pattern.sub(f'{secret_word}=***', safe_msg)
+        if secret_word == 'json_password':
+            safe_msg = pattern.sub(r'\1: "***"', safe_msg)
+        else:
+            safe_msg = pattern.sub(f'{secret_word}=***', safe_msg)
     logging.error("%s: %s", msg, safe_msg)
 ```
 
+Credential sanitization covers both `key=value` and JSON `"key": "value"` formats.
+
 ---
 
-### 4. SSL/TLS Configuration
+### 4. Heartbeat HMAC Authentication
+
+Heartbeat packets are authenticated with HMAC-SHA256 (HBV2 protocol) to prevent UDP spoofing. The operator auto-generates a 32-byte key in the `<instance-name>-heartbeat-hmac` Kubernetes Secret during reconciliation.
+
+**Packet format**: `[4B magic 0x48425632][8B timestamp BE][hostname UTF-8][32B HMAC-SHA256]`
+
+- The HMAC covers everything before the signature (magic + timestamp + hostname)
+- Timestamp provides replay protection (packets older than 120s are rejected)
+- The receiver tries both `hmac-key` (current) and `hmac-key-previous` (rotation) keys
+- Only HMAC-authenticated packets are accepted; unsigned packets are silently dropped
+
+Key rotation is triggered via annotation (`instanceha.openstack.org/rotate-hmac-key`). The controller copies current→previous, generates a new key, and removes the annotation.
+
+---
+
+### 5. SSL/TLS Configuration
 
 **Requests SSL Config**:
 ```python
@@ -1793,6 +1821,20 @@ def _make_ssl_request(method: str, url: str, auth: tuple, timeout: int,
 
     return getattr(requests, method)(url, **request_kwargs)
 ```
+
+**Metrics Endpoint TLS**:
+
+The metrics/health HTTP server supports configurable TLS hardening via the CR spec:
+
+```yaml
+spec:
+  metricsTLS:
+    secretName: my-cert
+    minTLSVersion: "1.3"
+    cipherSuites: "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"
+```
+
+These values are passed as `METRICS_TLS_MIN_VERSION` and `METRICS_TLS_CIPHERS` environment variables to the Python process, which applies them to the `ssl.SSLContext`.
 
 **Implementation**:
 - Configuration passed explicitly as parameters
@@ -1925,14 +1967,15 @@ Core unit tests covering:
 
 **15. Heartbeat Detection Tests** (`test_heartbeat_detection.py`):
 - UDP heartbeat message processing and magic number validation
-- Hostname extraction from packet payload
+- HMAC-SHA256 authentication and timestamp freshness verification
+- Hostname extraction from HBV2 packet payload
 - Heartbeat timestamp tracking and expiry
 - Grace period behavior during listener startup
 - Reachable host filtering based on heartbeat freshness
 - Heartbeat listener thread lifecycle
 
 **16. Heartbeat Scale Tests** (`test_heartbeat_scale.py`):
-- Large-scale heartbeat timestamp tracking
+- Large-scale HMAC-authenticated heartbeat processing at 1000-node scale
 - Concurrent heartbeat writes under load
 - Cleanup threshold behavior with many hosts
 
@@ -2857,7 +2900,8 @@ POLL=45, KDUMP_TIMEOUT=300
 **Compute-Side Requirements**:
 - Deploy `edpm_instanceha_monitoring` role via edpm-ansible
 - Installs `instanceha-heartbeat.py` script + systemd timer
-- Sends UDP packets every 30s with magic `0x48425631` + hostname
+- Sends HMAC-authenticated HBV2 packets every 30s (magic `0x48425632` + timestamp + hostname + HMAC-SHA256)
+- HMAC key distributed automatically via the `<instance-name>-heartbeat-hmac` secret dataSource
 
 **Example**:
 ```yaml

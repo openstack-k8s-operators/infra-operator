@@ -46,6 +46,23 @@ type AuthSpec struct {
 	ApplicationCredentialSecret string `json:"applicationCredentialSecret,omitempty"`
 }
 
+// InstanceHaMetricsTLS extends tls.SimpleService with TLS hardening parameters.
+type InstanceHaMetricsTLS struct {
+	tls.SimpleService `json:",inline"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum="1.2";"1.3"
+	// +kubebuilder:default="1.2"
+	// MinTLSVersion - Minimum TLS version for the metrics endpoint
+	MinTLSVersion string `json:"minTLSVersion"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:default="HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"
+	// CipherSuites - Allowed TLS cipher suites (OpenSSL format)
+	CipherSuites string `json:"cipherSuites"`
+}
+
 // InstanceHaSpec defines the desired state of InstanceHa
 type InstanceHaSpec struct {
 	// +kubebuilder:validation:Optional
@@ -79,10 +96,14 @@ type InstanceHaSpec struct {
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default=7410
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	InstanceHaKdumpPort int32 `json:"instanceHaKdumpPort"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=7411
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
 	// InstanceHaHeartbeatPort is the UDP port for compute node heartbeat packets
 	InstanceHaHeartbeatPort int32 `json:"instanceHaHeartbeatPort"`
 
@@ -119,12 +140,14 @@ type InstanceHaSpec struct {
 	// +kubebuilder:validation:Optional
 	//+operator-sdk:csv:customresourcedefinitions:type=spec
 	// MetricsTLS - Parameters related to TLS for the metrics endpoint
-	MetricsTLS tls.SimpleService `json:"metricsTLS,omitempty"`
+	MetricsTLS InstanceHaMetricsTLS `json:"metricsTLS,omitempty"`
 }
 
 // InstanceHaStatus defines the observed state of InstanceHa
 type InstanceHaStatus struct {
 	// PodName
+	// +kubebuilder:validation:Optional
+	// Deprecated: this field is no longer used
 	PodName string `json:"podName,omitempty"`
 
 	// Conditions
@@ -138,6 +161,10 @@ type InstanceHaStatus struct {
 
 	// LastAppliedTopology - the last applied Topology
 	LastAppliedTopology *topologyv1.TopoRef `json:"lastAppliedTopology,omitempty"`
+
+	// HeartbeatHMACSecret is the name of the auto-generated Secret
+	// containing the HMAC key for heartbeat authentication
+	HeartbeatHMACSecret string `json:"heartbeatHMACSecret,omitempty"`
 }
 
 //+kubebuilder:object:root=true
