@@ -54,6 +54,13 @@ var _ = Describe("InstanceHa Controller", func() {
 				corev1.ConditionFalse,
 			)
 		})
+
+		It("should have the finalizer set on the CR", func() {
+			Eventually(func(g Gomega) {
+				instance := GetInstanceHa(instanceHaName)
+				g.Expect(instance.Finalizers).To(ContainElement("openstack.org/instanceha"))
+			}, timeout, interval).Should(Succeed())
+		})
 	})
 
 	When("prerequisite resources exist", func() {

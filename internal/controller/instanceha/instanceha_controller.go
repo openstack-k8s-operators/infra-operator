@@ -176,6 +176,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.Init(&cl)
 	instance.Status.ObservedGeneration = instance.Generation
 
+	// If we're not deleting this and the service object doesn't have our finalizer, add it.
+	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) || isNewInstance {
+		return ctrl.Result{}, nil
+	}
+
 	//// mark
 	if instance.Status.NetworkAttachments == nil {
 		instance.Status.NetworkAttachments = map[string][]string{}
@@ -185,6 +190,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if instance.Spec.TopologyRef != nil {
 		c := condition.UnknownCondition(condition.TopologyReadyCondition, condition.InitReason, condition.TopologyReadyInitMessage)
 		cl.Set(c)
+	}
+
+	// Handle service delete
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, helper)
 	}
 
 	// Service account, role, binding
@@ -895,6 +905,27 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	}
 
 	return requests
+}
+
+func (r *Reconciler) reconcileDelete(ctx context.Context, instance *instancehav1.InstanceHa, helper *helper.Helper) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service delete")
+
+	// Remove finalizer on the Topology CR
+	if ctrlResult, err := topologyv1.EnsureDeletedTopologyRef(
+		ctx,
+		helper,
+		instance.Status.LastAppliedTopology,
+		instance.Name,
+	); err != nil {
+		return ctrlResult, err
+	}
+
+	// Service is deleted so remove the finalizer.
+	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
+	Log.Info("Reconciled Service delete successfully")
+
+	return ctrl.Result{}, nil
 }
 
 // GetContainerImage returns the container image to use for the instance, either from
