@@ -511,12 +511,13 @@ var _ = Describe("InstanceHa Controller", func() {
 				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			// Verify the key was rotated: new current key, previous = old current
+			// Verify the key was rotated and previous key auto-cleared
+			// (no NodeSets in envtest, so previous key is nullified immediately)
 			Eventually(func(g Gomega) {
 				hmacSecret := &corev1.Secret{}
 				g.Expect(k8sClient.Get(ctx, hmacSecretName, hmacSecret)).Should(Succeed())
 				g.Expect(hmacSecret.Data["hmac-key"]).ToNot(Equal(originalKey), "current key should have changed")
-				g.Expect(hmacSecret.Data["hmac-key-previous"]).To(Equal(originalKey), "previous key should be the old current key")
+				g.Expect(hmacSecret.Data["hmac-key-previous"]).To(BeEmpty(), "previous key should be auto-cleared when no NodeSets exist")
 			}, timeout, interval).Should(Succeed())
 
 			// Verify the annotation was removed

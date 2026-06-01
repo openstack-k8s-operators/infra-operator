@@ -645,13 +645,13 @@ The packet format includes a timestamp for replay protection (packets older than
 kubectl annotate instanceha instanceha instanceha.openstack.org/rotate-hmac-key=true
 ```
 
-This copies the current key to `hmac-key-previous`, generates a new key, and removes the annotation. The receiver accepts both keys during the rotation window. After redeploying compute nodes with the new key, the previous key can be cleared:
+This copies the current key to `hmac-key-previous`, generates a new key, and removes the annotation. The receiver accepts both keys during the rotation window.
 
-```bash
-kubectl patch secret instanceha-heartbeat-hmac -p '{"data":{"hmac-key-previous":""}}'
-```
+After redeploying compute nodes with the new key (via `servicesOverride: [instanceha-monitoring]`), the controller **automatically clears `hmac-key-previous`** once the EDPM deployment completes and the secret hash is back in sync across all NodeSets. This uses a two-phase state machine tracked in `status.hmacKeyRotationSynced`.
 
-Replace `instanceha-heartbeat-hmac` with `<instance-name>-heartbeat-hmac` if your CR has a different name.
+If no `OpenStackDataPlaneNodeSets` exist in the namespace, the previous key is cleared immediately.
+
+> **Prerequisite:** The `instanceha-monitoring` service must be listed in the NodeSet's `spec.services` so its secret hash is tracked. The service's `secretRef.name` must match the actual secret name (`<instance-name>-heartbeat-hmac`). For non-default CR names, create a custom `OpenStackDataPlaneService` with the correct `secretRef`.
 
 The secret name is published in `status.heartbeatHMACSecret` for integration with the EDPM dataplane operator.
 

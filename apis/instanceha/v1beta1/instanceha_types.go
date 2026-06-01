@@ -34,6 +34,17 @@ const (
 	OpenStackCloud = "default"
 )
 
+// HMACRotationSyncState tracks EDPM deployment progress during HMAC key rotation.
+// +kubebuilder:validation:Enum="";WaitingForDeployment
+type HMACRotationSyncState string
+
+const (
+	// HMACRotationIdle - no rotation in progress or waiting for EDPM to detect the key change.
+	HMACRotationIdle HMACRotationSyncState = ""
+	// HMACRotationWaitingDeployment - EDPM detected the key change, waiting for deployment to complete.
+	HMACRotationWaitingDeployment HMACRotationSyncState = "WaitingForDeployment"
+)
+
 // AuthSpec defines authentication parameters for InstanceHA.
 // Compatible with the AuthSpec interface used by other openstack-k8s-operators.
 type AuthSpec struct {
@@ -165,6 +176,10 @@ type InstanceHaStatus struct {
 	// HeartbeatHMACSecret is the name of the auto-generated Secret
 	// containing the HMAC key for heartbeat authentication
 	HeartbeatHMACSecret string `json:"heartbeatHMACSecret,omitempty"`
+
+	// HMACKeyRotationSynced tracks EDPM deployment progress during HMAC
+	// key rotation. See HMACRotationSyncState constants.
+	HMACKeyRotationSynced HMACRotationSyncState `json:"hmacKeyRotationSynced,omitempty"`
 }
 
 //+kubebuilder:object:root=true
