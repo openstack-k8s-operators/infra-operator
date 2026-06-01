@@ -75,6 +75,9 @@ func GetNodesRunningPods(podNetworkDetailList []PodDetail) []string {
 // OpenShiftFRRNamespace is the FRR namespace used in OpenShift 4.20+
 const OpenShiftFRRNamespace = "openshift-frr-k8s"
 
+// LegacyMetalLBNamespace is the FRR namespace used before OpenShift 4.20
+const LegacyMetalLBNamespace = "metallb-system"
+
 // GetFRRConfigurationNamespace checks whether migrationNamespace exists and returns it,
 // otherwise falls back to defaultNamespace.
 func GetFRRConfigurationNamespace(ctx context.Context, c client.Client, migrationNamespace, defaultNamespace string) (string, error) {

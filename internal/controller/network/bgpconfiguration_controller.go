@@ -56,9 +56,10 @@ import (
 // BGPConfigurationReconciler reconciles a BGPConfiguration object
 type BGPConfigurationReconciler struct {
 	client.Client
-	Kclient               kubernetes.Interface
-	Scheme                *runtime.Scheme
-	FRRMigrationNamespace string
+	Kclient                kubernetes.Interface
+	Scheme                 *runtime.Scheme
+	FRRMigrationNamespace  string
+	LegacyMetalLBNamespace string
 }
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
@@ -71,6 +72,13 @@ func (r *BGPConfigurationReconciler) getFRRMigrationNamespace() string {
 		return r.FRRMigrationNamespace
 	}
 	return bgp.OpenShiftFRRNamespace
+}
+
+func (r *BGPConfigurationReconciler) getLegacyMetalLBNamespace() string {
+	if r.LegacyMetalLBNamespace != "" {
+		return r.LegacyMetalLBNamespace
+	}
+	return bgp.LegacyMetalLBNamespace
 }
 
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations,verbs=get;list;watch;create;update;patch;delete
@@ -388,6 +396,13 @@ func (r *BGPConfigurationReconciler) reconcileDelete(ctx context.Context, instan
 		}
 	}
 
+	legacyNS := r.getLegacyMetalLBNamespace()
+	if frrNamespace != legacyNS {
+		if err := r.cleanupOldNamespaceFRRConfigurations(ctx, instance, legacyNS); err != nil {
+			return ctrl.Result{}, fmt.Errorf("error cleaning up FRRConfigurations from legacy namespace %s: %w", legacyNS, err)
+		}
+	}
+
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
 	Log.Info("Reconciled Service delete successfully")
@@ -505,6 +520,14 @@ func (r *BGPConfigurationReconciler) reconcileNormal(ctx context.Context, instan
 	if frrNamespace != instance.Spec.FRRConfigurationNamespace {
 		if err := r.cleanupOldNamespaceFRRConfigurations(ctx, instance, instance.Spec.FRRConfigurationNamespace); err != nil {
 			Log.Error(err, "Failed to cleanup old FRRConfigurations from namespace", "namespace", instance.Spec.FRRConfigurationNamespace)
+		}
+	}
+
+	// Clean up FRRConfigurations from the legacy metallb-system namespace (pre-OpenShift 4.20)
+	legacyNS := r.getLegacyMetalLBNamespace()
+	if frrNamespace != legacyNS {
+		if err := r.cleanupOldNamespaceFRRConfigurations(ctx, instance, legacyNS); err != nil {
+			Log.Error(err, "Failed to cleanup legacy FRRConfigurations from namespace", "namespace", legacyNS)
 		}
 	}
 
