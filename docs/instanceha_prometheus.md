@@ -155,6 +155,8 @@ Counters increase monotonically and reset to zero on pod restart.
 | `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed (fence + evacuate + recovery) |
 | `instanceha_processing_failed_total` | `host` | Unhandled exceptions during service processing |
 | `instanceha_orphaned_host_recovered_total` | — | Orphaned fenced hosts recovered during startup reconciliation |
+| `instanceha_heartbeat_rejected_total` | `reason` | Heartbeat packets rejected. `reason`: `hmac_failed`, `timestamp_invalid` |
+| `instanceha_heartbeat_cliff_total` | — | Fencing skipped due to sudden heartbeat loss (possible network partition) |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed. `result`: `success`, `error` |
 
 ### Gauges
@@ -165,6 +167,7 @@ Gauges represent current values that can go up or down.
 |--------|-------------|
 | `instanceha_poll_consecutive_failures` | Current count of consecutive Nova API poll failures. Resets to 0 on success. |
 | `instanceha_hosts_processing` | Number of hosts currently being fenced/evacuated. |
+| `instanceha_k8s_api_reachable` | Whether the Kubernetes API is reachable (1=yes, 0=no). |
 
 ### Histograms
 
@@ -292,6 +295,34 @@ spec:
               This may indicate Nova scheduler contention, storage I/O pressure,
               or insufficient capacity on target hosts.
 
+        # --- Warning: K8s API unreachable (partition) ---
+        # The agent cannot reach the K8s API — fencing is blocked.
+        - alert: InstanceHAK8sPartition
+          expr: instanceha_k8s_api_reachable == 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "InstanceHA K8s API unreachable — possible network partition"
+            description: >-
+              The InstanceHA pod cannot reach the Kubernetes API.
+              Fencing is blocked to prevent split-brain evacuations.
+              Check network connectivity from the worker node hosting the pod.
+
+        # --- Warning: Heartbeat cliff detected ---
+        # Sudden loss of heartbeats from multiple hosts at once.
+        - alert: InstanceHAHeartbeatCliff
+          expr: increase(instanceha_heartbeat_cliff_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Heartbeat cliff detected — possible network partition"
+            description: >-
+              InstanceHA detected a sudden drop in heartbeat hosts,
+              suggesting the pod's network is partitioned rather than
+              multiple hosts failing simultaneously. Fencing was skipped.
+
         # --- Warning: Processing failures ---
         # Unhandled exceptions in the service processing pipeline.
         - alert: InstanceHAProcessingFailure
@@ -408,8 +439,11 @@ Expected output:
 # TYPE instanceha_recovery_completed_total counter
 # TYPE instanceha_processing_failed_total counter
 # TYPE instanceha_orphaned_host_recovered_total counter
+# TYPE instanceha_heartbeat_rejected_total counter
+# TYPE instanceha_heartbeat_cliff_total counter
 # TYPE instanceha_poll_consecutive_failures gauge
 # TYPE instanceha_hosts_processing gauge
+# TYPE instanceha_k8s_api_reachable gauge
 # TYPE instanceha_poll_cycles_total counter
 ```
 

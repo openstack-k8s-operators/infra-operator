@@ -228,7 +228,7 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(10)]
 
         start = time.time()
-        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, down_hosts)
+        unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, down_hosts)
         elapsed_ms = (time.time() - start) * 1000
 
         self.assertEqual(len(skipped), 10)
@@ -241,7 +241,7 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(NODE_COUNT)]
 
         start = time.time()
-        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, down_hosts)
+        unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, down_hosts)
         elapsed_ms = (time.time() - start) * 1000
 
         self.assertEqual(len(unreachable), NODE_COUNT)
@@ -259,7 +259,7 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
 
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(NODE_COUNT)]
 
-        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, down_hosts)
+        unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, down_hosts)
         self.assertEqual(len(skipped), 500)
         self.assertEqual(len(unreachable), 500)
 

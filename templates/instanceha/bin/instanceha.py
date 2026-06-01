@@ -169,6 +169,14 @@ HEARTBEAT_REJECTED_TOTAL = Counter(
     'Heartbeat packets rejected',
     ['reason'],
 )
+K8S_API_REACHABLE = Gauge(
+    'instanceha_k8s_api_reachable',
+    'Whether the Kubernetes API is reachable (1=yes, 0=no)',
+)
+HEARTBEAT_CLIFF_TOTAL = Counter(
+    'instanceha_heartbeat_cliff_total',
+    'Times fencing was skipped due to sudden heartbeat loss',
+)
 
 
 # Enums
@@ -683,6 +691,8 @@ class ConfigManager:
         'ORCHESTRATED_RESTART': ConfigItem('bool', False),
         'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
         'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),
+        'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
+        'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
     }
 
     def get_config_value(self, key: str) -> Union[str, int, bool, List]:
@@ -789,6 +799,7 @@ class InstanceHAService(CloudConnectionProvider):
         self._last_hash_time = 0
         self._previous_hash = ""
         self.ready = False
+        self.k8s_api_reachable = False
 
         # Caching
         self._host_servers_cache = {}
@@ -815,6 +826,7 @@ class InstanceHAService(CloudConnectionProvider):
         self.heartbeat_hosts_timestamp = defaultdict(float)
         self.heartbeat_listener_stop_event = threading.Event()
         self.heartbeat_listener_start_time = 0.0
+        self.heartbeat_previous_active_count = 0
         self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
         if self.heartbeat_hmac_keys:
             logging.info("Heartbeat HMAC authentication enabled with %d key(s)", len(self.heartbeat_hmac_keys))
@@ -1382,6 +1394,45 @@ class InstanceHAService(CloudConnectionProvider):
             self.health_check_thread.daemon = True
             self.health_check_thread.start()
             logging.info("Health check server started")
+
+    def start_k8s_health_check(self):
+        """Start a background thread that monitors K8s API connectivity."""
+        thread = threading.Thread(target=self._run_k8s_health_check)
+        thread.daemon = True
+        thread.start()
+        logging.info("K8s API health check thread started (interval=%ds)",
+                     self.config.get_config_value('K8S_API_CHECK_INTERVAL'))
+
+    def _run_k8s_health_check(self):
+        """Periodically check K8s API reachability and update readiness."""
+        consecutive_failures = 0
+        max_failures = 3
+        interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
+        while not self.shutdown_event.is_set():
+            try:
+                interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
+                if _check_k8s_api_reachable():
+                    if consecutive_failures > 0:
+                        logging.info("K8s API connectivity restored after %d failures",
+                                     consecutive_failures)
+                    consecutive_failures = 0
+                    self.k8s_api_reachable = True
+                    K8S_API_REACHABLE.set(1)
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        if self.k8s_api_reachable:
+                            logging.warning(
+                                "K8s API unreachable for %d consecutive checks — "
+                                "possible network partition, marking not ready",
+                                consecutive_failures)
+                            self.k8s_api_reachable = False
+                            self.ready = False
+                            K8S_API_REACHABLE.set(0)
+            except Exception as e:
+                logging.error("K8s health check error: %s", e, exc_info=True)
+                consecutive_failures += 1
+            self.shutdown_event.wait(interval)
 
     def _run_health_check_server(self):
         """Simple health check server implementation."""
@@ -2932,21 +2983,56 @@ def _post_evacuation_recovery(conn, failed_service, service, resume=False):
 
 
 _K8S_TOKEN_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/token'
+_K8S_NAMESPACE_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
 _K8S_CA_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
 _K8S_API_BASE = 'https://kubernetes.default.svc'
 
 
+_k8s_credentials_warned = False
+
+
 def _get_k8s_credentials():
     """Read ServiceAccount token and namespace from the pod filesystem."""
+    global _k8s_credentials_warned
     try:
         with open(_K8S_TOKEN_PATH, 'r') as f:
             token = f.read().strip()
         namespace = os.environ.get('POD_NAMESPACE', '')
+        if not namespace:
+            try:
+                with open(_K8S_NAMESPACE_PATH, 'r') as f:
+                    namespace = f.read().strip()
+            except (IOError, OSError):
+                pass
         if not token or not namespace:
+            if not _k8s_credentials_warned:
+                logging.warning("K8s credentials unavailable: token=%s, namespace=%s",
+                                'present' if token else 'missing',
+                                'present' if namespace else 'missing')
+                _k8s_credentials_warned = True
             return None, None
+        _k8s_credentials_warned = False
         return token, namespace
     except (IOError, OSError):
         return None, None
+
+
+def _check_k8s_api_reachable():
+    """Check if the Kubernetes API server is reachable."""
+    token, namespace = _get_k8s_credentials()
+    if not token:
+        return False
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        response = requests.get(
+            f"{_K8S_API_BASE}/api/v1/namespaces/{namespace}",
+            headers=headers,
+            verify=_K8S_CA_PATH,
+            timeout=5,
+        )
+        return response.status_code < 500
+    except Exception:
+        return False
 
 
 def _emit_k8s_event(host, reason, message, event_type='Normal'):
@@ -3133,6 +3219,9 @@ def _initialize_service(config_mgr):
     health_check_thread.daemon = True
     health_check_thread.start()
 
+    # Start K8s API connectivity monitor
+    service.start_k8s_health_check()
+
     # Start kdump listener if enabled
     if service.config.get_config_value('CHECK_KDUMP'):
         kdump_thread = threading.Thread(target=_kdump_udp_listener, args=(service,))
@@ -3313,9 +3402,15 @@ def _prepare_evacuation_resources(conn, service, services, compute_nodes, aggreg
 
 
 def _filter_reachable_hosts(service, compute_nodes):
-    """Filter out hosts still sending heartbeats (host OS alive, only nova-compute down)."""
+    """Filter out hosts still sending heartbeats (host OS alive, only nova-compute down).
+
+    Returns (unreachable, skipped, cliff_detected):
+    - unreachable: hosts with no recent heartbeat (should be fenced)
+    - skipped: hosts with recent heartbeat OR all hosts if cliff detected
+    - cliff_detected: True if a sudden mass heartbeat loss triggered a blanket skip
+    """
     if not compute_nodes:
-        return compute_nodes, []
+        return compute_nodes, [], False
 
     heartbeat_timeout = service.config.get_config_value('HEARTBEAT_TIMEOUT')
     current_time = time.time()
@@ -3326,9 +3421,35 @@ def _filter_reachable_hosts(service, compute_nodes):
         # Grace period: can't trust absence of heartbeats until listener has run
         # for at least HEARTBEAT_TIMEOUT seconds
         if listener_start_time == 0.0 or (current_time - listener_start_time) < heartbeat_timeout:
-            return compute_nodes, []
+            return compute_nodes, [], False
 
         timestamps_snapshot = dict(service.heartbeat_hosts_timestamp)
+
+    current_active = sum(
+        1 for ts in timestamps_snapshot.values()
+        if ts > 0 and (current_time - ts) <= heartbeat_timeout
+    )
+    previous_active = service.heartbeat_previous_active_count
+
+    cliff_detected = False
+    if previous_active >= 3:
+        threshold = service.config.get_config_value('HEARTBEAT_CLIFF_THRESHOLD')
+        drop_percent = (previous_active - current_active) / previous_active * 100
+        if drop_percent >= threshold:
+            cliff_detected = True
+            logging.error(
+                'Heartbeat cliff detected: %d→%d active hosts (%.1f%% drop, '
+                'threshold %d%%) — possible network partition, skipping fencing this cycle',
+                previous_active, current_active, drop_percent, threshold)
+            _emit_k8s_event('cluster', 'HeartbeatCliff',
+                            f'Sudden heartbeat loss: {previous_active}→{current_active} active hosts '
+                            f'({drop_percent:.1f}% drop) — skipping fencing',
+                            event_type='Warning')
+            HEARTBEAT_CLIFF_TOTAL.inc()
+            return [], list(compute_nodes), True
+
+    if not cliff_detected:
+        service.heartbeat_previous_active_count = current_active
 
     unreachable = []
     skipped = []
@@ -3346,7 +3467,7 @@ def _filter_reachable_hosts(service, compute_nodes):
         else:
             unreachable.append(svc)
 
-    return unreachable, skipped
+    return unreachable, skipped, False
 
 
 def _process_stale_services(conn, service, services, compute_nodes, to_resume):
@@ -3367,13 +3488,14 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
 
     # Filter out hosts still reachable via heartbeat
     if service.config.get_config_value('CHECK_HEARTBEAT'):
-        compute_nodes, heartbeat_skipped = _filter_reachable_hosts(service, compute_nodes)
-        for svc in heartbeat_skipped:
-            _emit_k8s_event(svc.host, 'HostReachable',
-                            'Host reported down by Nova but still sending heartbeats — '
-                            'skipping fencing (likely nova-compute crash)',
-                            event_type='Warning')
-            HOST_REACHABLE_TOTAL.labels(host=svc.host).inc()
+        compute_nodes, heartbeat_skipped, cliff_detected = _filter_reachable_hosts(service, compute_nodes)
+        if not cliff_detected:
+            for svc in heartbeat_skipped:
+                _emit_k8s_event(svc.host, 'HostReachable',
+                                'Host reported down by Nova but still sending heartbeats — '
+                                'skipping fencing (likely nova-compute crash)',
+                                event_type='Warning')
+                HOST_REACHABLE_TOTAL.labels(host=svc.host).inc()
 
         if not (compute_nodes or to_resume):
             _cleanup_filtered_hosts(service, marked_hostnames, set(), current_time)
@@ -3704,6 +3826,11 @@ def main():
         poll_interval = service.config.get_config_value('POLL')
 
         try:
+            if not service.k8s_api_reachable:
+                logging.warning("Skipping fencing — K8s API unreachable (possible network partition)")
+                service.shutdown_event.wait(poll_interval)
+                continue
+
             services = conn.services.list(binary="nova-compute")
             if not services:
                 service.shutdown_event.wait(poll_interval)

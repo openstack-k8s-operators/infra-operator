@@ -2251,22 +2251,22 @@ class TestConcurrentOperations(unittest.TestCase):
 
         def refresh_cache(thread_id):
             try:
-                with patch.object(self.service, 'get_evacuable_images', return_value=[]):
-                    self.service.refresh_evacuable_cache(mock_nova, force=True)
-                    flavors_result = self.service.get_evacuable_flavors(mock_nova)
-                    results.append(len(flavors_result))
+                self.service.refresh_evacuable_cache(mock_nova, force=True)
+                flavors_result = self.service.get_evacuable_flavors(mock_nova)
+                results.append(len(flavors_result))
             except Exception as e:
                 errors.append(f"Thread {thread_id}: {str(e)}")
 
         # Run 10 concurrent cache refreshes
-        threads = []
-        for i in range(10):
-            thread = threading.Thread(target=refresh_cache, args=(i,))
-            threads.append(thread)
-            thread.start()
+        with patch.object(self.service, 'get_evacuable_images', return_value=[]):
+            threads = []
+            for i in range(10):
+                thread = threading.Thread(target=refresh_cache, args=(i,))
+                threads.append(thread)
+                thread.start()
 
-        for thread in threads:
-            thread.join(timeout=5)
+            for thread in threads:
+                thread.join(timeout=5)
 
         # Should have no errors
         self.assertEqual(errors, [], f"Concurrent cache errors: {errors}")

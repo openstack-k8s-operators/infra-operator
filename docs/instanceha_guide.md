@@ -51,7 +51,7 @@ InstanceHA runs as a Kubernetes-managed workload alongside the OpenStack control
 
 ### How It Works
 
-1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp and `state` field. A service is considered failed if it is reported as `down` or if its heartbeat is staler than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
+1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp. A service is considered failed if it is reported as `down` or if its `updated_at` timestamp is older than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
 
 2. **Safety checks**: Before acting, the agent verifies that the percentage of failed hosts does not exceed the `THRESHOLD` (default: 50%) — calculated against only active services, excluding already-disabled and already-forced-down hosts — and that at least one `nova-scheduler` is running. These checks prevent cascading evacuations during infrastructure-wide outages. A `ThresholdExceeded` K8s event is emitted when the limit is hit.
 
@@ -121,6 +121,7 @@ InstanceHA emits Kubernetes events on the InstanceHa CR to provide observability
 | `ThresholdExceeded` | Warning | Too many hosts down simultaneously |
 | `AggregateThresholdExceeded` | Warning | Per-aggregate failure threshold exceeded |
 | `OrphanedHostRecovered` | Warning | Recovered fenced host from prior crash |
+| `HeartbeatCliff` | Warning | Sudden heartbeat loss detected — possible network partition, fencing skipped |
 
 Events can be viewed with `oc describe instanceha <name>` or `oc get events --field-selector involvedObject.name=<name>`.
 
@@ -144,6 +145,8 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 | `instanceha_processing_failed_total` | `host` | Service processing failures |
 | `instanceha_orphaned_host_recovered_total` | | Orphaned hosts recovered at startup |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed (result: `success`, `error`) |
+| `instanceha_heartbeat_rejected_total` | `reason` | Heartbeat packets rejected (`hmac_failed`, `timestamp_invalid`) |
+| `instanceha_heartbeat_cliff_total` | | Fencing skipped due to sudden heartbeat loss (possible network partition) |
 
 #### Gauges
 
@@ -151,6 +154,7 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 |--------|-------------|
 | `instanceha_poll_consecutive_failures` | Current consecutive Nova API poll failures (resets to 0 on success) |
 | `instanceha_hosts_processing` | Number of hosts currently being processed |
+| `instanceha_k8s_api_reachable` | Whether the Kubernetes API is reachable (1=yes, 0=no) |
 
 #### Histograms
 
@@ -158,36 +162,7 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 |--------|--------|-------------------|-------------|
 | `instanceha_instance_evacuation_duration_seconds` | `host` | 10, 30, 60, 120, 180, 300, 600 | Duration of individual instance evacuations |
 
-#### Example Alert Rules
-
-```yaml
-groups:
-  - name: instanceha
-    rules:
-      - alert: InstanceHAFencingFailure
-        expr: increase(instanceha_fencing_total{result="failed"}[5m]) > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Fencing failed for host {{ $labels.host }}"
-
-      - alert: InstanceHANovaAPIDown
-        expr: instanceha_poll_consecutive_failures > 3
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "InstanceHA cannot reach Nova API"
-
-      - alert: InstanceHAEvacuationSlow
-        expr: histogram_quantile(0.95, rate(instanceha_instance_evacuation_duration_seconds_bucket[15m])) > 300
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Instance evacuations taking longer than 5 minutes (p95)"
-```
+See [instanceha_prometheus.md](instanceha_prometheus.md) for alert rules, Grafana dashboard queries, and PromQL examples.
 
 #### Scraping Configuration
 
@@ -214,6 +189,27 @@ spec:
 ### Graceful Shutdown
 
 When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA finishes any in-flight fencing or evacuation work before exiting. The Deployment is configured with a 30-second termination grace period. The agent's poll loop and evacuation workers check a shutdown flag between cycles, allowing timely response to shutdown signals.
+
+### Network Partition Detection
+
+Two complementary mechanisms prevent the agent from fencing healthy hosts when the pod's worker node is network-isolated:
+
+**K8s API connectivity check:**
+- A background thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds (default: 15) using the in-cluster service account.
+- After 3 consecutive failures, the agent marks itself not-ready and blocks all fencing until connectivity restores and a Nova poll succeeds.
+- The `instanceha_k8s_api_reachable` Prometheus gauge tracks the current state (1=ok, 0=isolated).
+
+**Heartbeat cliff detection:**
+- The agent tracks the count of active heartbeat hosts between poll cycles.
+- If the count drops by more than `HEARTBEAT_CLIFF_THRESHOLD`% (default: 50%) in a single cycle (minimum 3 hosts previously active), fencing is skipped for that cycle. A sudden mass-silence is far more likely to indicate a listener-side network issue than simultaneous host failures.
+- A `HeartbeatCliff` K8s event (Warning) is emitted and the `instanceha_heartbeat_cliff_total` counter is incremented.
+- The detection re-evaluates on the next cycle — the baseline is preserved during a cliff, so fencing stays blocked until heartbeats recover.
+
+```yaml
+config:
+  K8S_API_CHECK_INTERVAL: "15"
+  HEARTBEAT_CLIFF_THRESHOLD: "50"
+```
 
 ---
 
@@ -334,6 +330,7 @@ metadata:
     metallb.universe.tf/loadBalancerIPs: 172.17.0.80
 spec:
   type: LoadBalancer
+  externalTrafficPolicy: Local
   selector:
     service: instanceha  # Replace with your CR name if different
   ports:
@@ -346,6 +343,8 @@ spec:
     targetPort: 7411
     protocol: UDP
 ```
+
+> **Important:** `externalTrafficPolicy: Local` is required when kdump detection is enabled (`CHECK_KDUMP: "true"`). The kdump listener identifies the crashing host via reverse DNS lookup on the packet's source IP. Without `Local` policy, kube-proxy masquerades (SNATs) the source IP when forwarding traffic to the pod, replacing the compute node's real IP with an internal node address — causing the reverse DNS lookup to fail. `Local` policy preserves the original source IP by delivering traffic directly to the pod on the receiving node without cross-node forwarding or SNAT. (Heartbeat packets are unaffected — the sender's hostname is embedded in the HMAC-authenticated packet payload, so source IP rewriting does not break heartbeat identification.)
 
 Replace `172.17.0.80` with an IP from your `internalapi` MetalLB address pool. The `allow-shared-ip` annotation lets this Service share the same IP with other OpenStack services (e.g., keystone, nova, cinder) that already use the `internalapi` pool — since the InstanceHA ports (7410/UDP, 7411/UDP) don't conflict with any existing service ports, sharing is safe and avoids consuming an additional IP. If you prefer a dedicated IP, pick an unused address and remove the `allow-shared-ip` annotation.
 
@@ -880,6 +879,8 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 |-----------|------|---------|-------------|
 | `CHECK_KDUMP` | bool | false | Enable kdump detection via UDP listener |
 | `CHECK_HEARTBEAT` | bool | false | Enable heartbeat verification via UDP listener |
+| `HEARTBEAT_CLIFF_THRESHOLD` | int | 50 (range: 10–100) | Percentage drop in active heartbeat hosts that triggers cliff detection (skips fencing for that cycle) |
+| `K8S_API_CHECK_INTERVAL` | int | 15 (range: 5–120) | Seconds between Kubernetes API reachability checks |
 
 #### Security
 

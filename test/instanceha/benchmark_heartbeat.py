@@ -289,7 +289,7 @@ def benchmark_filter():
         iterations = 1000
         cpu_start = time.process_time()
         for _ in range(iterations):
-            unreachable, skipped = instanceha._filter_reachable_hosts(service, svcs)
+            unreachable, skipped, _ = instanceha._filter_reachable_hosts(service, svcs)
         cpu_us = (time.process_time() - cpu_start) / iterations * 1_000_000
 
         # Restore timestamps for next test
@@ -372,7 +372,7 @@ def benchmark_polling_cycle():
 
         cpu_start = time.process_time()
         wall_start = time.time()
-        unreachable, skipped = instanceha._filter_reachable_hosts(service, svcs)
+        unreachable, skipped, _ = instanceha._filter_reachable_hosts(service, svcs)
         cpu_us = (time.process_time() - cpu_start) * 1_000_000
         wall_us = (time.time() - wall_start) * 1_000_000
 
