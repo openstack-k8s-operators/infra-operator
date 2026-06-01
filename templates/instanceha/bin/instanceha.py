@@ -169,6 +169,14 @@ HEARTBEAT_REJECTED_TOTAL = Counter(
     'Heartbeat packets rejected',
     ['reason'],
 )
+K8S_API_REACHABLE = Gauge(
+    'instanceha_k8s_api_reachable',
+    'Whether the Kubernetes API is reachable (1=yes, 0=no)',
+)
+HEARTBEAT_CLIFF_TOTAL = Counter(
+    'instanceha_heartbeat_cliff_total',
+    'Times fencing was skipped due to sudden heartbeat loss',
+)
 
 
 # Enums
@@ -683,6 +691,7 @@ class ConfigManager:
         'ORCHESTRATED_RESTART': ConfigItem('bool', False),
         'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
         'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),
+        'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
     }
 
     def get_config_value(self, key: str) -> Union[str, int, bool, List]:
@@ -789,6 +798,7 @@ class InstanceHAService(CloudConnectionProvider):
         self._last_hash_time = 0
         self._previous_hash = ""
         self.ready = False
+        self.k8s_api_reachable = True
 
         # Caching
         self._host_servers_cache = {}
@@ -815,6 +825,7 @@ class InstanceHAService(CloudConnectionProvider):
         self.heartbeat_hosts_timestamp = defaultdict(float)
         self.heartbeat_listener_stop_event = threading.Event()
         self.heartbeat_listener_start_time = 0.0
+        self.heartbeat_previous_active_count = 0
         self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
         if self.heartbeat_hmac_keys:
             logging.info("Heartbeat HMAC authentication enabled with %d key(s)", len(self.heartbeat_hmac_keys))
@@ -1382,6 +1393,40 @@ class InstanceHAService(CloudConnectionProvider):
             self.health_check_thread.daemon = True
             self.health_check_thread.start()
             logging.info("Health check server started")
+
+    def start_k8s_health_check(self):
+        """Start a background thread that monitors K8s API connectivity."""
+        thread = threading.Thread(target=self._run_k8s_health_check)
+        thread.daemon = True
+        thread.start()
+        logging.info("K8s API health check thread started (interval=%ds)",
+                     self.config.get_config_value('K8S_API_CHECK_INTERVAL'))
+
+    def _run_k8s_health_check(self):
+        """Periodically check K8s API reachability and update readiness."""
+        consecutive_failures = 0
+        max_failures = 3
+        while not self.shutdown_event.is_set():
+            interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
+            if _check_k8s_api_reachable():
+                if consecutive_failures > 0:
+                    logging.info("K8s API connectivity restored after %d failures",
+                                 consecutive_failures)
+                consecutive_failures = 0
+                self.k8s_api_reachable = True
+                K8S_API_REACHABLE.set(1)
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    if self.k8s_api_reachable:
+                        logging.warning(
+                            "K8s API unreachable for %d consecutive checks — "
+                            "possible network partition, marking not ready",
+                            consecutive_failures)
+                        self.k8s_api_reachable = False
+                        self.ready = False
+                        K8S_API_REACHABLE.set(0)
+            self.shutdown_event.wait(interval)
 
     def _run_health_check_server(self):
         """Simple health check server implementation."""
@@ -2949,6 +2994,24 @@ def _get_k8s_credentials():
         return None, None
 
 
+def _check_k8s_api_reachable():
+    """Check if the Kubernetes API server is reachable."""
+    token, namespace = _get_k8s_credentials()
+    if not token:
+        return False
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        response = requests.get(
+            f"{_K8S_API_BASE}/api/v1/namespaces/{namespace}",
+            headers=headers,
+            verify=_K8S_CA_PATH,
+            timeout=5,
+        )
+        return response.status_code in (200, 403)
+    except Exception:
+        return False
+
+
 def _emit_k8s_event(host, reason, message, event_type='Normal'):
     """Emit a Kubernetes Event on the InstanceHA CR."""
     token, namespace = _get_k8s_credentials()
@@ -3132,6 +3195,9 @@ def _initialize_service(config_mgr):
     health_check_thread = threading.Thread(target=service.start_health_check_server)
     health_check_thread.daemon = True
     health_check_thread.start()
+
+    # Start K8s API connectivity monitor
+    service.start_k8s_health_check()
 
     # Start kdump listener if enabled
     if service.config.get_config_value('CHECK_KDUMP'):
@@ -3329,6 +3395,28 @@ def _filter_reachable_hosts(service, compute_nodes):
             return compute_nodes, []
 
         timestamps_snapshot = dict(service.heartbeat_hosts_timestamp)
+
+    current_active = sum(
+        1 for ts in timestamps_snapshot.values()
+        if ts > 0 and (current_time - ts) <= heartbeat_timeout
+    )
+    previous_active = service.heartbeat_previous_active_count
+    service.heartbeat_previous_active_count = current_active
+
+    if previous_active >= 3:
+        threshold = service.config.get_config_value('THRESHOLD')
+        drop_percent = (previous_active - current_active) / previous_active * 100
+        if drop_percent >= threshold:
+            logging.error(
+                'Heartbeat cliff detected: %d→%d active hosts (%.1f%% drop, '
+                'threshold %d%%) — possible network partition, skipping fencing this cycle',
+                previous_active, current_active, drop_percent, threshold)
+            _emit_k8s_event('cluster', 'HeartbeatCliff',
+                            f'Sudden heartbeat loss: {previous_active}→{current_active} active hosts '
+                            f'({drop_percent:.1f}% drop) — skipping fencing',
+                            event_type='Warning')
+            HEARTBEAT_CLIFF_TOTAL.inc()
+            return [], list(compute_nodes)
 
     unreachable = []
     skipped = []
@@ -3713,6 +3801,11 @@ def main():
             compute_nodes, to_resume, to_reenable = _categorize_services(services, target_date)
 
             compute_nodes_list = list(compute_nodes)
+
+            if not service.k8s_api_reachable:
+                logging.warning("Skipping fencing — K8s API unreachable (possible network partition)")
+                service.shutdown_event.wait(poll_interval)
+                continue
 
             _process_stale_services(conn, service, services, compute_nodes_list, to_resume)
             _process_reenabling(conn, service, to_reenable)
