@@ -21,6 +21,7 @@ import struct
 import signal
 import threading
 import hashlib
+import hmac as hmac_mod
 import json
 import uuid
 from typing import Dict, Any, Optional, Union, List, Protocol, Tuple, Callable
@@ -70,9 +71,12 @@ USERNAME_MAX_LENGTH = 64
 FENCING_RETRY_DELAY_SECONDS = 1
 KDUMP_REENABLE_DELAY_SECONDS = 60
 MAX_NOVA_BACKOFF_SECONDS = 300
+MAX_CONSECUTIVE_FAILURES_READY = 3
 NOVA_API_TIMEOUT_SECONDS = 30
 MAX_TOTAL_EVACUATION_THREADS = 32
-HEARTBEAT_MAGIC_NUMBER = 0x48425631
+HEARTBEAT_MAGIC_NUMBER = 0x48425632
+HEARTBEAT_HMAC_DIGEST_SIZE = 32
+HEARTBEAT_MIN_PACKET_SIZE = 4 + 8 + 1 + 32  # magic + timestamp + min hostname + HMAC
 DEFAULT_HEARTBEAT_PORT = 7411
 HEARTBEAT_CLEANUP_THRESHOLD = 2000
 HEARTBEAT_CLEANUP_AGE_SECONDS = 600
@@ -160,6 +164,11 @@ POLL_CYCLE_TOTAL = Counter(
     'Total poll cycles executed',
     ['result'],
 )
+HEARTBEAT_REJECTED_TOTAL = Counter(
+    'instanceha_heartbeat_rejected_total',
+    'Heartbeat packets rejected',
+    ['reason'],
+)
 
 
 # Enums
@@ -246,13 +255,17 @@ _SECRET_PATTERNS = {
     'application_credential_secret': re.compile(r'\bapplication_credential_secret=[^\s)\'\"]+', re.IGNORECASE),
     'application_credential_id': re.compile(r'\bapplication_credential_id=[^\s)\'\"]+', re.IGNORECASE),
     'auth': re.compile(r'\bauth=[^\s)\'\"]+', re.IGNORECASE),
+    'json_password': re.compile(r'("(?:password|passwd|token|secret|credential|application_credential_secret|application_credential_id)")\s*:\s*"(?:[^"\\]|\\.)*"', re.IGNORECASE),
 }
 
 
 def _sanitize_message(msg: str) -> str:
     """Strip credentials from a message string."""
     for secret_word, pattern in _SECRET_PATTERNS.items():
-        msg = pattern.sub(f'{secret_word}=***', msg)
+        if secret_word == 'json_password':
+            msg = pattern.sub(r'\1: "***"', msg)
+        else:
+            msg = pattern.sub(f'{secret_word}=***', msg)
     return msg
 
 
@@ -772,7 +785,7 @@ class InstanceHAService(CloudConnectionProvider):
 
         # Health monitoring
         self.current_hash = ""
-        self.hash_update_successful = True
+        self.hash_update_successful = False
         self._last_hash_time = 0
         self._previous_hash = ""
         self.ready = False
@@ -802,6 +815,9 @@ class InstanceHAService(CloudConnectionProvider):
         self.heartbeat_hosts_timestamp = defaultdict(float)
         self.heartbeat_listener_stop_event = threading.Event()
         self.heartbeat_listener_start_time = 0.0
+        self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
+        if self.heartbeat_hmac_keys:
+            logging.info("Heartbeat HMAC authentication enabled with %d key(s)", len(self.heartbeat_hmac_keys))
 
         # Host processing tracking
         self.hosts_processing = defaultdict(float)
@@ -809,6 +825,26 @@ class InstanceHAService(CloudConnectionProvider):
         self.reserved_hosts_lock = threading.Lock()
 
         logging.info("InstanceHA service initialized successfully")
+
+    @staticmethod
+    def _load_heartbeat_hmac_keys():
+        """Load HMAC keys for heartbeat authentication from mounted secrets."""
+        keys = []
+        for env_var in ('HEARTBEAT_HMAC_KEY_PATH', 'HEARTBEAT_HMAC_KEY_PREVIOUS_PATH'):
+            path = os.getenv(env_var, '')
+            if not path:
+                continue
+            try:
+                with open(path, 'r') as f:
+                    hex_key = f.read().strip()
+                if hex_key:
+                    keys.append(bytes.fromhex(hex_key))
+            except (IOError, OSError) as e:
+                logging.debug("Could not read HMAC key from %s: %s", path, e)
+            except ValueError as e:
+                logging.warning("Invalid hex in HMAC key file %s: %s", path, e)
+        return keys
+
 
     def update_health_hash(self, hash_interval: Optional[int] = None) -> None:
         """Update health monitoring hash for service status tracking."""
@@ -1398,6 +1434,13 @@ class InstanceHAService(CloudConnectionProvider):
             if tls_cert and tls_key:
                 import ssl
                 ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                tls_versions = {'1.2': ssl.TLSVersion.TLSv1_2, '1.3': ssl.TLSVersion.TLSv1_3}
+                min_ver = os.getenv('METRICS_TLS_MIN_VERSION', '1.2')
+                ssl_ctx.minimum_version = tls_versions.get(min_ver, ssl.TLSVersion.TLSv1_2)
+                # FIPS: on RHEL FIPS mode, OpenSSL's FIPS provider filters this
+                # string to only FIPS-approved ciphers (AES-GCM/CCM + ECDHE/DHE).
+                ciphers = os.getenv('METRICS_TLS_CIPHERS', 'HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA')
+                ssl_ctx.set_ciphers(ciphers)
                 ssl_ctx.load_cert_chain(tls_cert, tls_key)
                 server.socket = ssl_ctx.wrap_socket(server.socket, server_side=True)
                 logging.info("Metrics endpoint serving over HTTPS on port %d", HEALTH_CHECK_PORT)
@@ -1476,10 +1519,7 @@ class UDPSocketManager:
 def _resolve_hostname_dns(data, address, label):
     """Resolve hostname via reverse DNS lookup (kdump listener)."""
     try:
-        ip = address[0]
-        if ip.startswith('::ffff:'):
-            ip = ip[7:]
-        return _extract_hostname(socket.gethostbyaddr(ip)[0])
+        return _extract_hostname(socket.gethostbyaddr(address[0])[0])
     except socket.herror:
         logging.warning(
             '%s packet from %s but reverse DNS lookup failed. '
@@ -1489,13 +1529,8 @@ def _resolve_hostname_dns(data, address, label):
         return None
 
 
-def _resolve_hostname_packet(data, address, label):
-    """Extract hostname from packet payload (heartbeat listener)."""
-    try:
-        raw_hostname = data[4:].decode('utf-8').strip('\x00').strip()
-    except UnicodeDecodeError:
-        logging.warning('%s from %s has invalid hostname encoding', label, address[0])
-        return None
+def _validate_raw_hostname(raw_hostname, address, label):
+    """Validate a raw hostname string against length and pattern rules."""
     if not raw_hostname or len(raw_hostname) > USERNAME_MAX_LENGTH:
         logging.warning('%s from %s has invalid hostname length', label, address[0])
         return None
@@ -1506,11 +1541,62 @@ def _resolve_hostname_packet(data, address, label):
     return _extract_hostname(raw_hostname)
 
 
-def _udp_listener(service, port, label, magic_number, min_packet_size,
+def _resolve_hostname_packet(data, address, label, hmac_keys=None):
+    """Extract hostname from HMAC-authenticated heartbeat packet.
+
+    FIPS: uses HMAC-SHA256 (FIPS 198-1 / 180-4), safe on RHEL FIPS mode.
+    """
+    if len(data) < HEARTBEAT_MIN_PACKET_SIZE:
+        logging.warning('%s from %s too short (%d bytes)', label, address[0], len(data))
+        return None
+
+    magic_network = struct.unpack('!I', data[:4])[0]
+    if magic_network != HEARTBEAT_MAGIC_NUMBER:
+        return None
+
+    if not hmac_keys:
+        logging.warning('%s from %s but no HMAC keys loaded', label, address[0])
+        return None
+
+    timestamp = struct.unpack('!Q', data[4:12])[0]
+    hostname_bytes = data[12:-HEARTBEAT_HMAC_DIGEST_SIZE]
+    received_hmac = data[-HEARTBEAT_HMAC_DIGEST_SIZE:]
+    signed_data = data[:-HEARTBEAT_HMAC_DIGEST_SIZE]
+
+    verified = False
+    for key in hmac_keys:
+        expected = hmac_mod.new(key, signed_data, 'sha256').digest()
+        if hmac_mod.compare_digest(received_hmac, expected):
+            verified = True
+            break
+    if not verified:
+        logging.warning('%s from %s HMAC verification failed', label, address[0])
+        HEARTBEAT_REJECTED_TOTAL.labels(reason='hmac_failed').inc()
+        return None
+
+    delta = time.time() - timestamp
+    if delta < -60 or delta > 120:
+        logging.warning('%s from %s rejected: timestamp out of range (delta=%.0fs)', label, address[0], delta)
+        HEARTBEAT_REJECTED_TOTAL.labels(reason='timestamp_invalid').inc()
+        return None
+
+    try:
+        raw_hostname = hostname_bytes.decode('utf-8').strip('\x00').strip()
+    except UnicodeDecodeError:
+        logging.warning('%s from %s has invalid hostname encoding', label, address[0])
+        return None
+    return _validate_raw_hostname(raw_hostname, address, label)
+
+
+def _udp_listener(service, port, label, magic_numbers, min_packet_size,
                   lock, timestamps, stop_event,
                   cleanup_threshold, cleanup_age_seconds,
                   resolve_hostname, log_level=logging.INFO, on_start=None):
     """Generic UDP listener for magic-number-based host detection messages."""
+    if isinstance(magic_numbers, int):
+        magic_numbers = {magic_numbers}
+    else:
+        magic_numbers = set(magic_numbers)
     udp_ip = service.udp_ip if service.udp_ip else '::'
 
     try:
@@ -1521,6 +1607,9 @@ def _udp_listener(service, port, label, magic_number, min_packet_size,
             while not stop_event.is_set():
                 try:
                     data, address = sock.recvfrom(4096)
+                    # Normalize IPv4-mapped IPv6 addresses (::ffff:1.2.3.4 -> 1.2.3.4)
+                    if address[0].startswith('::ffff:'):
+                        address = (address[0][7:],) + address[1:]
 
                     if len(data) < min_packet_size:
                         continue
@@ -1528,7 +1617,7 @@ def _udp_listener(service, port, label, magic_number, min_packet_size,
                     magic_native = struct.unpack('I', data[:4])[0]
                     magic_network = struct.unpack('!I', data[:4])[0]
 
-                    if magic_native != magic_number and magic_network != magic_number:
+                    if magic_native not in magic_numbers and magic_network not in magic_numbers:
                         continue
 
                     hostname = resolve_hostname(data, address, label)
@@ -1563,7 +1652,7 @@ def _kdump_udp_listener(service: 'InstanceHAService') -> None:
         service,
         port=service.config.get_udp_port(),
         label='Kdump',
-        magic_number=KDUMP_MAGIC_NUMBER,
+        magic_numbers=KDUMP_MAGIC_NUMBER,
         min_packet_size=8,
         lock=service.kdump_lock,
         timestamps=service.kdump_hosts_timestamp,
@@ -1580,18 +1669,21 @@ def _heartbeat_udp_listener(service: 'InstanceHAService') -> None:
         with service.heartbeat_lock:
             service.heartbeat_listener_start_time = time.time()
 
+    def resolve_with_hmac(data, address, label):
+        return _resolve_hostname_packet(data, address, label, hmac_keys=service.heartbeat_hmac_keys)
+
     _udp_listener(
         service,
         port=service.config.get_heartbeat_port(),
         label='Heartbeat',
-        magic_number=HEARTBEAT_MAGIC_NUMBER,
-        min_packet_size=5,
+        magic_numbers=HEARTBEAT_MAGIC_NUMBER,
+        min_packet_size=HEARTBEAT_MIN_PACKET_SIZE,
         lock=service.heartbeat_lock,
         timestamps=service.heartbeat_hosts_timestamp,
         stop_event=service.heartbeat_listener_stop_event,
         cleanup_threshold=HEARTBEAT_CLEANUP_THRESHOLD,
         cleanup_age_seconds=HEARTBEAT_CLEANUP_AGE_SECONDS,
-        resolve_hostname=_resolve_hostname_packet,
+        resolve_hostname=resolve_with_hmac,
         log_level=logging.DEBUG,
         on_start=on_start,
     )
@@ -1763,7 +1855,8 @@ def _orchestrated_evacuate(connection, evacuables, service, host, service_id, ta
 
         phase_ok = _run_concurrent(
             lambda s: _server_evacuate_future(connection, s, target_host,
-                                              max_retries=max_retries),
+                                              max_retries=max_retries,
+                                              shutdown_event=service.shutdown_event),
             phase_servers,
             inner_workers,
             lambda s: s.id,
@@ -1791,7 +1884,8 @@ def _smart_evacuate(connection, evacuables, service, host, service_id, target_ho
     inner_workers = max(1, MAX_TOTAL_EVACUATION_THREADS // service.config.get_config_value('WORKERS'))
     all_succeeded = _run_concurrent(
         lambda s: _server_evacuate_future(connection, s, target_host,
-                                          max_retries=max_retries),
+                                          max_retries=max_retries,
+                                          shutdown_event=service.shutdown_event),
         evacuables,
         inner_workers,
         lambda s: s.id,
@@ -1938,12 +2032,17 @@ def _server_evacuation_status(connection, server) -> EvacuationStatus:
 
 
 def _monitor_evacuation(connection, server_id, response_uuid, start_time,
-                        max_retries=DEFAULT_EVACUATION_RETRIES) -> bool:
+                        max_retries=DEFAULT_EVACUATION_RETRIES,
+                        shutdown_event=None) -> bool:
     """Poll Nova migrations API until evacuation completes, errors out, or times out."""
     migration_error_count = 0
     api_error_count = 0
 
     while True:
+        if shutdown_event and shutdown_event.is_set():
+            logging.warning("Shutdown requested, aborting evacuation monitoring for %s", response_uuid)
+            return False
+
         if time.monotonic() - start_time > MAX_EVACUATION_TIMEOUT_SECONDS:
             logging.error("Evacuation of %s timed out after %d seconds. Giving up.",
                          response_uuid, MAX_EVACUATION_TIMEOUT_SECONDS)
@@ -1975,11 +2074,17 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
                         logging.warning("Re-issue of evacuation for %s failed: %s", server_id, retry_result.reason)
                 except Exception as retry_err:
                     logging.warning("Failed to re-issue evacuation for %s: %s", server_id, retry_err)
-                time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
+                if shutdown_event:
+                    shutdown_event.wait(EVACUATION_RETRY_WAIT_SECONDS)
+                else:
+                    time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
                 continue
 
             logging.debug("Evacuation of %s still in progress", response_uuid)
-            time.sleep(EVACUATION_POLL_INTERVAL_SECONDS)
+            if shutdown_event:
+                shutdown_event.wait(EVACUATION_POLL_INTERVAL_SECONDS)
+            else:
+                time.sleep(EVACUATION_POLL_INTERVAL_SECONDS)
 
         except Exception as e:
             api_error_count += 1
@@ -1992,11 +2097,15 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
                 return False
             logging.warning("Retrying evacuation status check for %s in %d seconds (API attempt %d/%d)...",
                            response_uuid, EVACUATION_RETRY_WAIT_SECONDS, api_error_count, MAX_API_RETRIES)
-            time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
+            if shutdown_event:
+                shutdown_event.wait(EVACUATION_RETRY_WAIT_SECONDS)
+            else:
+                time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
 
 
 def _server_evacuate_future(connection, server, target_host=None,
-                            max_retries=DEFAULT_EVACUATION_RETRIES) -> bool:
+                            max_retries=DEFAULT_EVACUATION_RETRIES,
+                            shutdown_event=None) -> bool:
     """Evacuate a server and monitor until completion."""
     if not hasattr(server, 'id'):
         logging.warning("Could not evacuate instance - missing server ID: %s",
@@ -2041,7 +2150,8 @@ def _server_evacuate_future(connection, server, target_host=None,
         time.sleep(INITIAL_EVACUATION_WAIT_SECONDS)
 
         result = _monitor_evacuation(connection, server.id, response.uuid, start_time,
-                                     max_retries=max_retries)
+                                     max_retries=max_retries,
+                                     shutdown_event=shutdown_event)
 
         if result:
             _emit_k8s_event(source_host, 'InstanceEvacuationSucceeded',
@@ -2299,8 +2409,7 @@ def _get_power_state(agent_type: str, **kwargs) -> Optional[str]:
         )
 
         try:
-            env = os.environ.copy()
-            env['IPMITOOL_PASSWORD'] = passwd
+            env = {'PATH': os.environ.get('PATH', '/usr/bin:/usr/sbin'), 'IPMITOOL_PASSWORD': passwd}
             cmd = ['ipmitool', '-I', 'lanplus', '-H', ip, '-U', user, '-E', '-p', port, 'power', 'status']
             cmd_output = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True, check=True, env=env)
             return cmd_output.stdout.strip().upper()
@@ -2541,8 +2650,7 @@ def _execute_ipmi_fence(host, action, fencing_data, timeout) -> bool:
     ipaddr, ipport, login, passwd = fencing_data["ipaddr"], fencing_data["ipport"], \
                                      fencing_data["login"], fencing_data["passwd"]
 
-    env = os.environ.copy()
-    env['IPMITOOL_PASSWORD'] = passwd
+    env = {'PATH': os.environ.get('PATH', '/usr/bin:/usr/sbin'), 'IPMITOOL_PASSWORD': passwd}
     cmd = ["ipmitool", "-I", "lanplus", "-H", ipaddr, "-U", login, "-E", "-p", ipport, "power", action]
 
     try:
@@ -3620,6 +3728,9 @@ def main():
             consecutive_failures += 1
             POLL_CONSECUTIVE_FAILURES.set(consecutive_failures)
             POLL_CYCLE_TOTAL.labels(result='error').inc()
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
+                service.ready = False
+                logging.warning("Readiness probe deactivated after %d consecutive failures", consecutive_failures)
             backoff = min(poll_interval * (2 ** consecutive_failures), MAX_NOVA_BACKOFF_SECONDS)
             logging.warning("Nova session expired or discovery failed (attempt %d): %s. "
                            "Reconnecting in %ds...", consecutive_failures, type(e).__name__, backoff)
@@ -3633,6 +3744,9 @@ def main():
             consecutive_failures += 1
             POLL_CONSECUTIVE_FAILURES.set(consecutive_failures)
             POLL_CYCLE_TOTAL.labels(result='error').inc()
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
+                service.ready = False
+                logging.warning("Readiness probe deactivated after %d consecutive failures", consecutive_failures)
             backoff = min(poll_interval * (2 ** consecutive_failures), MAX_NOVA_BACKOFF_SECONDS)
             logging.warning("Failed to query Nova API (attempt %d): %s. Retrying in %ds.",
                            consecutive_failures, e, backoff)

@@ -8,6 +8,7 @@ Tests that kdump and heartbeat UDP listeners work over IPv6:
 - Dual-stack (::) accepts both IPv4 and IPv6
 """
 
+import hmac as hmac_mod
 import os
 import unittest
 import time
@@ -24,6 +25,8 @@ import conftest  # noqa: F401
 import instanceha
 
 logging.getLogger().setLevel(logging.CRITICAL)
+
+_TEST_HMAC_KEY = b'\x01' * 32
 
 
 def _ipv6_available():
@@ -90,13 +93,16 @@ class TestHeartbeatIPv6(unittest.TestCase):
         self.service.heartbeat_hosts_timestamp.clear()
         self.service.heartbeat_listener_stop_event = threading.Event()
         self.service.udp_ip = '::1'
+        self.service.heartbeat_hmac_keys = [_TEST_HMAC_KEY]
 
     def tearDown(self):
         self.service.heartbeat_listener_stop_event.set()
 
     def _send_heartbeat_v6(self, port, hostname):
-        magic = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        payload = magic + hostname.encode('utf-8')
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()))
+        payload += hostname.encode('utf-8')
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
         sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         try:
             sock.sendto(payload, ('::1', port))
@@ -113,14 +119,14 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Heartbeat',
-                magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-                min_packet_size=5,
+                magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+                min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
                 cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-                resolve_hostname=instanceha._resolve_hostname_packet,
+                resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
                 on_start=listener_started.set,
             )
@@ -155,14 +161,14 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Heartbeat',
-                magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-                min_packet_size=5,
+                magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+                min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
                 cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-                resolve_hostname=instanceha._resolve_hostname_packet,
+                resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
                 on_start=listener_started.set,
             )
@@ -188,8 +194,8 @@ class TestHeartbeatIPv6(unittest.TestCase):
             for name in hostnames:
                 self.assertIn(name, self.service.heartbeat_hosts_timestamp)
 
-    def test_heartbeat_native_byte_order_ipv6(self):
-        """Verify native byte order magic also works over IPv6."""
+    def test_heartbeat_hbv2_ipv6(self):
+        """Verify HBV2 HMAC-authenticated packets work over IPv6."""
         port = _find_free_port_v6()
         listener_started = threading.Event()
 
@@ -198,14 +204,14 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Heartbeat',
-                magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-                min_packet_size=5,
+                magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+                min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
                 cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-                resolve_hostname=instanceha._resolve_hostname_packet,
+                resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
                 on_start=listener_started.set,
             )
@@ -214,18 +220,12 @@ class TestHeartbeatIPv6(unittest.TestCase):
         t.start()
         self.assertTrue(listener_started.wait(timeout=5), "Listener failed to start")
 
-        magic = struct.pack('I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        payload = magic + b'compute-native'
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        try:
-            sock.sendto(payload, ('::1', port))
-        finally:
-            sock.close()
+        self._send_heartbeat_v6(port, 'compute-hbv2')
 
         deadline = time.time() + 5
         while time.time() < deadline:
             with self.service.heartbeat_lock:
-                if 'compute-native' in self.service.heartbeat_hosts_timestamp:
+                if 'compute-hbv2' in self.service.heartbeat_hosts_timestamp:
                     break
             time.sleep(0.05)
 
@@ -233,7 +233,7 @@ class TestHeartbeatIPv6(unittest.TestCase):
         t.join(timeout=5)
 
         with self.service.heartbeat_lock:
-            self.assertIn('compute-native', self.service.heartbeat_hosts_timestamp)
+            self.assertIn('compute-hbv2', self.service.heartbeat_hosts_timestamp)
 
 
 @unittest.skipUnless(_ipv6_available(), "IPv6 loopback not available")
@@ -275,7 +275,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Kdump',
-                magic_number=instanceha.KDUMP_MAGIC_NUMBER,
+                magic_numbers=instanceha.KDUMP_MAGIC_NUMBER,
                 min_packet_size=8,
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
@@ -320,7 +320,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Kdump',
-                magic_number=instanceha.KDUMP_MAGIC_NUMBER,
+                magic_numbers=instanceha.KDUMP_MAGIC_NUMBER,
                 min_packet_size=8,
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
@@ -361,7 +361,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Kdump',
-                magic_number=instanceha.KDUMP_MAGIC_NUMBER,
+                magic_numbers=instanceha.KDUMP_MAGIC_NUMBER,
                 min_packet_size=8,
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
@@ -403,12 +403,20 @@ class TestDualStackListener(unittest.TestCase):
         self.service.heartbeat_hosts_timestamp.clear()
         self.service.heartbeat_listener_stop_event = threading.Event()
         self.service.udp_ip = ''
+        self.service.heartbeat_hmac_keys = [_TEST_HMAC_KEY]
 
     def tearDown(self):
         self.service.heartbeat_listener_stop_event.set()
 
+    def _build_hbv2_packet(self, hostname):
+        payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
+        payload += struct.pack('!Q', int(time.time()))
+        payload += hostname.encode('utf-8')
+        payload += hmac_mod.new(_TEST_HMAC_KEY, payload, 'sha256').digest()
+        return payload
+
     def test_dual_stack_receives_ipv6(self):
-        """Listener on :: receives IPv6 packets."""
+        """Listener on :: receives IPv6 HBV2 packets."""
         port = _find_free_port_v6()
         listener_started = threading.Event()
 
@@ -417,14 +425,14 @@ class TestDualStackListener(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Heartbeat',
-                magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-                min_packet_size=5,
+                magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+                min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
                 cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-                resolve_hostname=instanceha._resolve_hostname_packet,
+                resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
                 on_start=listener_started.set,
             )
@@ -433,8 +441,7 @@ class TestDualStackListener(unittest.TestCase):
         t.start()
         self.assertTrue(listener_started.wait(timeout=5), "Listener failed to start")
 
-        magic = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        payload = magic + b'dual-stack-v6'
+        payload = self._build_hbv2_packet('dual-stack-v6')
         sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         try:
             sock.sendto(payload, ('::1', port))
@@ -455,7 +462,7 @@ class TestDualStackListener(unittest.TestCase):
             self.assertIn('dual-stack-v6', self.service.heartbeat_hosts_timestamp)
 
     def test_dual_stack_receives_ipv4(self):
-        """Listener on :: receives IPv4 packets (mapped to IPv6)."""
+        """Listener on :: receives IPv4 HBV2 packets (mapped to IPv6)."""
         port = _find_free_port_v6()
         listener_started = threading.Event()
 
@@ -464,14 +471,14 @@ class TestDualStackListener(unittest.TestCase):
                 self.service,
                 port=port,
                 label='Heartbeat',
-                magic_number=instanceha.HEARTBEAT_MAGIC_NUMBER,
-                min_packet_size=5,
+                magic_numbers=instanceha.HEARTBEAT_MAGIC_NUMBER,
+                min_packet_size=instanceha.HEARTBEAT_MIN_PACKET_SIZE,
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
                 cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
-                resolve_hostname=instanceha._resolve_hostname_packet,
+                resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
                 on_start=listener_started.set,
             )
@@ -480,8 +487,7 @@ class TestDualStackListener(unittest.TestCase):
         t.start()
         self.assertTrue(listener_started.wait(timeout=5), "Listener failed to start")
 
-        magic = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
-        payload = magic + b'dual-stack-v4'
+        payload = self._build_hbv2_packet('dual-stack-v4')
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.sendto(payload, ('127.0.0.1', port))

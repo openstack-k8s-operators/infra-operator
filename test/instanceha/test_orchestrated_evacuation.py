@@ -327,7 +327,8 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         instanceha._orchestrated_evacuate(conn, [server], service, 'host1', 'svc-1',
                                           target_host='reserved-01')
         mock_future.assert_called_once_with(conn, server, 'reserved-01',
-                                                   max_retries=5)
+                                                   max_retries=5,
+                                                   shutdown_event=service.shutdown_event)
 
     @patch('instanceha._update_service_disable_reason')
     @patch('instanceha._server_evacuate_future')

@@ -23,8 +23,8 @@ import (
 // MetricsService exposes the InstanceHA metrics endpoint for Prometheus scraping
 func MetricsService(instance *instancehav1.InstanceHa) *corev1.Service {
 	svcLabels := labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{
-		common.AppSelector: "instanceha",
-		"metrics":          "enabled",
+		"service": "instanceha",
+		"metrics": "enabled",
 	})
 
 	details := &service.GenericServiceDetails{
@@ -32,7 +32,7 @@ func MetricsService(instance *instancehav1.InstanceHa) *corev1.Service {
 		Namespace: instance.GetNamespace(),
 		Labels:    svcLabels,
 		Selector: map[string]string{
-			common.AppSelector: "instanceha",
+			common.AppSelector: instance.GetName(),
 		},
 		Port: service.GenericServicePort{
 			Name:     "metrics",

@@ -1515,6 +1515,10 @@ func CreateInstanceHaConfig(namespace string, spec map[string]any) client.Object
 func GetDefaultInstanceHaSpec() map[string]any {
 	return map[string]any{
 		"containerImage": "test-instanceha-image:latest",
+		"metricsTLS": map[string]any{
+			"minTLSVersion": "1.2",
+			"cipherSuites":  "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA",
+		},
 	}
 }
 

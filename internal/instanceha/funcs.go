@@ -40,6 +40,8 @@ func Deployment(
 	containerImage string,
 	topology *topologyv1.Topology,
 	acSecretName string,
+	heartbeatHMACSecretName string,
+	metricsTLS *instancehav1.InstanceHaMetricsTLS,
 ) *appsv1.Deployment {
 	replicas := int32(1)
 
@@ -76,6 +78,26 @@ func Deployment(
 		})
 	}
 
+	// Heartbeat HMAC key volume and mounts
+	if heartbeatHMACSecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "heartbeat-hmac",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  heartbeatHMACSecretName,
+					DefaultMode: ptr.To[int32](0o440),
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "heartbeat-hmac",
+			MountPath: "/secrets/heartbeat-hmac",
+			ReadOnly:  true,
+		})
+		envVars["HEARTBEAT_HMAC_KEY_PATH"] = env.SetValue("/secrets/heartbeat-hmac/hmac-key")
+		envVars["HEARTBEAT_HMAC_KEY_PREVIOUS_PATH"] = env.SetValue("/secrets/heartbeat-hmac/hmac-key-previous")
+	}
+
 	livenessProbe := &corev1.Probe{
 		TimeoutSeconds:      30,
 		PeriodSeconds:       30,
@@ -105,10 +127,10 @@ func Deployment(
 	}
 
 	// add metrics TLS cert if defined
-	if instance.Spec.MetricsTLS.Enabled() {
+	if metricsTLS != nil && metricsTLS.Enabled() {
 		certSecretName := DefaultMetricsCertSecret
-		if instance.Spec.MetricsTLS.SecretName != nil && *instance.Spec.MetricsTLS.SecretName != "" {
-			certSecretName = *instance.Spec.MetricsTLS.SecretName
+		if metricsTLS.SecretName != nil && *metricsTLS.SecretName != "" {
+			certSecretName = *metricsTLS.SecretName
 		}
 		metricsSvc := tls.Service{
 			SecretName: certSecretName,
@@ -120,6 +142,12 @@ func Deployment(
 
 		envVars["METRICS_TLS_CERT"] = env.SetValue(MetricsCertPath)
 		envVars["METRICS_TLS_KEY"] = env.SetValue(MetricsKeyPath)
+		if metricsTLS.MinTLSVersion != "" {
+			envVars["METRICS_TLS_MIN_VERSION"] = env.SetValue(metricsTLS.MinTLSVersion)
+		}
+		if metricsTLS.CipherSuites != "" {
+			envVars["METRICS_TLS_CIPHERS"] = env.SetValue(metricsTLS.CipherSuites)
+		}
 
 		livenessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
 		readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
@@ -225,16 +253,19 @@ func instancehaPodVolumeMounts() []corev1.VolumeMount {
 			Name:      "openstack-config",
 			MountPath: "/home/cloud-admin/.config/openstack/clouds.yaml",
 			SubPath:   "clouds.yaml",
+			ReadOnly:  true,
 		},
 		{
 			Name:      "openstack-config-secret",
 			MountPath: "/home/cloud-admin/.config/openstack/secure.yaml",
 			SubPath:   "secure.yaml",
+			ReadOnly:  true,
 		},
 		{
 			Name:      "fencing-secret",
 			MountPath: "/secrets/fencing.yaml",
 			SubPath:   "fencing.yaml",
+			ReadOnly:  true,
 		},
 		{
 			Name:      "instanceha-script",

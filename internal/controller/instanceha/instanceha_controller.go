@@ -19,6 +19,8 @@ package instanceha
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -37,6 +40,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -80,7 +84,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=instanceha.openstack.org,resources=instancehas/finalizers,verbs=update;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
 // service account, role, rolebinding
@@ -89,7 +93,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update;patch
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
-// +kubebuilder:rbac:groups="",resources=pods,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
@@ -160,6 +164,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	cl := condition.CreateList(
 		condition.UnknownCondition(condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage),
 		condition.UnknownCondition(condition.InputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
+		condition.UnknownCondition(condition.TLSInputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
 		condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
 		// service account, role, rolebinding conditions
 		condition.UnknownCondition(condition.ServiceAccountReadyCondition, condition.InitReason, condition.ServiceAccountReadyInitMessage),
@@ -171,6 +176,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.Conditions.Init(&cl)
 	instance.Status.ObservedGeneration = instance.Generation
 
+	// If we're not deleting this and the service object doesn't have our finalizer, add it.
+	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) || isNewInstance {
+		return ctrl.Result{}, nil
+	}
+
 	//// mark
 	if instance.Status.NetworkAttachments == nil {
 		instance.Status.NetworkAttachments = map[string][]string{}
@@ -180,6 +190,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if instance.Spec.TopologyRef != nil {
 		c := condition.UnknownCondition(condition.TopologyReadyCondition, condition.InitReason, condition.TopologyReadyInitMessage)
 		cl.Set(c)
+	}
+
+	// Handle service delete
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, helper)
 	}
 
 	// Service account, role, binding
@@ -193,7 +208,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		{
 			APIGroups: []string{""},
 			Resources: []string{"pods"},
-			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
 			APIGroups: []string{""},
@@ -209,7 +224,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	deploymentLabels := map[string]string{
-		common.AppSelector: "instanceha",
+		common.AppSelector: instance.Name,
 	}
 
 	configVars := make(map[string]env.Setter)
@@ -392,12 +407,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	metricsTLSExplicit := instance.Spec.MetricsTLS.Enabled()
+	metricsTLS := instance.Spec.MetricsTLS.DeepCopy()
 	if !metricsTLSExplicit {
 		certName := instanceha.DefaultMetricsCertSecret
-		instance.Spec.MetricsTLS.SecretName = &certName
+		metricsTLS.SecretName = &certName
 	}
 
-	hash, err := instance.Spec.MetricsTLS.ValidateCertSecret(ctx, helper, instance.Namespace)
+	hash, err := metricsTLS.ValidateCertSecret(ctx, helper, instance.Namespace)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			if metricsTLSExplicit {
@@ -409,7 +425,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				return ctrl.Result{}, nil
 			}
 			// Auto-detect: default cert not found, proceed without TLS
-			instance.Spec.MetricsTLS.SecretName = nil
+			metricsTLS.SecretName = nil
 		} else {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.TLSInputReadyCondition,
@@ -455,6 +471,104 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	configVars[scriptConfigMapName] = env.SetValue(scriptConfigMapHash)
 
 	// end custom script inject
+
+	// Ensure heartbeat HMAC key secret exists (auto-generated)
+	heartbeatHMACSecretName := instance.Name + "-heartbeat-hmac"
+	hmacSecret := &corev1.Secret{}
+	err = r.Get(ctx, types.NamespacedName{Name: heartbeatHMACSecretName, Namespace: instance.Namespace}, hmacSecret)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			key := make([]byte, 32)
+			if _, err = rand.Read(key); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to generate heartbeat HMAC key: %w", err)
+			}
+			hmacSecret = &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      heartbeatHMACSecretName,
+					Namespace: instance.Namespace,
+					Labels: labels.GetLabels(instance, labels.GetGroupLabel("instanceha"), map[string]string{
+						"backup.openstack.org/category":      "controlplane",
+						"backup.openstack.org/restore":       "true",
+						"backup.openstack.org/restore-order": "10",
+					}),
+				},
+				Data: map[string][]byte{
+					"hmac-key":          []byte(hex.EncodeToString(key)),
+					"hmac-key-previous": {},
+				},
+			}
+			if err = controllerutil.SetControllerReference(instance, hmacSecret, r.Scheme); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to set owner reference on HMAC secret: %w", err)
+			}
+			if err = r.Create(ctx, hmacSecret); err != nil {
+				if !k8s_errors.IsAlreadyExists(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to create heartbeat HMAC secret: %w", err)
+				}
+				if err = r.Get(ctx, types.NamespacedName{Name: heartbeatHMACSecretName, Namespace: instance.Namespace}, hmacSecret); err != nil {
+					return ctrl.Result{}, fmt.Errorf("failed to get existing heartbeat HMAC secret: %w", err)
+				}
+			} else {
+				Log.Info("Created heartbeat HMAC key secret", "secret", heartbeatHMACSecretName)
+			}
+		} else {
+			return ctrl.Result{}, fmt.Errorf("failed to get heartbeat HMAC secret: %w", err)
+		}
+	}
+	instance.Status.HeartbeatHMACSecret = heartbeatHMACSecretName
+
+	// Handle annotation-based key rotation.
+	//
+	// The annotation value is used as an idempotency guard:
+	// - "true" (or any non-ResourceVersion value) = rotation requested
+	// - "<resourceVersion>" = rotation completed, waiting for annotation removal
+	//
+	// This prevents double-rotation if the annotation removal Patch fails:
+	// the next reconcile sees the value matches the secret's ResourceVersion
+	// and skips straight to removing the annotation.
+	const rotateAnnotation = "instanceha.openstack.org/rotate-hmac-key"
+	if instance.Annotations[rotateAnnotation] != "" {
+		alreadyRotated := instance.Annotations[rotateAnnotation] == hmacSecret.ResourceVersion
+
+		if !alreadyRotated {
+			currentKey := hmacSecret.Data["hmac-key"]
+			newKey := make([]byte, 32)
+			if _, err = rand.Read(newKey); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to generate new heartbeat HMAC key: %w", err)
+			}
+			hmacSecret.Data["hmac-key-previous"] = currentKey
+			hmacSecret.Data["hmac-key"] = []byte(hex.EncodeToString(newKey))
+			if err = r.Update(ctx, hmacSecret); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to rotate heartbeat HMAC key: %w", err)
+			}
+			Log.Info("Rotated heartbeat HMAC key", "secret", heartbeatHMACSecretName)
+
+			// Stamp the annotation with the new secret ResourceVersion so a
+			// requeue after a failed removal doesn't re-rotate.
+			stampBase := client.MergeFrom(instance.DeepCopy())
+			instance.Annotations[rotateAnnotation] = hmacSecret.ResourceVersion
+			if err = r.Patch(ctx, instance, stampBase); err != nil {
+				Log.Info("Failed to stamp rotation version, will retry", "error", err)
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		} else {
+			Log.Info("HMAC key rotation already applied, removing annotation")
+		}
+
+		// Remove the annotation via MergeFrom Patch to avoid conflicts
+		// with the deferred PatchInstance.
+		metaBase := client.MergeFrom(instance.DeepCopy())
+		delete(instance.Annotations, rotateAnnotation)
+		if err = r.Patch(ctx, instance, metaBase); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to remove rotate annotation: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	_, hmacSecretHash, err := secret.GetSecret(ctx, helper, heartbeatHMACSecretName, instance.Namespace)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to hash heartbeat HMAC secret: %w", err)
+	}
+	configVars[heartbeatHMACSecretName] = env.SetValue(hmacSecretHash)
 
 	// Calculate the config hash AFTER adding the script ConfigMap hash
 	configVarsHash, err := util.HashOfInputHashes(configVars)
@@ -560,7 +674,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
 
-	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology, acSecretName), time.Duration(5)*time.Second)
+	// Delete existing Deployment if its selector doesn't match the desired labels.
+	// Deployment selectors are immutable after creation, so a mismatch (e.g. from
+	// upgrading to instance-scoped labels) requires a delete+recreate.
+	existingDep := &appsv1.Deployment{}
+	if err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, existingDep); err == nil {
+		if existingDep.Spec.Selector != nil {
+			if val, ok := existingDep.Spec.Selector.MatchLabels[common.AppSelector]; ok && val != deploymentLabels[common.AppSelector] {
+				Log.Info("Deleting Deployment with stale selector for recreation",
+					"oldSelector", val, "newSelector", deploymentLabels[common.AppSelector])
+				if err = r.Delete(ctx, existingDep); err != nil && !k8s_errors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("failed to delete Deployment with stale selector: %w", err)
+				}
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+		}
+	}
+
+	deployment := commondeployment.NewDeployment(instanceha.Deployment(instance, deploymentLabels, serviceAnnotations, cloud, configVarsHash, containerImage, topology, acSecretName, heartbeatHMACSecretName, metricsTLS), time.Duration(5)*time.Second)
 	sfres, sferr := deployment.CreateOrPatch(ctx, helper)
 	if sferr != nil {
 		return sfres, sferr
@@ -725,6 +856,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
@@ -773,6 +905,27 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 	}
 
 	return requests
+}
+
+func (r *Reconciler) reconcileDelete(ctx context.Context, instance *instancehav1.InstanceHa, helper *helper.Helper) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service delete")
+
+	// Remove finalizer on the Topology CR
+	if ctrlResult, err := topologyv1.EnsureDeletedTopologyRef(
+		ctx,
+		helper,
+		instance.Status.LastAppliedTopology,
+		instance.Name,
+	); err != nil {
+		return ctrlResult, err
+	}
+
+	// Service is deleted so remove the finalizer.
+	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
+	Log.Info("Reconciled Service delete successfully")
+
+	return ctrl.Result{}, nil
 }
 
 // GetContainerImage returns the container image to use for the instance, either from

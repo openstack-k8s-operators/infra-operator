@@ -45,6 +45,7 @@ InstanceHA runs as a Kubernetes-managed workload alongside the OpenStack control
 │  ConfigMap: clouds.yaml    Secret: secure.yaml                   │
 │  ConfigMap: config.yaml    Secret: fencing.yaml                  │
 │                            Secret: ac-credentials (optional)     │
+│                            Secret: heartbeat-hmac (auto-gen)     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -203,7 +204,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      service: instanceha
+      service: instanceha  # Replace with your CR name if different
   podMetricsEndpoints:
     - port: metrics
       path: /metrics
@@ -212,7 +213,7 @@ spec:
 
 ### Graceful Shutdown
 
-When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA finishes any in-flight fencing or evacuation work before exiting. The Deployment is configured with a 30-second termination grace period. The agent's poll loop checks a shutdown flag between cycles, so no evacuation is interrupted mid-operation.
+When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA finishes any in-flight fencing or evacuation work before exiting. The Deployment is configured with a 30-second termination grace period. The agent's poll loop and evacuation workers check a shutdown flag between cycles, allowing timely response to shutdown signals.
 
 ---
 
@@ -334,7 +335,7 @@ metadata:
 spec:
   type: LoadBalancer
   selector:
-    service: instanceha
+    service: instanceha  # Replace with your CR name if different
   ports:
   - name: kdump
     port: 7410
@@ -633,24 +634,33 @@ config:
   HEARTBEAT_TIMEOUT: "120"   # Seconds without a heartbeat before marking host down
 ```
 
-### Compute Node Setup
+### HMAC Authentication
 
-Each compute node must run a heartbeat sender that periodically sends a UDP packet to the InstanceHA pod. The packet format is a 4-byte magic number (`0x48425631`) followed by the hostname. See `docs/instanceha_heartbeat_performance.md` for a reference sender script and scalability benchmarks (tested to 1000 nodes).
+Heartbeat packets are authenticated with HMAC-SHA256 to prevent spoofing. The operator auto-generates a 32-byte HMAC key in a Kubernetes Secret (`<instance-name>-heartbeat-hmac`, e.g., `instanceha-heartbeat-hmac` for a CR named `instanceha`) during reconciliation. The key is mounted into the InstanceHA pod and distributed to compute nodes via the EDPM dataplane service.
 
-The recommended way to deploy the heartbeat sender is via the `instanceha-monitoring` EDPM service:
+The packet format includes a timestamp for replay protection (packets older than 120 seconds are rejected).
 
-**1. Create an OpenStackDataPlaneService CR:**
+**Key rotation** is supported via annotation:
 
-```yaml
-apiVersion: dataplane.openstack.org/v1beta1
-kind: OpenStackDataPlaneService
-metadata:
-  name: instanceha-monitoring
-spec:
-  playbook: osp.edpm.instanceha_monitoring
+```bash
+kubectl annotate instanceha instanceha instanceha.openstack.org/rotate-hmac-key=true
 ```
 
-**2. Add the service to your OpenStackDataPlaneNodeSet:**
+This copies the current key to `hmac-key-previous`, generates a new key, and removes the annotation. The receiver accepts both keys during the rotation window. After redeploying compute nodes with the new key, the previous key can be cleared:
+
+```bash
+kubectl patch secret instanceha-heartbeat-hmac -p '{"data":{"hmac-key-previous":""}}'
+```
+
+Replace `instanceha-heartbeat-hmac` with `<instance-name>-heartbeat-hmac` if your CR has a different name.
+
+The secret name is published in `status.heartbeatHMACSecret` for integration with the EDPM dataplane operator.
+
+### Compute Node Setup
+
+Each compute node runs a heartbeat sender deployed via the `instanceha-monitoring` EDPM service. The sender signs packets with HMAC-SHA256 using the key automatically distributed from the HMAC Kubernetes Secret. See `docs/instanceha_heartbeat_performance.md` for scalability benchmarks (tested to 1000 nodes).
+
+**1. Add the service to your OpenStackDataPlaneNodeSet:**
 
 ```yaml
 apiVersion: dataplane.openstack.org/v1beta1
@@ -667,7 +677,9 @@ spec:
     - instanceha-monitoring
 ```
 
-**3. Set the required variables:**
+The `instanceha-monitoring` OpenStackDataPlaneService is pre-defined and mounts the `instanceha-heartbeat-hmac` secret as a dataSource by default. This matches a CR named `instanceha`. For CRs with a different name, create a custom `OpenStackDataPlaneService` with the correct `secretRef` (`<instance-name>-heartbeat-hmac`).
+
+**2. Set the required variables:**
 
 Pass the variables via `nodeTemplate.ansible.ansibleVars` or per-node overrides in the nodeset:
 
@@ -812,6 +824,8 @@ Each instance is fully independent — no cross-region communication or coordina
 | `nodeSelector` | map | none | Kubernetes node placement constraints |
 | `networkAttachments` | []string | none | Additional Multus network attachments |
 | `caBundleSecretName` | string | none | Secret with CA certificates for TLS |
+| `metricsTLS.minTLSVersion` | string | `"1.2"` | Minimum TLS version for the metrics endpoint (`"1.2"` or `"1.3"`) |
+| `metricsTLS.cipherSuites` | string | `"HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"` | Allowed TLS cipher suites (OpenSSL format) |
 | `disabled` | string | `"False"` | `"True"` to disable fencing and evacuation |
 | `topologyRef` | object | none | Reference to a Topology CR for pod placement |
 

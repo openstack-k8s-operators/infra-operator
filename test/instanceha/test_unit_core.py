@@ -296,7 +296,7 @@ class TestInstanceHAService(unittest.TestCase):
         self.assertEqual(self.service.config, self.mock_config)
         self.assertEqual(self.service.cloud_client, self.mock_cloud_client)
         self.assertEqual(self.service.current_hash, "")
-        self.assertTrue(self.service.hash_update_successful)
+        self.assertFalse(self.service.hash_update_successful)
 
     def test_get_connection(self):
         """Test cloud connection retrieval."""
@@ -470,7 +470,7 @@ class TestInstanceHAService(unittest.TestCase):
         """Test health hash update functionality."""
         # Initial state
         self.assertEqual(self.service.current_hash, "")
-        self.assertTrue(self.service.hash_update_successful)
+        self.assertFalse(self.service.hash_update_successful)
 
         # First update should set hash
         self.service.update_health_hash(hash_interval=0)  # Force immediate update

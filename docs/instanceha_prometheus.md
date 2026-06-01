@@ -64,7 +64,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      service: instanceha
+      service: instanceha  # Replace with your CR name if different
   podMetricsEndpoints:
     - port: metrics
       path: /metrics
