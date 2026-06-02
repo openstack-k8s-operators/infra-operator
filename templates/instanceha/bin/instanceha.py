@@ -1,5 +1,6 @@
 #!/usr/libexec/platform-python -tt
 
+import copy
 import fnmatch
 import os
 import sys
@@ -177,6 +178,15 @@ HEARTBEAT_CLIFF_TOTAL = Counter(
     'instanceha_heartbeat_cliff_total',
     'Times fencing was skipped due to sudden heartbeat loss',
 )
+LEADER_ELECTION_IS_LEADER = Gauge(
+    'instanceha_leader_election_is_leader',
+    'Whether this pod is the current leader (1=leader, 0=standby)',
+)
+LEADER_ELECTION_TRANSITIONS = Counter(
+    'instanceha_leader_election_transitions_total',
+    'Leader election state transitions',
+    ['transition'],
+)
 
 
 # Enums
@@ -275,6 +285,16 @@ def _sanitize_message(msg: str) -> str:
         else:
             msg = pattern.sub(f'{secret_word}=***', msg)
     return msg
+
+
+_NANOSECOND_RE = re.compile(r'(\.\d{6})\d+')
+
+
+def _parse_k8s_timestamp(ts: str) -> datetime:
+    """Parse a Kubernetes ISO 8601 timestamp, truncating nanoseconds for Python 3.9."""
+    ts = ts.rstrip('Z')
+    ts = _NANOSECOND_RE.sub(r'\1', ts)
+    return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
 
 
 def _make_disable_reason(prefix, suffix=""):
@@ -684,6 +704,7 @@ class ConfigManager:
         'KDUMP_TIMEOUT': ConfigItem('int', 30, 5, 300),
         'CHECK_HEARTBEAT': ConfigItem('bool', False),
         'HEARTBEAT_TIMEOUT': ConfigItem('int', 120, 30, 600),
+        'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 0, 100),
         'DISABLED': ConfigItem('bool', False),
         'SSL_VERIFY': ConfigItem('bool', True),
         'FENCING_TIMEOUT': ConfigItem('int', 30, 5, 120),
@@ -798,7 +819,9 @@ class InstanceHAService(CloudConnectionProvider):
         self._last_hash_time = 0
         self._previous_hash = ""
         self.ready = False
-        self.k8s_api_reachable = True
+        self.k8s_api_reachable = False
+        self.is_leader = False
+        self.leader_election_enabled = False
 
         # Caching
         self._host_servers_cache = {}
@@ -1407,26 +1430,175 @@ class InstanceHAService(CloudConnectionProvider):
         consecutive_failures = 0
         max_failures = 3
         while not self.shutdown_event.is_set():
-            interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
-            if _check_k8s_api_reachable():
-                if consecutive_failures > 0:
-                    logging.info("K8s API connectivity restored after %d failures",
-                                 consecutive_failures)
-                consecutive_failures = 0
-                self.k8s_api_reachable = True
-                K8S_API_REACHABLE.set(1)
-            else:
+            try:
+                interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
+                if _check_k8s_api_reachable():
+                    if consecutive_failures > 0:
+                        logging.info("K8s API connectivity restored after %d failures",
+                                     consecutive_failures)
+                    consecutive_failures = 0
+                    self.k8s_api_reachable = True
+                    K8S_API_REACHABLE.set(1)
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        if self.k8s_api_reachable:
+                            logging.warning(
+                                "K8s API unreachable for %d consecutive checks — "
+                                "possible network partition, marking not ready",
+                                consecutive_failures)
+                            self.k8s_api_reachable = False
+                            self.ready = False
+                            K8S_API_REACHABLE.set(0)
+            except Exception as e:
+                logging.error("K8s health check error: %s", e, exc_info=True)
                 consecutive_failures += 1
-                if consecutive_failures >= max_failures:
-                    if self.k8s_api_reachable:
-                        logging.warning(
-                            "K8s API unreachable for %d consecutive checks — "
-                            "possible network partition, marking not ready",
-                            consecutive_failures)
-                        self.k8s_api_reachable = False
-                        self.ready = False
-                        K8S_API_REACHABLE.set(0)
             self.shutdown_event.wait(interval)
+
+    def start_leader_election(self):
+        """Start leader election if multi-replica mode is enabled."""
+        self.leader_election_enabled = os.getenv(
+            'INSTANCEHA_LEADER_ELECTION', 'false').lower() == 'true'
+
+        if not self.leader_election_enabled:
+            self.is_leader = True
+            LEADER_ELECTION_IS_LEADER.set(1)
+            logging.info("Leader election disabled (single replica), acting as leader")
+            return
+
+        self._lease_name = os.getenv('INSTANCEHA_LEASE_NAME', '')
+        self._lease_duration = int(os.getenv('INSTANCEHA_LEASE_DURATION', '15'))
+        self._lease_renew_deadline = int(os.getenv('INSTANCEHA_LEASE_RENEW_DEADLINE', '10'))
+        self._lease_retry_period = int(os.getenv('INSTANCEHA_LEASE_RETRY_PERIOD', '2'))
+        self._holder_identity = os.getenv('POD_NAME', '')
+
+        thread = threading.Thread(target=self._run_leader_election)
+        thread.daemon = True
+        thread.start()
+        logging.info(
+            "Leader election started (lease=%s, duration=%ds, retry=%ds)",
+            self._lease_name, self._lease_duration, self._lease_retry_period)
+
+    def _run_leader_election(self):
+        """Leader election loop: acquire or renew the Lease."""
+        _, namespace = _get_k8s_credentials()
+        renew_failure_start = None
+
+        while not self.shutdown_event.is_set():
+            try:
+                if self.is_leader:
+                    if self._try_renew_lease(namespace):
+                        renew_failure_start = None
+                    else:
+                        now = time.monotonic()
+                        if renew_failure_start is None:
+                            renew_failure_start = now
+                        elapsed = now - renew_failure_start
+                        if elapsed >= self._lease_renew_deadline:
+                            logging.warning("Failed to renew lease within deadline (%ds), lost leadership",
+                                            self._lease_renew_deadline)
+                            self._demote_leader(namespace)
+                            renew_failure_start = None
+                        else:
+                            logging.warning("Lease renew failed (%.1fs of %ds deadline elapsed)",
+                                            elapsed, self._lease_renew_deadline)
+                else:
+                    if self._try_acquire_lease(namespace):
+                        logging.info("Acquired leader lease")
+                        self.is_leader = True
+                        LEADER_ELECTION_IS_LEADER.set(1)
+                        LEADER_ELECTION_TRANSITIONS.labels(transition='acquired').inc()
+                        _patch_pod_leader_label(self._holder_identity, namespace, True)
+                        _emit_k8s_event(
+                            self._holder_identity, 'LeaderAcquired',
+                            'Acquired leader lease — starting fencing')
+            except Exception as e:
+                logging.error("Leader election error: %s", e, exc_info=True)
+                if self.is_leader:
+                    now = time.monotonic()
+                    if renew_failure_start is None:
+                        renew_failure_start = now
+                    if now - renew_failure_start >= self._lease_renew_deadline:
+                        self._demote_leader(namespace)
+                        renew_failure_start = None
+
+            self.shutdown_event.wait(self._lease_retry_period)
+
+    def _demote_leader(self, namespace):
+        """Demote this pod from leader status."""
+        self.is_leader = False
+        self.ready = False
+        LEADER_ELECTION_IS_LEADER.set(0)
+        LEADER_ELECTION_TRANSITIONS.labels(transition='lost').inc()
+        _patch_pod_leader_label(self._holder_identity, namespace, False)
+        _emit_k8s_event(
+            self._holder_identity, 'LeaderLost',
+            'Lost leader lease — stopping fencing',
+            event_type='Warning')
+
+    def _try_acquire_lease(self, namespace):
+        """Attempt to acquire the leader lease. Returns True if acquired."""
+        lease = _get_lease(self._lease_name, namespace)
+
+        if lease is None:
+            return _create_lease(
+                self._lease_name, namespace,
+                self._holder_identity, self._lease_duration)
+
+        spec = lease.get('spec', {})
+        holder = spec.get('holderIdentity', '')
+
+        if holder == self._holder_identity:
+            return self._try_renew_lease(namespace, lease)
+
+        renew_time_str = spec.get('renewTime', '')
+        duration = spec.get('leaseDurationSeconds', self._lease_duration)
+
+        if renew_time_str:
+            renew_time = _parse_k8s_timestamp(renew_time_str)
+            expiry = renew_time + timedelta(seconds=duration)
+            if datetime.now(timezone.utc) > expiry:
+                self._inherit_heartbeat_count(lease)
+                return _update_lease(
+                    self._lease_name, namespace, lease,
+                    self._holder_identity, self._lease_duration)
+
+        return False
+
+    def _inherit_heartbeat_count(self, lease):
+        """Read heartbeat active count from the previous leader's Lease annotations."""
+        annotations = lease.get('metadata', {}).get('annotations', {})
+        count_str = annotations.get('instanceha.openstack.org/heartbeat-active-count', '')
+        if count_str:
+            try:
+                count = int(count_str)
+                self.heartbeat_previous_active_count = count
+                logging.info("Inherited heartbeat active count %d from previous leader", count)
+            except ValueError:
+                pass
+
+    def _try_renew_lease(self, namespace, lease=None):
+        """Attempt to renew the leader lease. Returns True if renewed."""
+        if lease is None:
+            lease = _get_lease(self._lease_name, namespace)
+        if lease is None:
+            return False
+
+        holder = lease.get('spec', {}).get('holderIdentity', '')
+        if holder != self._holder_identity:
+            return False
+
+        annotations = {
+            'instanceha.openstack.org/heartbeat-active-count':
+                str(self.heartbeat_previous_active_count),
+        }
+        result = _update_lease(
+            self._lease_name, namespace, lease,
+            self._holder_identity, self._lease_duration,
+            annotations=annotations)
+        if result:
+            LEADER_ELECTION_TRANSITIONS.labels(transition='renewed').inc()
+        return result
 
     def _run_health_check_server(self):
         """Simple health check server implementation."""
@@ -1451,6 +1623,19 @@ class InstanceHAService(CloudConnectionProvider):
                         self.send_header("Content-type", "text/plain")
                         self.end_headers()
                         self.wfile.write(b"not ready")
+                    return
+
+                if self.path == '/leader':
+                    if service_instance.is_leader:
+                        self.send_response(200)
+                        self.send_header("Content-type", "text/plain")
+                        self.end_headers()
+                        self.wfile.write(b"leader")
+                    else:
+                        self.send_response(503)
+                        self.send_header("Content-type", "text/plain")
+                        self.end_headers()
+                        self.wfile.write(b"standby")
                     return
 
                 if self.path == '/metrics':
@@ -2788,6 +2973,10 @@ def _host_fence(host, action, service):
         logging.error("Invalid fence parameters: missing host")
         return False
 
+    if service.leader_election_enabled and not service.is_leader:
+        logging.warning("Aborting fence of %s — leadership lost", host)
+        return False
+
     # Validate action parameter at entry point
     if not validate_input(action, 'power_action', "host fencing"):
         logging.error("Invalid fence action: %s", action)
@@ -2981,13 +3170,25 @@ _K8S_CA_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
 _K8S_API_BASE = 'https://kubernetes.default.svc'
 
 
+_K8S_NAMESPACE_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+
+
 def _get_k8s_credentials():
     """Read ServiceAccount token and namespace from the pod filesystem."""
     try:
         with open(_K8S_TOKEN_PATH, 'r') as f:
             token = f.read().strip()
         namespace = os.environ.get('POD_NAMESPACE', '')
+        if not namespace:
+            try:
+                with open(_K8S_NAMESPACE_PATH, 'r') as f:
+                    namespace = f.read().strip()
+            except (IOError, OSError):
+                pass
         if not token or not namespace:
+            logging.error("K8s credentials unavailable: token=%s, namespace=%s",
+                          'present' if token else 'missing',
+                          'present' if namespace else 'missing')
             return None, None
         return token, namespace
     except (IOError, OSError):
@@ -3007,9 +3208,116 @@ def _check_k8s_api_reachable():
             verify=_K8S_CA_PATH,
             timeout=5,
         )
-        return response.status_code in (200, 403)
+        return response.status_code < 500
     except Exception:
         return False
+
+
+_LEASE_API_PATH = '/apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}'
+
+
+def _get_lease(lease_name, namespace):
+    """GET a Lease object. Returns the JSON body or None if not found."""
+    token, _ = _get_k8s_credentials()
+    if not token:
+        return None
+    headers = {'Authorization': f'Bearer {token}'}
+    url = f"{_K8S_API_BASE}{_LEASE_API_PATH.format(namespace=namespace, name=lease_name)}"
+    try:
+        response = requests.get(url, headers=headers, verify=_K8S_CA_PATH, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception:
+        return None
+
+
+def _create_lease(lease_name, namespace, holder_identity, lease_duration_seconds):
+    """Create a new Lease. Returns True on success."""
+    token, _ = _get_k8s_credentials()
+    if not token:
+        return False
+    now = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    lease_body = {
+        'apiVersion': 'coordination.k8s.io/v1',
+        'kind': 'Lease',
+        'metadata': {
+            'name': lease_name,
+            'namespace': namespace,
+        },
+        'spec': {
+            'holderIdentity': holder_identity,
+            'leaseDurationSeconds': lease_duration_seconds,
+            'acquireTime': now,
+            'renewTime': now,
+        },
+    }
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
+    url = f"{_K8S_API_BASE}/apis/coordination.k8s.io/v1/namespaces/{namespace}/leases"
+    try:
+        response = requests.post(
+            url, headers=headers, json=lease_body,
+            verify=_K8S_CA_PATH, timeout=5)
+        return response.status_code == 201
+    except Exception:
+        return False
+
+
+def _update_lease(lease_name, namespace, existing_lease, holder_identity,
+                  lease_duration_seconds, annotations=None):
+    """Update a Lease with optimistic concurrency. Returns True on success."""
+    token, _ = _get_k8s_credentials()
+    if not token:
+        return False
+    now = datetime.now(tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    lease_body = copy.deepcopy(existing_lease)
+    lease_body['spec']['holderIdentity'] = holder_identity
+    lease_body['spec']['leaseDurationSeconds'] = lease_duration_seconds
+    lease_body['spec']['renewTime'] = now
+    lease_body['spec']['acquireTime'] = lease_body['spec'].get('acquireTime', now)
+    if annotations:
+        lease_body.setdefault('metadata', {})
+        lease_body['metadata'].setdefault('annotations', {})
+        lease_body['metadata']['annotations'].update(annotations)
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+    }
+    url = f"{_K8S_API_BASE}{_LEASE_API_PATH.format(namespace=namespace, name=lease_name)}"
+    try:
+        response = requests.put(
+            url, headers=headers, json=lease_body,
+            verify=_K8S_CA_PATH, timeout=5)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+_LEADER_LABEL = 'instanceha.openstack.org/leader'
+
+
+def _patch_pod_leader_label(pod_name, namespace, is_leader):
+    """Add or remove the leader label on this pod."""
+    token, _ = _get_k8s_credentials()
+    if not token or not pod_name:
+        return
+    if is_leader:
+        patch_body = {'metadata': {'labels': {_LEADER_LABEL: 'true'}}}
+    else:
+        patch_body = {'metadata': {'labels': {_LEADER_LABEL: 'false'}}}
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/merge-patch+json',
+    }
+    url = f"{_K8S_API_BASE}/api/v1/namespaces/{namespace}/pods/{pod_name}"
+    try:
+        requests.patch(url, headers=headers, json=patch_body,
+                       verify=_K8S_CA_PATH, timeout=5)
+    except Exception as e:
+        logging.warning("Failed to patch pod leader label: %s", e)
 
 
 def _emit_k8s_event(host, reason, message, event_type='Normal'):
@@ -3198,6 +3506,9 @@ def _initialize_service(config_mgr):
 
     # Start K8s API connectivity monitor
     service.start_k8s_health_check()
+
+    # Start leader election if multi-replica
+    service.start_leader_election()
 
     # Start kdump listener if enabled
     if service.config.get_config_value('CHECK_KDUMP'):
@@ -3401,15 +3712,16 @@ def _filter_reachable_hosts(service, compute_nodes):
         if ts > 0 and (current_time - ts) <= heartbeat_timeout
     )
     previous_active = service.heartbeat_previous_active_count
-    service.heartbeat_previous_active_count = current_active
 
+    cliff_detected = False
     if previous_active >= 3:
-        threshold = service.config.get_config_value('THRESHOLD')
+        threshold = service.config.get_config_value('HEARTBEAT_CLIFF_THRESHOLD')
         drop_percent = (previous_active - current_active) / previous_active * 100
         if drop_percent >= threshold:
-            logging.error(
+            cliff_detected = True
+            logging.warning(
                 'Heartbeat cliff detected: %d→%d active hosts (%.1f%% drop, '
-                'threshold %d%%) — possible network partition, skipping fencing this cycle',
+                'threshold %d%%) — possible network partition, skipping fencing',
                 previous_active, current_active, drop_percent, threshold)
             _emit_k8s_event('cluster', 'HeartbeatCliff',
                             f'Sudden heartbeat loss: {previous_active}→{current_active} active hosts '
@@ -3417,6 +3729,9 @@ def _filter_reachable_hosts(service, compute_nodes):
                             event_type='Warning')
             HEARTBEAT_CLIFF_TOTAL.inc()
             return [], list(compute_nodes)
+
+    if not cliff_detected:
+        service.heartbeat_previous_active_count = current_active
 
     unreachable = []
     skipped = []
@@ -3792,6 +4107,16 @@ def main():
         poll_interval = service.config.get_config_value('POLL')
 
         try:
+            if not service.k8s_api_reachable:
+                logging.warning("Skipping fencing — K8s API unreachable (possible network partition)")
+                service.shutdown_event.wait(poll_interval)
+                continue
+
+            if not service.is_leader:
+                logging.debug("Standby mode — not the leader, skipping fencing")
+                service.shutdown_event.wait(poll_interval)
+                continue
+
             services = conn.services.list(binary="nova-compute")
             if not services:
                 service.shutdown_event.wait(poll_interval)
@@ -3799,13 +4124,7 @@ def main():
 
             target_date = datetime.now(timezone.utc) - timedelta(seconds=service.config.get_config_value('DELTA'))
             compute_nodes, to_resume, to_reenable = _categorize_services(services, target_date)
-
             compute_nodes_list = list(compute_nodes)
-
-            if not service.k8s_api_reachable:
-                logging.warning("Skipping fencing — K8s API unreachable (possible network partition)")
-                service.shutdown_event.wait(poll_interval)
-                continue
 
             _process_stale_services(conn, service, services, compute_nodes_list, to_resume)
             _process_reenabling(conn, service, to_reenable)

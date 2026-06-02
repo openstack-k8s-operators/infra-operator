@@ -32,7 +32,8 @@ func MetricsService(instance *instancehav1.InstanceHa) *corev1.Service {
 		Namespace: instance.GetNamespace(),
 		Labels:    svcLabels,
 		Selector: map[string]string{
-			common.AppSelector: instance.GetName(),
+			common.AppSelector:                instance.GetName(),
+			"instanceha.openstack.org/leader": "true",
 		},
 		Port: service.GenericServicePort{
 			Name:     "metrics",

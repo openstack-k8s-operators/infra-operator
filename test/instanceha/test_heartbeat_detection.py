@@ -207,6 +207,107 @@ class TestFilterReachableHosts(unittest.TestCase):
         self.assertIn('compute-02.example.com', skipped_hostnames)
 
 
+class TestHeartbeatCliffDetection(unittest.TestCase):
+    """Tests for heartbeat cliff detection logic in _filter_reachable_hosts."""
+
+    def setUp(self):
+        self.config = instanceha.ConfigManager()
+        self.service = instanceha.InstanceHAService(self.config)
+        self.service.heartbeat_listener_start_time = time.time() - 300
+
+    def _make_svc(self, host):
+        svc = Mock()
+        svc.host = host
+        return svc
+
+    def _set_active_heartbeats(self, hostnames, age=10):
+        now = time.time()
+        with self.service.heartbeat_lock:
+            for h in hostnames:
+                self.service.heartbeat_hosts_timestamp[h] = now - age
+
+    def test_cliff_triggers_when_drop_exceeds_threshold(self):
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        svcs = [self._make_svc(h) for h in hosts[:3]]
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+            for h in hosts[:2]:
+                self.service.heartbeat_hosts_timestamp[h] = time.time() - 10
+        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(len(unreachable), 0)
+        self.assertEqual(len(skipped), 3)
+
+    def test_cliff_does_not_trigger_below_threshold(self):
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        no_heartbeat_host = 'compute-99'
+        svcs = [self._make_svc(no_heartbeat_host)]
+        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(len(unreachable), 1)
+        self.assertEqual(unreachable[0].host, no_heartbeat_host)
+
+    def test_cliff_skipped_when_previous_active_below_minimum(self):
+        hosts = ['compute-00', 'compute-01']
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 2
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc(h) for h in hosts]
+        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(len(unreachable), 2)
+
+    def test_cliff_persists_across_cycles(self):
+        """After cliff, previous_active_count stays at old value so cliff re-triggers."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+            self.service.heartbeat_hosts_timestamp['compute-00'] = time.time() - 10
+        svcs = [self._make_svc('compute-01')]
+        instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(self.service.heartbeat_previous_active_count, 10)
+        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(len(skipped), 1)
+
+    def test_previous_active_updated_when_no_cliff(self):
+        hosts = [f'compute-{i:02d}' for i in range(5)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 5
+        svcs = [self._make_svc(hosts[0])]
+        instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(self.service.heartbeat_previous_active_count, 5)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_increments_metric(self, _event):
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc(hosts[0])]
+        before = instanceha.HEARTBEAT_CLIFF_TOTAL._value.get()
+        instanceha._filter_reachable_hosts(self.service, svcs)
+        after = instanceha.HEARTBEAT_CLIFF_TOTAL._value.get()
+        self.assertEqual(after - before, 1)
+
+    def test_cliff_threshold_boundary_exact_50_percent(self):
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+            for h in hosts[:5]:
+                self.service.heartbeat_hosts_timestamp[h] = time.time() - 10
+        svcs = [self._make_svc(hosts[9])]
+        unreachable, skipped = instanceha._filter_reachable_hosts(self.service, svcs)
+        self.assertEqual(len(unreachable), 0)
+        self.assertEqual(len(skipped), 1)
+
+
 class TestHeartbeatPort(unittest.TestCase):
     """Test get_heartbeat_port configuration."""
 

@@ -27,7 +27,7 @@ import (
 	"github.com/go-logr/logr"
 
 	appsv1 "k8s.io/api/apps/v1"
-
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -93,8 +93,9 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update;patch
 // service account permissions that are needed to grant permission to the above
 // +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="coordination.k8s.io",resources=leases,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile -
@@ -177,7 +178,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.ObservedGeneration = instance.Generation
 
 	// If we're not deleting this and the service object doesn't have our finalizer, add it.
-	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) || isNewInstance {
+	if (instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer())) || isNewInstance {
 		return ctrl.Result{}, nil
 	}
 
@@ -208,12 +209,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		{
 			APIGroups: []string{""},
 			Resources: []string{"pods"},
-			Verbs:     []string{"get", "list", "watch"},
+			Verbs:     []string{"get", "list", "watch", "patch"},
 		},
 		{
 			APIGroups: []string{""},
 			Resources: []string{"events"},
 			Verbs:     []string{"create", "patch"},
+		},
+		{
+			APIGroups: []string{"coordination.k8s.io"},
+			Resources: []string{"leases"},
+			Verbs:     []string{"get", "create", "update"},
 		},
 	}
 	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
@@ -677,6 +683,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Delete existing Deployment if its selector doesn't match the desired labels.
 	// Deployment selectors are immutable after creation, so a mismatch (e.g. from
 	// upgrading to instance-scoped labels) requires a delete+recreate.
+	desiredReplicas := int32(1)
+	if instance.Spec.Replicas != nil {
+		desiredReplicas = *instance.Spec.Replicas
+	}
+
 	existingDep := &appsv1.Deployment{}
 	if err = r.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, existingDep); err == nil {
 		if existingDep.Spec.Selector != nil {
@@ -688,6 +699,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				}
 				return ctrl.Result{RequeueAfter: time.Second}, nil
 			}
+		}
+
+		currentReplicas := int32(1)
+		if existingDep.Spec.Replicas != nil {
+			currentReplicas = *existingDep.Spec.Replicas
+		}
+		if (currentReplicas == 1) != (desiredReplicas == 1) {
+			Log.Info("Leader election mode change, deleting Deployment for recreation",
+				"currentReplicas", currentReplicas, "desiredReplicas", desiredReplicas)
+			if err = r.Delete(ctx, existingDep); err != nil && !k8s_errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete Deployment for leader election mode change: %w", err)
+			}
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	}
 
@@ -919,6 +943,18 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, instance *instancehav1
 		instance.Name,
 	); err != nil {
 		return ctrlResult, err
+	}
+
+	// Clean up leader election Lease if it exists
+	leaseName := fmt.Sprintf("instanceha-%s-leader", instance.Name)
+	lease := &coordinationv1.Lease{}
+	err := r.Get(ctx, types.NamespacedName{Name: leaseName, Namespace: instance.Namespace}, lease)
+	if err == nil {
+		if delErr := r.Delete(ctx, lease); delErr != nil && !k8s_errors.IsNotFound(delErr) {
+			Log.Error(delErr, "Failed to delete leader election Lease", "lease", leaseName)
+		} else {
+			Log.Info("Deleted leader election Lease", "lease", leaseName)
+		}
 	}
 
 	// Service is deleted so remove the finalizer.

@@ -158,6 +158,15 @@ spec:
                 description: OpenStackConfigSecret is the name of the Secret containing
                   the secure.yaml
                 type: string
+              replicas:
+                default: 1
+                description: |-
+                  Replicas - number of InstanceHA pods for high availability.
+                  When >1, Lease-based leader election ensures exactly one pod fences at a time.
+                format: int32
+                maximum: 3
+                minimum: 1
+                type: integer
               topologyRef:
                 description: |-
                   TopologyRef to apply the Topology defined by the associated CR referenced

@@ -36,6 +36,18 @@ class TestCheckK8sApiReachable(unittest.TestCase):
 
     @patch('instanceha.requests.get')
     @patch('instanceha._get_k8s_credentials', return_value=('token', 'openstack'))
+    def test_returns_true_on_401(self, _creds, mock_get):
+        mock_get.return_value = MagicMock(status_code=401)
+        self.assertTrue(instanceha._check_k8s_api_reachable())
+
+    @patch('instanceha.requests.get')
+    @patch('instanceha._get_k8s_credentials', return_value=('token', 'openstack'))
+    def test_returns_true_on_429(self, _creds, mock_get):
+        mock_get.return_value = MagicMock(status_code=429)
+        self.assertTrue(instanceha._check_k8s_api_reachable())
+
+    @patch('instanceha.requests.get')
+    @patch('instanceha._get_k8s_credentials', return_value=('token', 'openstack'))
     def test_returns_false_on_connection_error(self, _creds, mock_get):
         mock_get.side_effect = ConnectionError("connection refused")
         self.assertFalse(instanceha._check_k8s_api_reachable())
@@ -65,7 +77,7 @@ class TestK8sHealthCheckThread(unittest.TestCase):
         self.service = instanceha.InstanceHAService(self.config)
 
     def test_initial_state(self):
-        self.assertTrue(self.service.k8s_api_reachable)
+        self.assertFalse(self.service.k8s_api_reachable)
 
     @patch('instanceha._check_k8s_api_reachable', return_value=True)
     def test_stays_reachable_on_success(self, _check):
@@ -79,6 +91,7 @@ class TestK8sHealthCheckThread(unittest.TestCase):
     @patch('instanceha._check_k8s_api_reachable', return_value=False)
     def test_marks_not_ready_after_3_failures(self, _check):
         """After 3 consecutive failures, k8s_api_reachable and ready should be False."""
+        self.service.k8s_api_reachable = True
         self.service.ready = True
         call_count = 0
 
@@ -122,6 +135,7 @@ class TestK8sHealthCheckThread(unittest.TestCase):
     @patch('instanceha._check_k8s_api_reachable')
     def test_recovers_after_partition(self, mock_check):
         """After failures followed by success, reachable should be restored."""
+        self.service.k8s_api_reachable = True
         self.service.ready = True
         call_count = 0
 

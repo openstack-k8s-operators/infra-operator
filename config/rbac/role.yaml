@@ -105,6 +105,15 @@ rules:
   - list
   - watch
 - apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - update
+- apiGroups:
   - dataplane.openstack.org
   resources:
   - openstackdataplanenodesets

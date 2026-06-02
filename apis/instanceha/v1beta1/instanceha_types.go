@@ -69,6 +69,14 @@ type InstanceHaSpec struct {
 	// ContainerImage for the InstanceHa container (will be set to environmental default if empty)
 	ContainerImage string `json:"containerImage"`
 
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3
+	// Replicas - number of InstanceHA pods for high availability.
+	// When >1, Lease-based leader election ensures exactly one pod fences at a time.
+	Replicas *int32 `json:"replicas"`
+
 	// +kubebuilder:validation:Required
 	// +kubebuilder:default="default"
 	// OpenStackCloud is the name of the Cloud to use as per clouds.yaml (will be set to "default" if empty)

@@ -16,6 +16,8 @@ package instanceha
 import (
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
+	common "github.com/openstack-k8s-operators/lib-common/modules/common"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 
@@ -44,6 +46,9 @@ func Deployment(
 	metricsTLS *instancehav1.InstanceHaMetricsTLS,
 ) *appsv1.Deployment {
 	replicas := int32(1)
+	if instance.Spec.Replicas != nil {
+		replicas = *instance.Spec.Replicas
+	}
 
 	envVars := map[string]env.Setter{}
 	envVars["OS_CLOUD"] = env.SetValue(openstackcloud)
@@ -54,6 +59,16 @@ func Deployment(
 	envVars["INSTANCEHA_CR_NAME"] = env.SetValue(instance.Name)
 	if instance.Spec.InstanceHaHeartbeatPort > 0 {
 		envVars["HEARTBEAT_PORT"] = env.SetValue(fmt.Sprintf("%d", instance.Spec.InstanceHaHeartbeatPort))
+	}
+
+	leaderElectionEnabled := replicas > 1
+	envVars["INSTANCEHA_LEADER_ELECTION"] = env.SetValue(fmt.Sprintf("%t", leaderElectionEnabled))
+	if leaderElectionEnabled {
+		leaseName := fmt.Sprintf("instanceha-%s-leader", instance.Name)
+		envVars["INSTANCEHA_LEASE_NAME"] = env.SetValue(leaseName)
+		envVars["INSTANCEHA_LEASE_DURATION"] = env.SetValue("15")
+		envVars["INSTANCEHA_LEASE_RENEW_DEADLINE"] = env.SetValue("10")
+		envVars["INSTANCEHA_LEASE_RETRY_PERIOD"] = env.SetValue("2")
 	}
 
 	// create Volume and VolumeMounts
@@ -153,6 +168,16 @@ func Deployment(
 		readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
 	}
 
+	podLabels := make(map[string]string)
+	for k, v := range labels {
+		podLabels[k] = v
+	}
+	if leaderElectionEnabled {
+		podLabels["instanceha.openstack.org/leader"] = "false"
+	} else {
+		podLabels["instanceha.openstack.org/leader"] = "true"
+	}
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -161,14 +186,18 @@ func Deployment(
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Strategy: appsv1.DeploymentStrategy{
-				Type: "Recreate",
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+					MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+				},
 			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      labels,
+					Labels:      podLabels,
 					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
@@ -219,6 +248,12 @@ func Deployment(
 		if ts.Affinity != nil {
 			dep.Spec.Template.Spec.Affinity = ts.Affinity
 		}
+	} else if replicas > 1 {
+		dep.Spec.Template.Spec.Affinity = affinity.DistributePods(
+			common.AppSelector,
+			[]string{instance.Name},
+			corev1.LabelHostname,
+		)
 	}
 
 	return dep

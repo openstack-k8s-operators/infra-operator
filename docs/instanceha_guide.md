@@ -322,6 +322,8 @@ By default, the InstanceHA pod receives a dynamic IP from the Multus IPAM pool. 
 
 To provide a stable IP that survives pod restarts, create a MetalLB-backed LoadBalancer Service that fronts the InstanceHA UDP ports. Compute nodes send packets to the Service's external IP, and MetalLB routes them to the pod regardless of its current address.
 
+When running with multiple replicas (`replicas > 1`), only the active leader pod should receive heartbeat and kdump traffic. The leader pod is automatically labeled with `instanceha.openstack.org/leader: "true"` — add this to the Service selector so MetalLB routes traffic only to the current leader. When leadership changes, the label moves to the new leader and traffic follows automatically.
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -336,6 +338,7 @@ spec:
   type: LoadBalancer
   selector:
     service: instanceha  # Replace with your CR name if different
+    instanceha.openstack.org/leader: "true"  # Route traffic to the active leader only
   ports:
   - name: kdump
     port: 7410
@@ -350,6 +353,8 @@ spec:
 Replace `172.17.0.80` with an IP from your `internalapi` MetalLB address pool. The `allow-shared-ip` annotation lets this Service share the same IP with other OpenStack services (e.g., keystone, nova, cinder) that already use the `internalapi` pool — since the InstanceHA ports (7410/UDP, 7411/UDP) don't conflict with any existing service ports, sharing is safe and avoids consuming an additional IP. If you prefer a dedicated IP, pick an unused address and remove the `allow-shared-ip` annotation.
 
 > **Note:** The `address-pool` value must match the actual MetalLB IPAddressPool name. In a standard openstack-k8s-operators deployment this is `internalapi`. You can verify the pool name with `oc get ipaddresspools -n metallb-system`.
+
+> **Note:** The `instanceha.openstack.org/leader` label is set even with a single replica (the sole pod is always the leader), so the same Service definition works for both single and multi-replica deployments.
 
 Then configure compute nodes to send kdump and heartbeat packets to that IP instead of the pod IP.
 

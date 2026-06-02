@@ -34,10 +34,14 @@ class TestGetK8sCredentials(unittest.TestCase):
         self.assertIsNone(namespace)
 
     @patch.dict(os.environ, {}, clear=True)
-    @patch('builtins.open', mock_open(read_data='my-token'))
     def test_returns_none_when_namespace_not_set(self):
-        # POD_NAMESPACE not in env → empty string → returns None
-        token, namespace = instanceha._get_k8s_credentials()
+        # POD_NAMESPACE not in env AND SA namespace file not readable → returns None
+        def mock_file_open(path, *args, **kwargs):
+            if 'token' in path:
+                return mock_open(read_data='my-token')()
+            raise IOError("not found")
+        with patch('builtins.open', side_effect=mock_file_open):
+            token, namespace = instanceha._get_k8s_credentials()
         self.assertIsNone(token)
         self.assertIsNone(namespace)
 
