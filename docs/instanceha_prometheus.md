@@ -155,6 +155,7 @@ Counters increase monotonically and reset to zero on pod restart.
 | `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed (fence + evacuate + recovery) |
 | `instanceha_processing_failed_total` | `host` | Unhandled exceptions during service processing |
 | `instanceha_orphaned_host_recovered_total` | — | Orphaned fenced hosts recovered during startup reconciliation |
+| `instanceha_heartbeat_rejected_total` | `reason` | Heartbeat packets rejected. `reason`: `hmac_failed`, `timestamp_invalid` |
 | `instanceha_heartbeat_cliff_total` | — | Fencing skipped due to sudden heartbeat loss (possible network partition) |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed. `result`: `success`, `error` |
 | `instanceha_leader_election_transitions_total` | `transition` | Leader election transitions. `transition`: `acquired`, `lost`, `renewed` |
@@ -440,6 +441,7 @@ Expected output:
 # TYPE instanceha_recovery_completed_total counter
 # TYPE instanceha_processing_failed_total counter
 # TYPE instanceha_orphaned_host_recovered_total counter
+# TYPE instanceha_heartbeat_rejected_total counter
 # TYPE instanceha_heartbeat_cliff_total counter
 # TYPE instanceha_poll_consecutive_failures gauge
 # TYPE instanceha_hosts_processing gauge

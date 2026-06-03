@@ -51,7 +51,7 @@ InstanceHA runs as a Kubernetes-managed workload alongside the OpenStack control
 
 ### How It Works
 
-1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp and `state` field. A service is considered failed if it is reported as `down` or if its heartbeat is staler than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
+1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp and `state` field. A service is considered failed if it is reported as `down` or if its `updated_at` timestamp is older than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
 
 2. **Safety checks**: Before acting, the agent verifies that the percentage of failed hosts does not exceed the `THRESHOLD` (default: 50%) — calculated against only active services, excluding already-disabled and already-forced-down hosts — and that at least one `nova-scheduler` is running. These checks prevent cascading evacuations during infrastructure-wide outages. A `ThresholdExceeded` K8s event is emitted when the limit is hit.
 
@@ -146,6 +146,7 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 | `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed |
 | `instanceha_processing_failed_total` | `host` | Service processing failures |
 | `instanceha_orphaned_host_recovered_total` | | Orphaned hosts recovered at startup |
+| `instanceha_heartbeat_rejected_total` | `reason` | Heartbeat packets rejected (`hmac_failed`, `timestamp_invalid`) |
 | `instanceha_heartbeat_cliff_total` | | Fencing skipped due to sudden heartbeat loss (possible network partition) |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed (result: `success`, `error`) |
 | `instanceha_leader_election_transitions_total` | `transition` | Leader election transitions (`acquired`, `lost`, `renewed`) |
@@ -165,36 +166,7 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 |--------|--------|-------------------|-------------|
 | `instanceha_instance_evacuation_duration_seconds` | `host` | 10, 30, 60, 120, 180, 300, 600 | Duration of individual instance evacuations |
 
-#### Example Alert Rules
-
-```yaml
-groups:
-  - name: instanceha
-    rules:
-      - alert: InstanceHAFencingFailure
-        expr: increase(instanceha_fencing_total{result="failed"}[5m]) > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Fencing failed for host {{ $labels.host }}"
-
-      - alert: InstanceHANovaAPIDown
-        expr: instanceha_poll_consecutive_failures > 3
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "InstanceHA cannot reach Nova API"
-
-      - alert: InstanceHAEvacuationSlow
-        expr: histogram_quantile(0.95, rate(instanceha_instance_evacuation_duration_seconds_bucket[15m])) > 300
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Instance evacuations taking longer than 5 minutes (p95)"
-```
+See [instanceha_prometheus.md](instanceha_prometheus.md) for alert rules, Grafana dashboard queries, and PromQL examples.
 
 #### Scraping Configuration
 
@@ -1007,6 +979,7 @@ The agent exposes three HTTP endpoints on port 8080:
 
 - **Liveness** (`/`): Returns the latest health-check hash, updated every `HASH_INTERVAL` seconds. Used by the Kubernetes liveness probe.
 - **Readiness** (`/healthz`): Reports whether the agent has completed its first successful Nova API poll. The pod is not marked ready until this check passes.
+- **Leader** (`/leader`): Returns 200 if this pod is the leader, 503 if standby. Useful for debugging multi-replica deployments.
 - **Metrics** (`/metrics`): Prometheus-format metrics covering fencing, evacuation, host state transitions, and poll loop health. See [Prometheus Metrics](#prometheus-metrics) for the full metric catalog.
 
 ```bash

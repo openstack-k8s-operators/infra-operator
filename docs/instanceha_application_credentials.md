@@ -9,8 +9,7 @@ access that can be rotated independently of the service user password.
 
 - A Keystone user with sufficient privileges to query and evacuate VMs
   (typically the `admin` role on the relevant project).
-- The `keystone-operator` deployed with Application Credential support
-  ([keystone-operator PR #567](https://github.com/openstack-k8s-operators/keystone-operator/pull/567)).
+- The `keystone-operator` deployed with `KeystoneApplicationCredential` CR support.
 - The `clouds.yaml` ConfigMap must still be present — InstanceHA reads
   `auth_url` and `region_name` from it even when using Application Credentials.
 

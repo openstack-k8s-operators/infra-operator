@@ -20,8 +20,7 @@ InstanceHA is a high-availability service for OpenStack that automatically detec
 12. [Startup Reconciliation](#startup-reconciliation)
 13. [Graceful Shutdown](#graceful-shutdown)
 14. [Security](#security)
-15. [Performance](#performance)
-16. [Testing](#testing)
+15. [Testing](#testing)
 17. [Deployment](#deployment)
 18. [Configuration Options Reference](#configuration-options-reference)
 
@@ -158,11 +157,11 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 
     # Health monitoring
     self.current_hash = ""
-    self.hash_update_successful = True
+    self.hash_update_successful = False
     self._last_hash_time = 0
     self._previous_hash = ""
     self.ready = False                              # Readiness flag (set after first poll)
-    self.k8s_api_reachable = True                   # K8s API connectivity (partition detection)
+    self.k8s_api_reachable = False                  # K8s API connectivity (partition detection)
     self.is_leader = False                           # Leader election state
     self.leader_election_enabled = False             # Multi-replica mode
 
@@ -1188,43 +1187,7 @@ kubectl get events -n openstack --field-selector involvedObject.kind=InstanceHa,
 
 ### Prometheus Metrics
 
-The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP server used for health checks. Metrics are served using the `prometheus_client` Python library.
-
-**Counters** (monotonically increasing, reset on pod restart):
-
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `instanceha_fencing_total` | `host`, `result` | Fencing operations (`started`/`succeeded`/`failed`) |
-| `instanceha_evacuation_total` | `host`, `result` | Host-level evacuations |
-| `instanceha_instance_evacuation_total` | `host`, `result` | Per-instance evacuations (smart/orchestrated) |
-| `instanceha_host_down_total` | `host` | Host-down detections |
-| `instanceha_host_reachable_total` | `host` | Hosts still reachable via heartbeat despite Nova reporting down |
-| `instanceha_host_reenabled_total` | `host` | Hosts re-enabled after evacuation |
-| `instanceha_threshold_exceeded_total` | | Evacuations blocked by global threshold |
-| `instanceha_aggregate_threshold_exceeded_total` | `aggregate` | Evacuations blocked by per-aggregate threshold |
-| `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed |
-| `instanceha_processing_failed_total` | `host` | Service processing failures |
-| `instanceha_orphaned_host_recovered_total` | | Orphaned hosts recovered at startup |
-| `instanceha_heartbeat_cliff_total` | | Fencing skipped due to sudden heartbeat loss (possible network partition) |
-| `instanceha_poll_cycles_total` | `result` | Poll cycles (`success`/`error`) |
-| `instanceha_leader_election_transitions_total` | `transition` | Leader election transitions (`acquired`/`lost`/`renewed`) |
-
-**Gauges** (current value):
-
-| Metric | Description |
-|--------|-------------|
-| `instanceha_poll_consecutive_failures` | Current consecutive Nova API failures |
-| `instanceha_hosts_processing` | Hosts currently being processed |
-| `instanceha_k8s_api_reachable` | Whether the Kubernetes API is reachable (1=yes, 0=no) |
-| `instanceha_leader_election_is_leader` | Whether this pod is the current leader (1=leader, 0=standby) |
-
-**Histograms**:
-
-| Metric | Labels | Buckets (s) | Description |
-|--------|--------|-------------|-------------|
-| `instanceha_instance_evacuation_duration_seconds` | `host` | 10, 30, 60, 120, 180, 300, 600 | Per-instance evacuation duration |
-
-Each metric increment is co-located with the corresponding `_emit_k8s_event()` call, so the event catalog and metric catalog map 1:1.
+The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP server used for health checks. Each metric increment is co-located with the corresponding `_emit_k8s_event()` call. See [instanceha_prometheus.md](instanceha_prometheus.md) for the full metric catalog, alert rules, and Grafana dashboard queries.
 
 ---
 
@@ -1327,7 +1290,7 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 
 **Behavior**:
 1. The health check thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds
-2. Both 200 and 403 responses are treated as reachable (the API is responding, even if RBAC denies the specific request)
+2. Any non-5xx response (status code < 500) is treated as reachable — the API is responding, even if RBAC denies the specific request
 3. After 3 consecutive failures, `k8s_api_reachable` is set to `False` and `ready` is set to `False`
 4. The main poll loop checks `k8s_api_reachable` before fencing — if `False`, the entire fencing cycle is skipped
 5. When connectivity restores, `k8s_api_reachable` is set back to `True`; readiness is restored after the next successful Nova poll
@@ -1607,11 +1570,6 @@ clouds:
     region_name: region2
 ```
 
-**Testing**:
-- Region isolation tests verify Nova client receives correct region_name
-- Tests confirm services.list() returns only same-region services
-- Multi-region independence tests verify separate instances operate independently
-- Configuration validation tests ensure region_name is required
 
 ---
 
@@ -1931,40 +1889,6 @@ These values are passed as `METRICS_TLS_MIN_VERSION` and `METRICS_TLS_CIPHERS` e
 
 ---
 
-## Performance
-
-### 1. Caching Performance
-
-**Benchmark** (100 flavors, 100 images):
-- First call: ~50ms (with API call)
-- Cached call: ~0.1ms (without API call)
-
----
-
-### 2. Concurrent Processing
-
-**ThreadPoolExecutor** for smart evacuation:
-```python
-with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
-    future_to_server = {
-        executor.submit(_server_evacuate_future, conn, srv): srv
-        for srv in evacuables
-    }
-```
-
-**Concurrency**: WORKERS controls the number of hosts processed concurrently and, for smart/orchestrated mode, the per-host server concurrency (capped at `MAX_TOTAL_EVACUATION_THREADS=32`).
-
----
-
-### 3. Memory Management
-
-**Cleanup Strategies**:
-- Kdump timestamp cleanup (>2000 entries)
-- Host processing expiration
-- Generic cleanup helper
-
----
-
 ## Testing
 
 See [`test/instanceha/README.md`](../../test/instanceha/README.md) for the full test suite listing, how to run tests, and coverage instructions.
@@ -2103,11 +2027,6 @@ This section describes each configuration option in the `_config_map`, including
 - Checked against flavor extra specs, image properties, and aggregate metadata
 - All three resource types use the same tag name for consistency
 
-**Testing**:
-- Unit tests verify tag loading from configuration
-- Functional tests use custom tag values (`'test_tag'`, `'ha-enabled'`)
-- Integration tests verify tag matching across flavors, images, and aggregates
-- Test files: `test_instanceha.py:162,203`, functional tests
 
 **Example**:
 ```yaml
@@ -2129,11 +2048,6 @@ config:
 - Services with `updated_at < target_date` are categorized as stale compute nodes
 - Works in conjunction with Nova service heartbeat mechanism
 
-**Testing**:
-- Unit tests verify range validation (values <10 or >300 are clamped)
-- Functional tests use custom values (60, 120) to test different staleness windows
-- Integration tests verify stale service detection logic
-- Test files: `test_instanceha.py:163,175,191`
 
 **Example**:
 ```yaml
@@ -2156,10 +2070,6 @@ config:
 - Sleep duration at the end of each main loop iteration
 - Affects evacuation response time and API load
 
-**Testing**:
-- Unit tests verify range validation and default values
-- Functional tests use various intervals to test timing behavior
-- Test files: `test_instanceha.py:30,45`
 
 **Example**:
 ```yaml
@@ -2194,12 +2104,6 @@ config:
   - Calculates percentage against active hosts in evacuable aggregates
   - Example: 3 failed / 5 active evacuable = 60%
 
-**Testing**:
-- Unit tests verify percentage validation and clamping
-- Functional tests verify threshold blocking behavior
-- Integration tests simulate datacenter failures exceeding threshold
-- Tests verify aggregate-aware threshold calculation
-- Test files: `test_instanceha.py`, functional tests with 75% and 60% thresholds
 
 **Example**:
 ```yaml
@@ -2226,11 +2130,6 @@ config:
 - **Host-level**: `_process_stale_services` uses `_run_concurrent` with `WORKERS` threads to process multiple failed hosts in parallel via `process_service`. This applies to all evacuation modes (traditional, smart, and orchestrated).
 - **Per-host (smart/orchestrated only)**: Within each host's evacuation, `_smart_evacuate` and `_orchestrated_evacuate` use `_run_concurrent` to evacuate multiple VMs concurrently. The per-host thread count is calculated as `MAX_TOTAL_EVACUATION_THREADS (32) // WORKERS` to cap the total system-wide thread count.
 
-**Testing**:
-- Unit tests verify range validation (1-50)
-- Functional tests use custom values (6, 8) to test concurrent evacuations
-- Performance tests measure evacuation throughput with different worker counts
-- Test files: `test_instanceha.py:191`, functional tests
 
 **Example**:
 ```yaml
@@ -2259,9 +2158,6 @@ config:
 - Time window for storage systems to release file locks
 - Applied for both smart and traditional evacuation modes
 
-**Testing**:
-- Minimal explicit testing (verified as configuration option)
-- Tested indirectly through evacuation workflow tests
 
 **Example**:
 ```yaml
@@ -2285,10 +2181,6 @@ config:
 - Applied to Python logging configuration
 - Invalid values fall back to 'INFO' with warning
 
-**Testing**:
-- Unit tests verify log level validation
-- Configuration tests check for proper level setting
-- Test files: `test_instanceha.py:176`, config validation tests
 
 **Example**:
 ```yaml
@@ -2334,11 +2226,6 @@ config:
   - No error detection after submission
   - Lower resource usage
 
-**Testing**:
-- Unit tests verify both evacuation modes
-- Smart evacuation tests cover: success, timeout, retry exhaustion, error states
-- Traditional evacuation tests verify fire-and-forget behavior
-- Test files: `test_instanceha.py:163,195`, evacuation workflow tests
 
 **Example**:
 ```yaml
@@ -2377,12 +2264,6 @@ config:
 - `instanceha:restart_priority`: Integer 1-1000 (default 500). Higher = evacuated first.
 - `instanceha:restart_group`: String (optional). Servers with same group evacuate together.
 
-**Testing**:
-- Metadata extraction and validation tests
-- Group building and priority sorting tests
-- Orchestrated evacuation with phase sequencing tests
-- Host evacuate branching logic tests
-- Config-only activation: metadata ignored when ORCHESTRATED_RESTART=false
 
 **Example**:
 ```yaml
@@ -2470,10 +2351,6 @@ config:
 - One matching reserved host is enabled per failed host
 - Failed host capacity replaced by reserved host capacity
 
-**Testing**:
-- Functional tests verify aggregate-based and zone-based matching
-- Integration tests verify reserved host enablement workflow
-- Tests cover scenarios with multiple reserved hosts and aggregate combinations
 
 **Example**:
 ```yaml
@@ -2510,9 +2387,6 @@ config:
 - Bypasses Nova scheduler destination selection
 - Evacuations may fail if reserved host does not meet Nova placement requirements
 
-**Testing**:
-- Functional tests verify forced evacuation to specific reserved host
-- Tests ensure evacuations fail gracefully if reserved host is incompatible
 
 **Example**:
 ```yaml
@@ -2541,10 +2415,6 @@ config:
 - When `false`: Ignore image tags (all images considered evacuable)
 - If all tagging disabled and no tagged resources exist: evacuate all servers
 
-**Testing**:
-- Unit tests verify image tag checking logic
-- Functional tests verify OR semantics with flavors and aggregates
-- Test files: `test_instanceha.py:4575`, tagging logic tests
 
 **Example**:
 ```yaml
@@ -2577,10 +2447,6 @@ openstack image set --property ha-enabled=true my-image
 - When `false`: Ignore flavor tags (all flavors considered evacuable)
 - If all tagging disabled and no tagged resources exist: evacuate all servers
 
-**Testing**:
-- Unit tests verify flavor tag checking logic
-- Functional tests verify OR semantics with images and aggregates
-- Test files: `test_instanceha.py:4576`, tagging logic tests
 
 **Example**:
 ```yaml
@@ -2618,11 +2484,6 @@ openstack flavor set --property ha-enabled=true m1.small
   - Reserved hosts matched by availability zone
   - `THRESHOLD` percentage calculated against active compute services (excludes disabled/force-downed)
 
-**Testing**:
-- Functional tests verify aggregate-based filtering
-- Integration tests verify reserved host matching changes based on this setting
-- Tests verify threshold calculation uses evacuable host count
-- Test files: `test_config_features.py`, aggregate tagging tests
 
 **Example**:
 ```yaml
@@ -2660,10 +2521,6 @@ openstack aggregate set --property ha-enabled=true production-hosts
 - When `true`: Services with "evacuation complete" marker are skipped during re-enable processing
 - When `false`: Services progress through re-enable workflow (unset force-down → wait for up → enable)
 
-**Testing**:
-- Configuration feature tests verify re-enable filtering
-- Integration tests verify services remain disabled when enabled
-- Test files: `test_config_features.py`, re-enable workflow tests
 
 **Example**:
 ```yaml
@@ -2692,10 +2549,6 @@ config:
 - With `FORCE_ENABLE=true`: Skip migration check → unset force-down → wait for up → enable
 - Kdump delay still respected (60s wait after last kdump message)
 
-**Testing**:
-- Configuration feature tests verify migration check bypass
-- Tests verify kdump delay is still respected even with `FORCE_ENABLE=true`
-- Test files: `test_config_features.py`, force-enable behavior tests
 
 **Example**:
 ```yaml
@@ -2739,11 +2592,6 @@ config:
 - Reverse DNS lookup to identify host
 - Timestamp tracking with cleanup (>2000 entries)
 
-**Testing**:
-- Extensive kdump workflow tests
-- UDP message processing tests
-- Timeout and delay tests
-- Test files: `test_instanceha.py:1022-1034,1339-1341`, kdump workflow tests
 
 **Example**:
 ```yaml
@@ -2783,11 +2631,6 @@ fence_kdump_args -p 7410
 - If timeout expires: normal evacuation workflow
 - After evacuation complete, wait 60s after last kdump message before re-enable
 
-**Testing**:
-- Unit tests verify timeout calculation
-- Functional tests verify timeout expiration behavior
-- Integration tests verify multi-poll-cycle timeout tracking
-- Test files: `test_instanceha.py:994,1001,1018-1019`, kdump timeout tests
 
 **Example**:
 ```yaml
@@ -2915,7 +2758,7 @@ config:
 - The probe sends `GET /api/v1/namespaces/{namespace}` using the in-cluster service account token
 
 **Behavior**:
-- Both 200 and 403 responses are treated as reachable (API is responding)
+- Any non-5xx response (status code < 500) is treated as reachable
 - After 3 consecutive failures: `k8s_api_reachable = False`, `ready = False`
 - On recovery: `k8s_api_reachable = True`; readiness restored after next successful Nova poll
 
@@ -2947,9 +2790,6 @@ config:
 - No fencing, disabling, or evacuation actions executed
 - Health checks continue to update
 
-**Testing**:
-- Configuration feature tests verify evacuation skipping
-- Test files: `test_config_features.py`, disabled mode tests
 
 **Example**:
 ```yaml
@@ -2994,10 +2834,6 @@ config:
 3. If CA bundle available: return CA bundle path
 4. Otherwise: return `True` (system CA bundle)
 
-**Testing**:
-- Configuration tests verify SSL behavior
-- Security tests verify proper SSL configuration
-- Test files: `test_instanceha.py:196`, SSL configuration tests
 
 **Example**:
 ```yaml
@@ -3040,11 +2876,6 @@ export SSL_KEY_PATH=/path/to/client-key.pem
   - Power-off verification timeout: `FENCING_TIMEOUT`
   - Total: up to `2 * FENCING_TIMEOUT`
 
-**Testing**:
-- Extensive fencing timeout tests
-- Retry logic tests for Redfish
-- Timeout expiration tests for all agents
-- Test files: `test_instanceha.py:473,3004-3014`, fencing tests
 
 **Example**:
 ```yaml
@@ -3097,10 +2928,6 @@ requests.post(url, timeout=20)  # Retry up to 3 times
 - `ready` flag set to `True` after first successful poll cycle completes
 - Hash updated at most once per `HASH_INTERVAL` seconds
 
-**Testing**:
-- Unit tests verify hash update timing
-- Integration tests verify health check behavior
-- Test files: `test_instanceha.py:478`, health monitoring tests
 
 **Example**:
 ```yaml
