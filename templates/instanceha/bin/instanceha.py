@@ -1429,6 +1429,7 @@ class InstanceHAService(CloudConnectionProvider):
         """Periodically check K8s API reachability and update readiness."""
         consecutive_failures = 0
         max_failures = 3
+        interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
         while not self.shutdown_event.is_set():
             try:
                 interval = self.config.get_config_value('K8S_API_CHECK_INTERVAL')
@@ -1527,7 +1528,6 @@ class InstanceHAService(CloudConnectionProvider):
     def _demote_leader(self, namespace):
         """Demote this pod from leader status."""
         self.is_leader = False
-        self.ready = False
         LEADER_ELECTION_IS_LEADER.set(0)
         LEADER_ELECTION_TRANSITIONS.labels(transition='lost').inc()
         _patch_pod_leader_label(self._holder_identity, namespace, False)
@@ -4092,8 +4092,6 @@ def main():
     service = _initialize_service(config_manager)
     conn = _establish_nova_connection(service)
 
-    _reconcile_orphaned_hosts(conn)
-
     def _sigterm_handler(signum, frame):
         logging.info("SIGTERM received, finishing in-flight work before shutdown")
         service.shutdown_event.set()
@@ -4101,6 +4099,7 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     consecutive_failures = 0
+    reconciled = False
 
     while not service.shutdown_event.is_set():
         service.update_health_hash()
@@ -4113,9 +4112,27 @@ def main():
                 continue
 
             if not service.is_leader:
-                logging.debug("Standby mode — not the leader, skipping fencing")
+                reconciled = False
+                try:
+                    conn.versions.get_current()
+                    if not service.ready:
+                        service.ready = True
+                        logging.info("Readiness probe active — standby with valid Nova connection")
+                    consecutive_failures = 0
+                except Exception:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
+                        service.ready = False
+                        logging.warning("Readiness probe deactivated — standby lost Nova connectivity")
+                    new_conn = _establish_nova_connection(service, fatal=False)
+                    if new_conn:
+                        conn = new_conn
                 service.shutdown_event.wait(poll_interval)
                 continue
+
+            if not reconciled:
+                _reconcile_orphaned_hosts(conn)
+                reconciled = True
 
             services = conn.services.list(binary="nova-compute")
             if not services:
