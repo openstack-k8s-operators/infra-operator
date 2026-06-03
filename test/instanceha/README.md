@@ -4,18 +4,16 @@ Test suite for the InstanceHA service.
 
 ## Test Statistics
 
-- **Total Tests**: 401 (203 unit + 16 security + 29 critical error + 12 workflow + 26 config + 18 helper + 68 functional + 22 integration + 7 region)
-- **Code Coverage**: 71% (unit tests alone), 83% (with all tests)
-- **Execution Time**: ~13 seconds (unit tests), ~26 seconds (all tests)
-- **Code Size**: 3,572 lines
+- **Total Tests**: 740
+- **Code Size**: 4,181 lines
 - **Status**: All tests passing ✅
 
 ## Test Structure
 
-The test suite is organized into nine main categories:
+The test suite is organized into the following categories:
 
-### 1. Unit Tests (`test_instanceha.py`)
-- **203 tests** individual components and isolated functionality
+### 1. Unit Tests (`test_unit_core.py`)
+- **139 tests** individual components and isolated functionality
 - Configuration management and validation
 - Service initialization and caching
 - Main function initialization and error handling
@@ -203,6 +201,42 @@ The test suite is organized into nine main categories:
   - region_name required in clouds.yaml configuration
   - Empty region_name handling
 
+### 10. K8s Partition Tests (`test_k8s_partition.py`)
+- **18 tests** K8s API connectivity and network partition detection
+- K8s API reachability check with success and failure responses
+- Consecutive failure counting and partition detection threshold (3 failures)
+- Recovery after connectivity restore
+- Fencing blocked when K8s API unreachable
+
+### 11. Leader Election Tests (`test_leader_election.py`)
+- **36 tests** Lease-based leader election
+- Lease acquisition and creation
+- Lease renewal and heartbeat count annotation persistence
+- Renew deadline enforcement and voluntary demotion
+- Standby acquisition of expired Lease
+- Heartbeat count inheritance from previous leader
+- Pod leader label patching (true on leader, false on standby)
+- LeaderAcquired and LeaderLost K8s events
+- Standby pods skip Nova API calls
+
+### 12. Fencing Agents Tests (`test_fencing_agents.py`)
+- **52 tests** fencing agent implementations
+- IPMI fencing operations (power on/off, status, timeouts)
+- Redfish fencing operations (SSL, retries, power state verification)
+- BMH/Metal3 fencing (Kubernetes API, bearer token auth, power-off wait)
+- Noop fencing agent
+- Fencing agent dispatch and validation
+
+### 13. Kdump Detection Tests (`test_kdump_detection.py`)
+- **27 tests** kdump detection and UDP processing
+- UDP message processing and magic number validation
+- Kdump host timestamp tracking and cleanup
+- Reverse DNS lookup integration
+- Kdump timeout and delay behavior
+
+### 14. Coverage Gaps Tests (`test_coverage_gaps.py`)
+- **123 tests** supplemental coverage for edge cases and error paths
+
 ## Running Tests
 
 ### Run All Tests
@@ -212,8 +246,8 @@ The test suite is organized into nine main categories:
 
 ### Run Individual Test Suites
 ```bash
-# Unit and integration tests
-python3 test_instanceha.py
+# Unit tests
+python3 test_unit_core.py
 
 # Security validation tests only
 python3 test_security_validation.py
@@ -244,7 +278,7 @@ python3 test_region_isolation.py
 ```bash
 # Quick coverage (unit tests only)
 PYTHONPATH="../../templates/instanceha/bin:$PYTHONPATH" \
-  python3 -m coverage run --source=../../templates/instanceha/bin test_instanceha.py
+  python3 -m coverage run --source=../../templates/instanceha/bin test_unit_core.py
 python3 -m coverage report
 ```
 
@@ -463,22 +497,30 @@ def _create_mock_nova_stateful():
 
 ## Coverage Notes
 
-- **Unit test coverage**: 71% (test_instanceha.py only)
-- **Core test coverage**: 77% (unit + security + critical errors + workflows + config + helpers)
-- **Combined coverage**: 83% (all 394 tests including functional + integration)
-
 ### How to Run Coverage Analysis
 
 Run all tests with coverage:
 ```bash
-cd tests/instanceha
+cd test/instanceha
 PYTHONPATH="../../templates/instanceha/bin:$PYTHONPATH" \
-  python3 -m coverage run --source=../../templates/instanceha/bin -a test_instanceha.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_unit_core.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_security_validation.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_critical_error_paths.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_evacuation_workflow.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_config_features.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_helper_functions.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_coverage_gaps.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_fencing_agents.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_kdump_detection.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_heartbeat_detection.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_heartbeat_scale.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_orchestrated_evacuation.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_aggregate_threshold.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_k8s_events.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_thread_safety.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_ipv6_udp.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_k8s_partition.py && \
+  python3 -m coverage run --source=../../templates/instanceha/bin -a test_leader_election.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a functional_test.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a integration_test.py && \
   python3 -m coverage run --source=../../templates/instanceha/bin -a test_region_isolation.py && \
@@ -491,7 +533,7 @@ python3 -m coverage html
 # Open htmlcov/index.html in browser
 ```
 
-Uncovered code (17%):
+Typical uncovered code:
 - Main event loop and initialization
 - Exception handlers
 - Debug logging branches

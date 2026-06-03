@@ -120,6 +120,9 @@ InstanceHA emits Kubernetes events on the InstanceHa CR to provide observability
 | `ProcessingFailed` | Warning | Unhandled exception during service processing |
 | `ThresholdExceeded` | Warning | Too many hosts down simultaneously |
 | `AggregateThresholdExceeded` | Warning | Per-aggregate failure threshold exceeded |
+| `HeartbeatCliff` | Warning | Sudden heartbeat loss detected — possible network partition, fencing skipped |
+| `LeaderAcquired` | Normal | This pod acquired the leader lease and started fencing |
+| `LeaderLost` | Warning | This pod lost the leader lease and stopped fencing |
 | `OrphanedHostRecovered` | Warning | Recovered fenced host from prior crash |
 
 Events can be viewed with `oc describe instanceha <name>` or `oc get events --field-selector involvedObject.name=<name>`.
@@ -143,7 +146,9 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 | `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed |
 | `instanceha_processing_failed_total` | `host` | Service processing failures |
 | `instanceha_orphaned_host_recovered_total` | | Orphaned hosts recovered at startup |
+| `instanceha_heartbeat_cliff_total` | | Fencing skipped due to sudden heartbeat loss (possible network partition) |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed (result: `success`, `error`) |
+| `instanceha_leader_election_transitions_total` | `transition` | Leader election transitions (`acquired`, `lost`, `renewed`) |
 
 #### Gauges
 
@@ -151,6 +156,8 @@ In addition to Kubernetes Events, the agent exposes Prometheus metrics at `http:
 |--------|-------------|
 | `instanceha_poll_consecutive_failures` | Current consecutive Nova API poll failures (resets to 0 on success) |
 | `instanceha_hosts_processing` | Number of hosts currently being processed |
+| `instanceha_k8s_api_reachable` | Whether the Kubernetes API is reachable (1=yes, 0=no) |
+| `instanceha_leader_election_is_leader` | Whether this pod is the current leader (1=leader, 0=standby) |
 
 #### Histograms
 
@@ -214,6 +221,52 @@ spec:
 ### Graceful Shutdown
 
 When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA finishes any in-flight fencing or evacuation work before exiting. The Deployment is configured with a 30-second termination grace period. The agent's poll loop and evacuation workers check a shutdown flag between cycles, allowing timely response to shutdown signals.
+
+### Leader Election (Multi-Replica HA)
+
+When `spec.replicas` is set to a value greater than 1, the controller enables Lease-based leader election. Exactly one pod performs fencing and evacuation (the leader) while standby replicas are ready for immediate failover.
+
+**How it works:**
+
+1. Each pod competes for a Kubernetes Lease object in the same namespace.
+2. The leader renews the Lease every `INSTANCEHA_LEASE_RETRY_PERIOD` seconds (default: 2s).
+3. If the leader fails to renew within `INSTANCEHA_LEASE_RENEW_DEADLINE` seconds (default: 10s), it voluntarily demotes itself and a standby acquires the Lease.
+4. The leader pod is labeled `instanceha.openstack.org/leader: "true"`, directing the MetricsService selector so Prometheus scrapes only the active instance. On demotion, the label is set to `"false"`.
+5. The leader writes its heartbeat active count into the Lease annotations, so a new leader inherits the cliff detection baseline without a cold start.
+
+Standby pods skip Nova API calls to avoid unnecessary load. They continue running the K8s API health check and Lease polling.
+
+```yaml
+apiVersion: instanceha.openstack.org/v1beta1
+kind: InstanceHa
+metadata:
+  name: instanceha
+spec:
+  replicas: 3
+```
+
+> **Note:** With a single replica (default), the pod is always the leader. The `instanceha.openstack.org/leader` label is set to `"true"` immediately at startup, so Service selectors that filter on this label work identically for single and multi-replica deployments.
+
+### Network Partition Detection
+
+Two complementary mechanisms prevent the agent from fencing healthy hosts when the pod's worker node is network-isolated:
+
+**K8s API connectivity check:**
+- A background thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds (default: 15) using the in-cluster service account.
+- After 3 consecutive failures, the agent marks itself not-ready and blocks all fencing until connectivity restores and a Nova poll succeeds.
+- The `instanceha_k8s_api_reachable` Prometheus gauge tracks the current state (1=ok, 0=isolated).
+
+**Heartbeat cliff detection:**
+- The agent tracks the count of active heartbeat hosts between poll cycles.
+- If the count drops by more than `HEARTBEAT_CLIFF_THRESHOLD`% (default: 50%) in a single cycle (minimum 3 hosts previously active), fencing is skipped for that cycle. A sudden mass-silence is far more likely to indicate a listener-side network issue than simultaneous host failures.
+- A `HeartbeatCliff` K8s event (Warning) is emitted and the `instanceha_heartbeat_cliff_total` counter is incremented.
+- The detection re-evaluates on the next cycle (single-cycle skip, not persistent).
+
+```yaml
+config:
+  K8S_API_CHECK_INTERVAL: "15"
+  HEARTBEAT_CLIFF_THRESHOLD: "50"
+```
 
 ---
 
@@ -831,6 +884,7 @@ Each instance is fully independent — no cross-region communication or coordina
 | `caBundleSecretName` | string | none | Secret with CA certificates for TLS |
 | `metricsTLS.minTLSVersion` | string | `"1.2"` | Minimum TLS version for the metrics endpoint (`"1.2"` or `"1.3"`) |
 | `metricsTLS.cipherSuites` | string | `"HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"` | Allowed TLS cipher suites (OpenSSL format) |
+| `replicas` | int32 | `1` | Number of pods. >1 enables Lease-based leader election for HA |
 | `disabled` | string | `"False"` | `"True"` to disable fencing and evacuation |
 | `topologyRef` | object | none | Reference to a Topology CR for pod placement |
 
@@ -885,6 +939,8 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 |-----------|------|---------|-------------|
 | `CHECK_KDUMP` | bool | false | Enable kdump detection via UDP listener |
 | `CHECK_HEARTBEAT` | bool | false | Enable heartbeat verification via UDP listener |
+| `HEARTBEAT_CLIFF_THRESHOLD` | int | 50 (range: 0–100) | Percentage drop in active heartbeat hosts that triggers cliff detection (skips fencing for that cycle) |
+| `K8S_API_CHECK_INTERVAL` | int | 15 (range: 5–120) | Seconds between Kubernetes API reachability checks |
 
 #### Security
 
