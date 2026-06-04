@@ -361,6 +361,7 @@ metadata:
     metallb.universe.tf/loadBalancerIPs: 172.17.0.80
 spec:
   type: LoadBalancer
+  externalTrafficPolicy: Local
   selector:
     service: instanceha  # Replace with your CR name if different
     instanceha.openstack.org/leader: "true"  # Route traffic to the active leader only
@@ -374,6 +375,8 @@ spec:
     targetPort: 7411
     protocol: UDP
 ```
+
+> **Important:** `externalTrafficPolicy: Local` is required when kdump detection is enabled (`CHECK_KDUMP: "true"`). The kdump listener identifies the crashing host via reverse DNS lookup on the packet's source IP. Without `Local` policy, kube-proxy masquerades (SNATs) the source IP when forwarding traffic to the pod, replacing the compute node's real IP with an internal node address — causing the reverse DNS lookup to fail. `Local` policy preserves the original source IP by delivering traffic directly to the pod on the receiving node without cross-node forwarding or SNAT. (Heartbeat packets are unaffected — the sender's hostname is embedded in the HMAC-authenticated packet payload, so source IP rewriting does not break heartbeat identification.)
 
 Replace `172.17.0.80` with an IP from your `internalapi` MetalLB address pool. The `allow-shared-ip` annotation lets this Service share the same IP with other OpenStack services (e.g., keystone, nova, cinder) that already use the `internalapi` pool — since the InstanceHA ports (7410/UDP, 7411/UDP) don't conflict with any existing service ports, sharing is safe and avoids consuming an additional IP. If you prefer a dedicated IP, pick an unused address and remove the `allow-shared-ip` annotation.
 
