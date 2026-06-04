@@ -35,8 +35,8 @@ type FRRNodeConfigurationSelectorType struct {
 // BGPConfigurationSpec defines the desired state of BGPConfiguration
 type BGPConfigurationSpec struct {
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:default="metallb-system"
-	// FRRConfigurationNamespace - namespace where to create the FRRConfiguration. Defaults to metallb-system.
+	// +kubebuilder:default="openshift-frr-k8s"
+	// FRRConfigurationNamespace - namespace where to create the FRRConfiguration. Defaults to openshift-frr-k8s.
 	FRRConfigurationNamespace string `json:"frrConfigurationNamespace"`
 
 	// +kubebuilder:validation:Optional

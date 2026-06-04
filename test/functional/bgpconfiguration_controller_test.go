@@ -33,7 +33,7 @@ import (
 var _ = Describe("BGPConfiguration controller", func() {
 	var bgpcfgName types.NamespacedName
 	var meallbFRRCfgName types.NamespacedName
-	frrCfgNamespace := "metallb-system"
+	frrCfgNamespace := "openshift-frr-k8s"
 
 	When("a default BGPConfiguration gets created", func() {
 		BeforeEach(func() {
@@ -715,6 +715,94 @@ var _ = Describe("BGPConfiguration controller", func() {
 					Namespace: metallbNS.Name,
 					Name:      podFrrName.Name,
 				}, frr)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("legacy FRRConfigurations in metallb-system are cleaned up after default namespace change", func() {
+		var podFrrName types.NamespacedName
+		var podName types.NamespacedName
+		var legacyNS *corev1.Namespace
+
+		BeforeEach(func() {
+			// Create the new default namespace (openshift-frr-k8s)
+			defaultNS := th.CreateNamespace(frrCfgNamespace + "-" + namespace)
+
+			defaultFRRCfgName := types.NamespacedName{Namespace: defaultNS.Name, Name: "worker-0"}
+			defaultFRRCfg := CreateFRRConfiguration(defaultFRRCfgName, GetMetalLBFRRConfigurationSpec("worker-0"))
+			Expect(defaultFRRCfg).To(Not(BeNil()))
+
+			// Create the legacy metallb-system namespace with an owned FRRConfiguration
+			legacyNS = th.CreateNamespace("metallb-system-" + namespace)
+			bgpReconciler.LegacyMetalLBNamespace = legacyNS.Name
+			DeferCleanup(func() {
+				bgpReconciler.LegacyMetalLBNamespace = ""
+			})
+
+			nad := th.CreateNAD(types.NamespacedName{Namespace: namespace, Name: "internalapi"}, GetNADSpec())
+
+			bgpcfg := CreateBGPConfiguration(namespace, GetBGPConfigurationSpec(defaultNS.Name))
+			bgpcfgName.Name = bgpcfg.GetName()
+			bgpcfgName.Namespace = bgpcfg.GetNamespace()
+
+			podName = types.NamespacedName{Namespace: namespace, Name: uuid.New().String()}
+			th.CreatePod(podName, GetPodAnnotation(namespace), GetPodSpec("worker-0"))
+			th.SimulatePodPhaseRunning(podName)
+
+			podFrrName.Name = podName.Namespace + "-" + podName.Name
+			podFrrName.Namespace = defaultNS.Name
+
+			DeferCleanup(th.DeleteInstance, bgpcfg)
+			DeferCleanup(th.DeleteInstance, nad)
+			DeferCleanup(th.DeleteInstance, defaultFRRCfg)
+		})
+
+		It("should clean up owned FRRConfigurations from the legacy metallb-system namespace", func() {
+			// Wait for the FRRConfiguration to be created in the new default namespace
+			Eventually(func(g Gomega) {
+				frr := GetFRRConfiguration(types.NamespacedName{Namespace: podFrrName.Namespace, Name: podFrrName.Name})
+				g.Expect(frr).To(Not(BeNil()))
+				g.Expect(frr.Spec.BGP.Routers[0].Prefixes[0]).To(Equal("172.17.0.40/32"))
+			}, timeout, interval).Should(Succeed())
+
+			// Create an owned FRRConfiguration in the legacy namespace to simulate a pre-upgrade state
+			legacyFRR := CreateFRRConfiguration(
+				types.NamespacedName{Namespace: legacyNS.Name, Name: podFrrName.Name},
+				GetMetalLBFRRConfigurationSpec("worker-0"),
+			)
+			Expect(legacyFRR).To(Not(BeNil()))
+
+			// Add owner labels matching the BGPConfiguration so cleanup will target it
+			frr := &frrk8sv1.FRRConfiguration{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: legacyNS.Name, Name: podFrrName.Name}, frr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			bgpcfg := GetBGPConfiguration(bgpcfgName)
+			frr.Labels = map[string]string{
+				"bgpconfiguration.openstack.org/name":      bgpcfg.Name,
+				"bgpconfiguration.openstack.org/namespace": bgpcfg.Namespace,
+			}
+			Expect(k8sClient.Update(ctx, frr)).Should(Succeed())
+
+			// Trigger reconcile
+			pod := th.GetPod(podName)
+			if pod.Annotations == nil {
+				pod.Annotations = map[string]string{}
+			}
+			pod.Annotations["trigger-reconcile"] = "true"
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Update(ctx, pod)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Verify the legacy FRRConfiguration is cleaned up
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: legacyNS.Name,
+					Name:      podFrrName.Name,
+				}, &frrk8sv1.FRRConfiguration{})
 				g.Expect(err).To(HaveOccurred())
 				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
