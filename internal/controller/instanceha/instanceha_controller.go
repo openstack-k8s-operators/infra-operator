@@ -756,6 +756,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, nil
 	}
 
+	if desiredReplicas > 1 {
+		if err := r.reconcileLeaderLabels(ctx, instance); err != nil {
+			Log.Info("Failed to reconcile leader labels", "error", err)
+		}
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -780,6 +786,54 @@ var allWatchFields = []string{
 	topologyField,
 	acSecretField,
 	metricsTLSField,
+}
+
+// reconcileLeaderLabels ensures only the Lease holder has leader=true.
+// When a worker node crashes, the old leader pod retains its label until
+// Kubernetes GC cleans it up. This creates a window where two pods have
+// leader=true, breaking Service selectors. This function reads the Lease,
+// finds the holder, and patches any other pod's label to false.
+func (r *Reconciler) reconcileLeaderLabels(ctx context.Context, instance *instancehav1.InstanceHa) error {
+	Log := r.GetLogger(ctx)
+	leaseName := fmt.Sprintf("instanceha-%s-leader", instance.Name)
+	lease := &coordinationv1.Lease{}
+	if err := r.Get(ctx, types.NamespacedName{Name: leaseName, Namespace: instance.Namespace}, lease); err != nil {
+		return nil
+	}
+
+	holder := ""
+	if lease.Spec.HolderIdentity != nil {
+		holder = *lease.Spec.HolderIdentity
+	}
+	if holder == "" {
+		return nil
+	}
+
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{
+			common.AppSelector:                instance.Name,
+			"instanceha.openstack.org/leader": "true",
+		},
+	); err != nil {
+		return err
+	}
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Name != holder {
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Labels["instanceha.openstack.org/leader"] = "false"
+			if err := r.Patch(ctx, pod, patch); err != nil {
+				Log.Info("Failed to clear stale leader label", "pod", pod.Name, "error", err)
+			} else {
+				Log.Info("Cleared stale leader label from pod", "pod", pod.Name, "leaseHolder", holder)
+			}
+		}
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

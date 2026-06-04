@@ -1510,6 +1510,7 @@ class InstanceHAService(CloudConnectionProvider):
                         LEADER_ELECTION_IS_LEADER.set(1)
                         LEADER_ELECTION_TRANSITIONS.labels(transition='acquired').inc()
                         _patch_pod_leader_label(self._holder_identity, namespace, True)
+                        _clear_stale_leader_labels(self._holder_identity, namespace)
                         _emit_k8s_event(
                             self._holder_identity, 'LeaderAcquired',
                             'Acquired leader lease — starting fencing')
@@ -3318,6 +3319,30 @@ def _patch_pod_leader_label(pod_name, namespace, is_leader):
                        verify=_K8S_CA_PATH, timeout=5)
     except Exception as e:
         logging.warning("Failed to patch pod leader label: %s", e)
+
+
+def _clear_stale_leader_labels(current_leader, namespace):
+    """Set leader label to false on all pods except the current leader."""
+    token, _ = _get_k8s_credentials()
+    if not token or not current_leader:
+        return
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/merge-patch+json',
+    }
+    label_selector = f'{_LEADER_LABEL}=true'
+    list_url = f"{_K8S_API_BASE}/api/v1/namespaces/{namespace}/pods?labelSelector={label_selector}"
+    try:
+        resp = requests.get(list_url, headers=headers, verify=_K8S_CA_PATH, timeout=5)
+        if resp.status_code != 200:
+            return
+        for pod in resp.json().get('items', []):
+            pod_name = pod.get('metadata', {}).get('name', '')
+            if pod_name and pod_name != current_leader:
+                logging.info("Clearing stale leader label from pod %s", pod_name)
+                _patch_pod_leader_label(pod_name, namespace, False)
+    except Exception as e:
+        logging.warning("Failed to clear stale leader labels: %s", e)
 
 
 def _emit_k8s_event(host, reason, message, event_type='Normal'):
