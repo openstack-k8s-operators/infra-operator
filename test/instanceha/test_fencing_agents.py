@@ -320,13 +320,11 @@ class TestRedfishFencing(unittest.TestCase):
         # Verify GET was called
         mock_get.assert_called_once()
 
+    @patch('instanceha.requests.Session')
     @patch('instanceha.requests.post')
-    @patch('requests.get')
     @patch('instanceha.time.sleep')
-    def test_redfish_reset_forceoff_wait_for_power_off(self, mock_sleep, mock_get, mock_post):
+    def test_redfish_reset_forceoff_wait_for_power_off(self, mock_sleep, mock_post, mock_session_cls):
         """Test Redfish ForceOff waits for actual power off confirmation."""
-        # Reset mock call counts
-        mock_get.reset_mock()
         mock_sleep.reset_mock()
 
         # Mock config manager
@@ -338,12 +336,14 @@ class TestRedfishFencing(unittest.TestCase):
         mock_post_response.status_code = 200
         mock_post.return_value = mock_post_response
 
-        # Mock GET responses: first ON, then OFF
+        # Mock GET responses via session: first ON, then OFF
+        mock_session = Mock()
+        mock_session_cls.return_value = mock_session
         mock_get_responses = [
             Mock(status_code=200, json=Mock(return_value={'PowerState': 'On'})),
             Mock(status_code=200, json=Mock(return_value={'PowerState': 'Off'}))
         ]
-        mock_get.side_effect = mock_get_responses
+        mock_session.get.side_effect = mock_get_responses
 
         # Test the function
         result = instanceha._redfish_reset('http://test-server/redfish/v1/Systems/1', 'user', 'pass', 2, 'ForceOff', mock_config_manager)
@@ -352,14 +352,13 @@ class TestRedfishFencing(unittest.TestCase):
         self.assertTrue(result)
 
         # Verify that the function attempted to check power state multiple times
-        # (exact count may vary due to other test interference)
-        self.assertGreaterEqual(mock_get.call_count, 2)  # At least 2 calls expected
-        self.assertGreaterEqual(mock_sleep.call_count, 1)  # At least 1 sleep call expected
+        self.assertGreaterEqual(mock_session.get.call_count, 2)
+        self.assertGreaterEqual(mock_sleep.call_count, 1)
 
+    @patch('instanceha.requests.Session')
     @patch('instanceha.requests.post')
-    @patch('requests.get')
     @patch('instanceha.time.sleep')
-    def test_redfish_reset_forceoff_timeout(self, mock_sleep, mock_get, mock_post):
+    def test_redfish_reset_forceoff_timeout(self, mock_sleep, mock_post, mock_session_cls):
         """Test Redfish ForceOff times out waiting for power off."""
         # Mock config manager
         mock_config_manager = Mock()
@@ -370,11 +369,13 @@ class TestRedfishFencing(unittest.TestCase):
         mock_post_response.status_code = 200
         mock_post.return_value = mock_post_response
 
-        # Mock GET response always returning ON (never powers off)
+        # Mock GET response via session always returning ON (never powers off)
+        mock_session = Mock()
+        mock_session_cls.return_value = mock_session
         mock_get_response = Mock()
         mock_get_response.status_code = 200
         mock_get_response.json.return_value = {'PowerState': 'On'}
-        mock_get.return_value = mock_get_response
+        mock_session.get.return_value = mock_get_response
 
         # Test the function with timeout=2
         result = instanceha._redfish_reset('http://test-server/redfish/v1/Systems/1', 'user', 'pass', 2, 'ForceOff', mock_config_manager)
@@ -383,9 +384,8 @@ class TestRedfishFencing(unittest.TestCase):
         self.assertFalse(result)
 
         # Verify that the function attempted to check power state multiple times
-        # (exact count may vary due to other test interference)
-        self.assertGreaterEqual(mock_get.call_count, 2)  # At least 2 calls expected
-        self.assertGreaterEqual(mock_sleep.call_count, 2)  # At least 2 sleep calls expected
+        self.assertGreaterEqual(mock_session.get.call_count, 2)
+        self.assertGreaterEqual(mock_sleep.call_count, 2)
 
     @patch('instanceha.requests.post')
     def test_redfish_reset_on_no_wait(self, mock_post):

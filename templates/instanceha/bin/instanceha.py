@@ -264,6 +264,7 @@ _SECRET_PATTERNS = {
     'application_credential_id': re.compile(r'\bapplication_credential_id=[^\s)\'\"]+', re.IGNORECASE),
     'auth': re.compile(r'\bauth=[^\s)\'\"]+', re.IGNORECASE),
     'json_password': re.compile(r'("(?:password|passwd|token|secret|credential|application_credential_secret|application_credential_id)")\s*:\s*"(?:[^"\\]|\\.)*"', re.IGNORECASE),
+    'authorization': re.compile(r'\bAuthorization:\s*\S+', re.IGNORECASE),
 }
 
 
@@ -289,6 +290,14 @@ def _safe_log_exception(msg: str, e: Exception, include_traceback: bool = False)
         logging.debug("Exception traceback:", exc_info=True)
 
 
+def _interruptible_sleep(shutdown_event, seconds):
+    """Sleep that can be interrupted by a shutdown event."""
+    if shutdown_event:
+        shutdown_event.wait(seconds)
+    else:
+        time.sleep(seconds)
+
+
 def _retry_with_backoff(func, max_attempts, label, delay=FENCING_RETRY_DELAY_SECONDS):
     """Retry func with linear backoff. Returns func result on success, raises on final failure."""
     for attempt in range(max_attempts):
@@ -296,10 +305,10 @@ def _retry_with_backoff(func, max_attempts, label, delay=FENCING_RETRY_DELAY_SEC
             return func()
         except Exception as e:
             if attempt < max_attempts - 1:
-                logging.warning('%s failed (attempt %d/%d): %s', label, attempt + 1, max_attempts, e)
+                logging.warning('%s failed (attempt %d/%d): %s', label, attempt + 1, max_attempts, _sanitize_message(str(e)))
                 time.sleep(delay * (attempt + 1))
             else:
-                logging.error('%s failed after %d attempts: %s', label, max_attempts, e)
+                logging.error('%s failed after %d attempts: %s', label, max_attempts, _sanitize_message(str(e)))
                 raise
 
 
@@ -396,7 +405,7 @@ def validate_inputs(validations: dict, context: str) -> bool:
 
 
 def _make_ssl_request(method: str, url: str, auth: tuple, timeout: int,
-                      config_mgr: 'ConfigManager', **kwargs):
+                      config_mgr: 'ConfigManager', session: requests.Session = None, **kwargs):
     """Make HTTP request with SSL configuration from config manager."""
     _ALLOWED_HTTP_METHODS = frozenset({'get', 'post', 'patch', 'put', 'delete'})
     if method not in _ALLOWED_HTTP_METHODS:
@@ -410,7 +419,8 @@ def _make_ssl_request(method: str, url: str, auth: tuple, timeout: int,
     else:
         request_kwargs['verify'] = ssl_config
 
-    return getattr(requests, method)(url, **request_kwargs)
+    requester = session or requests
+    return getattr(requester, method)(url, **request_kwargs)
 
 
 def _wait_for_power_off(check_func: Callable[[], Optional[str]], timeout: int,
@@ -516,20 +526,9 @@ def _load_ac_credentials(auth_url: str, region_name: str) -> Optional[ACLoginCre
 
 
 class ConfigManager:
-    """
-    Secure configuration manager for InstanceHA application.
-
-    This class handles loading, validation, and secure access to configuration
-    values with proper type checking and default values.
-    """
+    """Secure configuration manager for InstanceHA with type checking and validation."""
 
     def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize the configuration manager.
-
-        Args:
-            config_path: Path to configuration file, defaults to environment variable or standard path
-        """
         self.config_path = config_path or os.getenv('INSTANCEHA_CONFIG_PATH', '/var/lib/instanceha/config.yaml')
         self.clouds_path = os.getenv('CLOUDS_CONFIG_PATH', '/home/cloud-admin/.config/openstack/clouds.yaml')
         self.secure_path = os.getenv('SECURE_CONFIG_PATH', '/home/cloud-admin/.config/openstack/secure.yaml')
@@ -574,29 +573,23 @@ class ConfigManager:
             config['DISABLED'] = True
         return config
 
-    def _load_clouds_config(self) -> Dict[str, Any]:
-        data = self._load_yaml_file(self.clouds_path, "clouds configuration")
+    def _load_keyed_yaml(self, path: str, name: str, key: str) -> Dict[str, Any]:
+        """Load a YAML file and return the value under a required top-level key."""
+        data = self._load_yaml_file(path, name)
         if not data:
             return {}
-        if "clouds" not in data:
-            raise ConfigurationError(f"Missing 'clouds' key in clouds configuration at {self.clouds_path}")
-        return data["clouds"]
+        if key not in data:
+            raise ConfigurationError(f"Missing '{key}' key in {name} at {path}")
+        return data[key]
+
+    def _load_clouds_config(self) -> Dict[str, Any]:
+        return self._load_keyed_yaml(self.clouds_path, "clouds configuration", "clouds")
 
     def _load_secure_config(self) -> Dict[str, Any]:
-        data = self._load_yaml_file(self.secure_path, "secure configuration")
-        if not data:
-            return {}
-        if "clouds" not in data:
-            raise ConfigurationError(f"Missing 'clouds' key in secure configuration at {self.secure_path}")
-        return data["clouds"]
+        return self._load_keyed_yaml(self.secure_path, "secure configuration", "clouds")
 
     def _load_fencing_config(self) -> Dict[str, Any]:
-        data = self._load_yaml_file(self.fencing_path, "fencing configuration")
-        if not data:
-            return {}
-        if "FencingConfig" not in data:
-            raise ConfigurationError(f"Missing 'FencingConfig' key in fencing configuration at {self.fencing_path}")
-        return data["FencingConfig"]
+        return self._load_keyed_yaml(self.fencing_path, "fencing configuration", "FencingConfig")
 
     def _validate_config(self) -> None:
         """Validate critical configuration values using the configuration map."""
@@ -722,27 +715,23 @@ class ConfigManager:
     def get_cloud_name(self) -> str:
         return os.getenv('OS_CLOUD', 'overcloud')
 
-    def get_udp_port(self) -> int:
+    def _get_env_port(self, env_var: str, default: int) -> int:
+        """Read a port number from an environment variable with validation."""
         try:
-            port = int(os.getenv('UDP_PORT', DEFAULT_UDP_PORT))
+            port = int(os.getenv(env_var, default))
         except (ValueError, TypeError):
-            logging.warning("Invalid UDP_PORT, using default %d", DEFAULT_UDP_PORT)
-            return DEFAULT_UDP_PORT
+            logging.warning("Invalid %s, using default %d", env_var, default)
+            return default
         if not 1 <= port <= 65535:
-            logging.warning("UDP_PORT %d out of range, using default %d", port, DEFAULT_UDP_PORT)
-            return DEFAULT_UDP_PORT
+            logging.warning("%s %d out of range, using default %d", env_var, port, default)
+            return default
         return port
 
+    def get_udp_port(self) -> int:
+        return self._get_env_port('UDP_PORT', DEFAULT_UDP_PORT)
+
     def get_heartbeat_port(self) -> int:
-        try:
-            port = int(os.getenv('HEARTBEAT_PORT', DEFAULT_HEARTBEAT_PORT))
-        except (ValueError, TypeError):
-            logging.warning("Invalid HEARTBEAT_PORT, using default %d", DEFAULT_HEARTBEAT_PORT)
-            return DEFAULT_HEARTBEAT_PORT
-        if not 1 <= port <= 65535:
-            logging.warning("HEARTBEAT_PORT %d out of range, using default %d", port, DEFAULT_HEARTBEAT_PORT)
-            return DEFAULT_HEARTBEAT_PORT
-        return port
+        return self._get_env_port('HEARTBEAT_PORT', DEFAULT_HEARTBEAT_PORT)
 
     @property
     def ssl_ca_bundle(self) -> Optional[str]:
@@ -776,20 +765,9 @@ class ConfigManager:
 
 
 class InstanceHAService(CloudConnectionProvider):
-    """
-    Main service class that encapsulates all InstanceHA functionality.
-
-    Uses dependency injection with no global state.
-    """
+    """Main service class that encapsulates all InstanceHA functionality."""
 
     def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenStackClient] = None):
-        """
-        Initialize the InstanceHA service.
-
-        Args:
-            config_manager: Configuration manager instance
-            cloud_client: Optional OpenStack client for testing (None for production)
-        """
         self.config = config_manager
         self.cloud_client = cloud_client
 
@@ -802,7 +780,6 @@ class InstanceHAService(CloudConnectionProvider):
         self.k8s_api_reachable = False
 
         # Caching
-        self._host_servers_cache = {}
         self._evacuable_flavors_cache = None
         self._evacuable_images_cache = None
         self._cache_timestamp = 0
@@ -872,12 +849,7 @@ class InstanceHAService(CloudConnectionProvider):
             self._last_hash_time = current_timestamp
 
     def get_connection(self) -> Optional[OpenStackClient]:
-        """
-        Get cloud client connection with dependency injection support.
-
-        Returns:
-            OpenStack client connection or None if failed
-        """
+        """Get cloud client connection, using injected client or creating a new one."""
         if self.cloud_client:
             return self.cloud_client
 
@@ -935,17 +907,7 @@ class InstanceHAService(CloudConnectionProvider):
             return False
 
     def is_server_evacuable(self, server, evac_flavors=None, evac_images=None):
-        """
-        Check if a server is evacuable based on flavor and image tags.
-
-        Args:
-            server: Server instance to check
-            evac_flavors: Optional list of evacuable flavor IDs
-            evac_images: Optional list of evacuable image IDs
-
-        Returns:
-            bool: True if server is evacuable, False otherwise
-        """
+        """Check if a server is evacuable based on flavor and image tags."""
         evac_flavors = evac_flavors if evac_flavors is not None else self.get_evacuable_flavors()
         evac_images = evac_images if evac_images is not None else self.get_evacuable_images()
 
@@ -980,123 +942,66 @@ class InstanceHAService(CloudConnectionProvider):
                            server.id, " or ".join(criteria), self.evacuable_tag)
         return False
 
-    def get_evacuable_flavors(self, connection: Optional[OpenStackClient] = None):
-        """
-        Get list of evacuable flavor IDs with caching.
-
-        Args:
-            connection: Optional Nova connection
-
-        Returns:
-            List of evacuable flavor IDs
-        """
-        if not self.config.get_config_value('TAGGED_FLAVORS'):
+    def _get_cached_evacuable(self, cache_attr: str, config_key: str,
+                              fetch_func: Callable, connection=None) -> List:
+        """Generic cache-aside pattern: check config → check cache → fetch → store."""
+        if not self.config.get_config_value(config_key):
             return []
-
         if connection is None:
             connection = self.get_connection()
-
         if connection is None:
-            logging.error("No Nova connection available for flavor caching")
+            logging.error("No Nova connection available for %s caching", config_key)
             return []
-
-        # Lock granularity pattern: read check → API call outside lock → write update
-        # This minimizes lock hold time and prevents blocking during slow API calls
+        # Read check under lock, API call outside lock, write under lock
         with self._cache_lock:
-            if self._evacuable_flavors_cache is not None:
-                return self._evacuable_flavors_cache
-
-        # Perform expensive API call outside lock (no blocking)
+            cached = getattr(self, cache_attr)
+            if cached is not None:
+                return cached
         try:
-            flavors = connection.flavors.list(is_public=None)
-
-            cache_data = []
-            for flavor in flavors:
-                try:
-                    if self._is_flavor_evacuable(flavor, self.evacuable_tag):
-                        cache_data.append(flavor.id)
-                        logging.debug("Added flavor %s to evacuable cache", flavor.id)
-                except Exception as e:
-                    logging.debug("Could not check keys for flavor %s: %s", flavor.id, e)
-
-            logging.debug("Cached %d evacuable flavors from %d total flavors",
-                         len(cache_data), len(flavors))
+            cache_data = fetch_func(connection)
         except Exception as e:
-            logging.error("Failed to get evacuable flavors: %s", e)
+            logging.error("Failed to get evacuable resources (%s): %s", config_key, e)
             logging.debug('Exception traceback:', exc_info=True)
             cache_data = []
-
-        # Update cache with lock
         with self._cache_lock:
-            self._evacuable_flavors_cache = cache_data
-
+            setattr(self, cache_attr, cache_data)
         return cache_data
 
-    def get_evacuable_images(self, connection: Optional[OpenStackClient] = None):
-        """
-        Get list of evacuable image IDs with caching.
+    def _fetch_evacuable_flavors(self, connection) -> List:
+        """Fetch evacuable flavor IDs from Nova."""
+        flavors = connection.flavors.list(is_public=None)
+        cache_data = []
+        for flavor in flavors:
+            try:
+                if self._is_flavor_evacuable(flavor, self.evacuable_tag):
+                    cache_data.append(flavor.id)
+                    logging.debug("Added flavor %s to evacuable cache", flavor.id)
+            except Exception as e:
+                logging.debug("Could not check keys for flavor %s: %s", flavor.id, e)
+        logging.debug("Cached %d evacuable flavors from %d total", len(cache_data), len(flavors))
+        return cache_data
 
-        Attempts multiple methods to access image information and cache evacuable image IDs.
-
-        Args:
-            connection: Optional Nova connection
-
-        Returns:
-            List of evacuable image IDs
-        """
-        if not self.config.get_config_value('TAGGED_IMAGES'):
-            return []
-
-        if connection is None:
-            connection = self.get_connection()
-
-        if connection is None:
-            logging.error("No Nova connection available for image caching")
-            return []
-
-        # Check cache with lock
-        with self._cache_lock:
-            if self._evacuable_images_cache is not None:
-                return self._evacuable_images_cache
-
-        # Image retrieval strategies (in order of preference)
-        def _try_nova_glance():
-            if hasattr(connection, 'glance'):
-                images = connection.glance.list()
-                logging.debug("Retrieved %d images via Nova glance client", len(images))
-                return images
-            return None
-
-        def _try_nova_images():
-            if hasattr(connection, 'images'):
-                images = connection.images.list()
-                logging.debug("Retrieved %d images via Nova images interface", len(images))
-                return images
-            return None
-
+    def _fetch_evacuable_images(self, connection) -> List:
+        """Fetch evacuable image IDs, trying multiple retrieval strategies."""
+        retrieval_strategies = [
+            ("Nova glance client", lambda: connection.glance.list() if hasattr(connection, 'glance') else None),
+            ("Nova images interface", lambda: connection.images.list() if hasattr(connection, 'images') else None),
+        ]
+        # Try separate Glance client as last resort
         def _try_separate_glance():
             from glanceclient import client as glance_client
             if hasattr(connection, 'api') and hasattr(connection.api, 'session'):
-                session = connection.api.session
-                region_name = connection.region_name
-                glance = glance_client.Client('2', session=session, region_name=region_name)
-                images = list(glance.images.list())
-                logging.debug("Retrieved %d images via separate Glance client", len(images))
-                return images
+                return list(glance_client.Client('2', session=connection.api.session,
+                            region_name=connection.region_name).images.list())
             return None
+        retrieval_strategies.append(("Separate Glance client", _try_separate_glance))
 
-        retrieval_strategies = [
-            ("Nova glance client", _try_nova_glance),
-            ("Nova images interface", _try_nova_images),
-            ("Separate Glance client", _try_separate_glance),
-        ]
-
-        # Try each strategy until one succeeds
         images = []
         for strategy_name, strategy_func in retrieval_strategies:
             try:
                 result = strategy_func()
                 if result:
+                    logging.debug("Retrieved %d images via %s", len(result), strategy_name)
                     images = result
                     break
             except ImportError:
@@ -1104,43 +1009,27 @@ class InstanceHAService(CloudConnectionProvider):
             except Exception as e:
                 logging.debug("%s access failed: %s", strategy_name, e)
 
-        # Perform expensive API call outside lock
-        try:
-            # Process images to find evacuable ones
-            cache_data = []
-            if images:
-                for image in images:
-                    # Check image for evacuable tags using unified method
-                    if self._is_resource_evacuable(image, self.evacuable_tag, ['tags', 'metadata', 'properties']):
-                        cache_data.append(image.id)
+        if not images:
+            logging.warning("Could not retrieve images for caching. Image evacuation will use per-server checking.")
+            return []
 
-                logging.debug("Cached %d evacuable images from %d total images",
-                             len(cache_data), len(images))
-            else:
-                # No images retrieved, fall back to per-server checking
-                logging.warning("Could not retrieve images for caching. Image evacuation will use per-server checking.")
-
-        except Exception as e:
-            logging.error("Failed to get evacuable images: %s", e)
-            logging.debug('Exception traceback:', exc_info=True)
-            cache_data = []
-
-        # Update cache with lock
-        with self._cache_lock:
-            self._evacuable_images_cache = cache_data
-
+        cache_data = [img.id for img in images
+                      if self._is_resource_evacuable(img, self.evacuable_tag, ['tags', 'metadata', 'properties'])]
+        logging.debug("Cached %d evacuable images from %d total", len(cache_data), len(images))
         return cache_data
 
+    def get_evacuable_flavors(self, connection: Optional[OpenStackClient] = None):
+        """Get list of evacuable flavor IDs with caching."""
+        return self._get_cached_evacuable('_evacuable_flavors_cache', 'TAGGED_FLAVORS',
+                                          self._fetch_evacuable_flavors, connection)
+
+    def get_evacuable_images(self, connection: Optional[OpenStackClient] = None):
+        """Get list of evacuable image IDs with caching."""
+        return self._get_cached_evacuable('_evacuable_images_cache', 'TAGGED_IMAGES',
+                                          self._fetch_evacuable_images, connection)
+
     def _get_server_image_id(self, server):
-        """
-        Extract image ID from server object, handling different data formats.
-
-        Args:
-            server: Server instance
-
-        Returns:
-            str: Image ID or None if not found
-        """
+        """Extract image ID from server object, handling different data formats."""
         try:
             image = getattr(server, 'image', None)
             if not image:
@@ -1170,17 +1059,7 @@ class InstanceHAService(CloudConnectionProvider):
             return False
 
     def _is_resource_evacuable(self, resource, evacuable_tag, attribute_checks):
-        """
-        Unified method to check if a resource (image, flavor, aggregate) is evacuable.
-
-        Args:
-            resource: The resource object to check
-            evacuable_tag: The tag to look for
-            attribute_checks: List of attribute names to check on the resource
-
-        Returns:
-            bool: True if resource is evacuable, False otherwise
-        """
+        """Check if a resource (image, flavor, aggregate) is evacuable by checking attribute_checks for the tag."""
         for attr_name in attribute_checks:
             if hasattr(resource, attr_name):
                 attr_value = getattr(resource, attr_name, {})
@@ -1189,51 +1068,14 @@ class InstanceHAService(CloudConnectionProvider):
         return False
 
     def _is_flavor_evacuable(self, flavor, evacuable_tag):
-        """
-        Check if a flavor is evacuable based on its extra specs.
-
-        Args:
-            flavor: The flavor object to check
-            evacuable_tag: The tag to look for
-
-        Returns:
-            bool: True if flavor is evacuable, False otherwise
-        """
+        """Check if a flavor is evacuable based on its extra specs."""
         try:
-            flavor_keys = flavor.get_keys()
-
-            # Check if evacuable_tag is an exact key match or part of a key (e.g., trait:CUSTOM_HA)
-            matching_key = None
-            if evacuable_tag in flavor_keys:
-                matching_key = evacuable_tag
-            else:
-                # Look for the tag in composite keys like "trait:CUSTOM_HA"
-                for key in flavor_keys:
-                    if evacuable_tag in key:
-                        matching_key = key
-                        break
-
-            if matching_key:
-                value = flavor_keys[matching_key]
-                return str(value).lower() == 'true'
-            return False
+            return self._check_evacuable_tag(flavor.get_keys(), evacuable_tag)
         except (AttributeError, KeyError, TypeError):
             return False
 
     def is_server_image_evacuable(self, server, connection: Optional[OpenStackClient] = None):
-        """
-        Check if a server's image is tagged as evacuable (fallback method).
-
-        This method is used when pre-caching fails. It attempts to check
-        individual server images for evacuable tags.
-
-        Args:
-            server: Server instance to check
-            connection: Optional Nova connection
-
-        Returns:
-            bool: True if server's image is evacuable, False otherwise
-        """
+        """Check if a server's image is tagged as evacuable (fallback when pre-caching fails)."""
         if not self.config.get_config_value('TAGGED_IMAGES'):
             return False
 
@@ -1271,17 +1113,7 @@ class InstanceHAService(CloudConnectionProvider):
             return False
 
     def is_aggregate_evacuable(self, connection: OpenStackClient, host: str, aggregates=None) -> bool:
-        """
-        Check if a host is part of an aggregate that has been tagged as evacuable.
-
-        Args:
-            connection: Nova connection
-            host: Host name to check
-            aggregates: Optional cached aggregate list to avoid redundant API calls
-
-        Returns:
-            bool: True if host is in evacuable aggregate, False otherwise
-        """
+        """Check if a host is part of an aggregate tagged as evacuable."""
         try:
             if aggregates is None:
                 aggregates = connection.aggregates.list()
@@ -1295,16 +1127,7 @@ class InstanceHAService(CloudConnectionProvider):
             return False
 
     def get_hosts_with_servers_cached(self, connection, services):
-        """
-        Efficiently cache server lists for all hosts to avoid repeated API calls.
-
-        Args:
-            connection: Nova client connection
-            services: List of compute services
-
-        Returns:
-            Dict mapping host names to their server lists
-        """
+        """Cache server lists for all hosts to avoid repeated API calls."""
         host_servers = {}
 
         for service in services:
@@ -1330,16 +1153,7 @@ class InstanceHAService(CloudConnectionProvider):
         return host_servers
 
     def filter_hosts_with_servers(self, services, host_servers_cache):
-        """
-        Efficiently filter out hosts that have no running servers.
-
-        Args:
-            services: List of compute services to filter
-            host_servers_cache: Pre-cached mapping of host -> servers
-
-        Returns:
-            List of services that have servers running
-        """
+        """Filter out hosts that have no running servers."""
         return [
             service for service in services
             if host_servers_cache.get(service.host) is None
@@ -1347,18 +1161,7 @@ class InstanceHAService(CloudConnectionProvider):
         ]
 
     def filter_hosts_with_evacuable_servers(self, services, host_servers_cache, flavors=None, images=None):
-        """
-        Efficiently filter hosts that have evacuable servers.
-
-        Args:
-            services: List of compute services to filter
-            host_servers_cache: Pre-cached mapping of host -> servers
-            flavors: Optional list of evacuable flavor IDs
-            images: Optional list of evacuable image IDs
-
-        Returns:
-            List of services that have evacuable servers
-        """
+        """Filter hosts that have evacuable servers."""
         if flavors is None:
             flavors = self.get_evacuable_flavors()
         if images is None:
@@ -1442,41 +1245,33 @@ class InstanceHAService(CloudConnectionProvider):
         service_instance = self
 
         class HealthHandler(BaseHTTPRequestHandler):
+            timeout = 5
+
             def log_message(self, format, *args):
                 logging.debug("Health check: %s", format % args)
+
+            def _respond(self, code, content_type, body):
+                self.send_response(code)
+                self.send_header("Content-type", content_type)
+                self.end_headers()
+                self.wfile.write(body if isinstance(body, bytes) else body.encode('utf-8'))
 
             def do_GET(self):
                 if self.path == '/healthz':
                     if service_instance.ready:
-                        self.send_response(200)
-                        self.send_header("Content-type", "text/plain")
-                        self.end_headers()
-                        self.wfile.write(b"ok")
+                        self._respond(200, "text/plain", b"ok")
                     else:
-                        self.send_response(503)
-                        self.send_header("Content-type", "text/plain")
-                        self.end_headers()
-                        self.wfile.write(b"not ready")
+                        self._respond(503, "text/plain", b"not ready")
                     return
 
                 if self.path == '/metrics':
-                    data = generate_latest()
-                    self.send_response(200)
-                    self.send_header("Content-type", CONTENT_TYPE_LATEST)
-                    self.end_headers()
-                    self.wfile.write(data)
+                    self._respond(200, CONTENT_TYPE_LATEST, generate_latest())
                     return
 
                 if service_instance.hash_update_successful:
-                    self.send_response(200)
-                    self.send_header("Content-type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(service_instance.current_hash.encode('utf-8'))
+                    self._respond(200, "text/plain", service_instance.current_hash)
                 else:
-                    self.send_response(500)
-                    self.send_header("Content-type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"Error: Hash not updated properly.")
+                    self._respond(500, "text/plain", b"Error: Hash not updated properly.")
 
         try:
             server = HTTPServer(('', HEALTH_CHECK_PORT), HealthHandler)
@@ -1887,22 +1682,22 @@ def _run_concurrent(func, items, max_workers, item_id_func, log_prefix=""):
     return all_succeeded
 
 
-def _orchestrated_evacuate(connection, evacuables, service, host, service_id, target_host=None) -> bool:
-    """Evacuate with priority-ordered phases (grouped by restart_group metadata)."""
-    phases = _build_evacuation_groups(evacuables)
+def _concurrent_evacuate(connection, evacuables, service, host, service_id, target_host=None) -> bool:
+    """Evacuate concurrently, optionally with priority-ordered phases."""
+    orchestrated = service.config.get_config_value('ORCHESTRATED_RESTART') is True
+    phases = _build_evacuation_groups(evacuables) if orchestrated else [evacuables]
     total_phases = len(phases)
-    total_servers = sum(len(p) for p in phases)
     max_retries = service.config.get_config_value('EVACUATION_RETRIES')
-
-    logging.info("Orchestrated evacuation: %d phases, %d total servers from %s",
-                total_phases, total_servers, host)
-
-    all_succeeded = True
     inner_workers = max(1, MAX_TOTAL_EVACUATION_THREADS // service.config.get_config_value('WORKERS'))
 
+    logging.info("Concurrent evacuation: %d phase(s), %d total servers from %s (orchestrated=%s)",
+                total_phases, sum(len(p) for p in phases), host, orchestrated)
+
+    all_succeeded = True
     for phase_num, phase_servers in enumerate(phases, 1):
-        logging.info("Starting evacuation phase %d/%d (%d servers)",
-                    phase_num, total_phases, len(phase_servers))
+        if total_phases > 1:
+            logging.info("Starting evacuation phase %d/%d (%d servers)",
+                        phase_num, total_phases, len(phase_servers))
 
         phase_ok = _run_concurrent(
             lambda s: _server_evacuate_future(connection, s, target_host,
@@ -1911,41 +1706,20 @@ def _orchestrated_evacuate(connection, evacuables, service, host, service_id, ta
             phase_servers,
             inner_workers,
             lambda s: s.id,
-            log_prefix=f"Phase {phase_num}: ",
+            log_prefix=f"Phase {phase_num}: " if total_phases > 1 else "",
         )
         if not phase_ok:
             all_succeeded = False
-        logging.log(logging.INFO if phase_ok else logging.WARNING,
-                    "Evacuation phase %d/%d completed %s", phase_num, total_phases,
-                    "successfully" if phase_ok else "with failures")
+        if total_phases > 1:
+            logging.log(logging.INFO if phase_ok else logging.WARNING,
+                        "Evacuation phase %d/%d completed %s", phase_num, total_phases,
+                        "successfully" if phase_ok else "with failures")
 
     if not all_succeeded:
         _update_service_disable_reason(connection, host, service_id)
 
     return all_succeeded
 
-
-def _smart_evacuate(connection, evacuables, service, host, service_id, target_host=None) -> bool:
-    """Evacuate concurrently with migration tracking."""
-    workers = service.config.get_config_value('WORKERS')
-    max_retries = service.config.get_config_value('EVACUATION_RETRIES')
-    logging.debug("Using smart evacuation with %d workers%s", workers,
-                 f", targeting host {target_host}" if target_host else "")
-
-    inner_workers = max(1, MAX_TOTAL_EVACUATION_THREADS // service.config.get_config_value('WORKERS'))
-    all_succeeded = _run_concurrent(
-        lambda s: _server_evacuate_future(connection, s, target_host,
-                                          max_retries=max_retries,
-                                          shutdown_event=service.shutdown_event),
-        evacuables,
-        inner_workers,
-        lambda s: s.id,
-    )
-
-    if not all_succeeded:
-        _update_service_disable_reason(connection, host, service_id)
-
-    return all_succeeded
 
 def _traditional_evacuate(connection, evacuables, host, target_host=None) -> bool:
     """Fire-and-forget evacuation without migration tracking."""
@@ -1979,10 +1753,8 @@ def _host_evacuate(connection, failed_service, service, target_host=None) -> boo
 
     time.sleep(service.config.get_config_value('DELAY'))
 
-    if service.config.get_config_value('ORCHESTRATED_RESTART') is True:
-        return _orchestrated_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host)
-    elif service.config.get_config_value('SMART_EVACUATION'):
-        return _smart_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host)
+    if service.config.get_config_value('ORCHESTRATED_RESTART') is True or service.config.get_config_value('SMART_EVACUATION'):
+        return _concurrent_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host)
     else:
         return _traditional_evacuate(connection, evacuables, host, target_host=target_host)
 
@@ -2125,22 +1897,16 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
                         logging.warning("Re-issue of evacuation for %s failed: %s", server_id, retry_result.reason)
                 except Exception as retry_err:
                     logging.warning("Failed to re-issue evacuation for %s: %s", server_id, retry_err)
-                if shutdown_event:
-                    shutdown_event.wait(EVACUATION_RETRY_WAIT_SECONDS)
-                else:
-                    time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
+                _interruptible_sleep(shutdown_event, EVACUATION_RETRY_WAIT_SECONDS)
                 continue
 
             logging.debug("Evacuation of %s still in progress", response_uuid)
-            if shutdown_event:
-                shutdown_event.wait(EVACUATION_POLL_INTERVAL_SECONDS)
-            else:
-                time.sleep(EVACUATION_POLL_INTERVAL_SECONDS)
+            _interruptible_sleep(shutdown_event, EVACUATION_POLL_INTERVAL_SECONDS)
 
         except Exception as e:
             api_error_count += 1
             logging.error("Error checking evacuation status for %s: %s",
-                         response_uuid, str(e))
+                         response_uuid, _sanitize_message(str(e)))
             logging.debug('Exception traceback:', exc_info=True)
             if api_error_count >= MAX_API_RETRIES:
                 logging.error("Too many API errors checking evacuation status for %s. Giving up.",
@@ -2148,10 +1914,7 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
                 return False
             logging.warning("Retrying evacuation status check for %s in %d seconds (API attempt %d/%d)...",
                            response_uuid, EVACUATION_RETRY_WAIT_SECONDS, api_error_count, MAX_API_RETRIES)
-            if shutdown_event:
-                shutdown_event.wait(EVACUATION_RETRY_WAIT_SECONDS)
-            else:
-                time.sleep(EVACUATION_RETRY_WAIT_SECONDS)
+            _interruptible_sleep(shutdown_event, EVACUATION_RETRY_WAIT_SECONDS)
 
 
 def _server_evacuate_future(connection, server, target_host=None,
@@ -2190,9 +1953,9 @@ def _server_evacuate_future(connection, server, target_host=None,
 
         if not response.accepted:
             logging.warning("Evacuation of %s on %s failed: %s",
-                           response.uuid, server.id, response.reason)
+                           response.uuid, server.id, _sanitize_message(str(response.reason)))
             _emit_k8s_event(source_host, 'InstanceEvacuationFailed',
-                            f'Instance {server.id} evacuation failed: {response.reason}',
+                            f'Instance {server.id} evacuation failed: {_sanitize_message(str(response.reason))}',
                             event_type='Warning')
             INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='failed').inc()
             return False
@@ -2237,10 +2000,10 @@ def _server_evacuate_future(connection, server, target_host=None,
 
     except Exception as e:
         logging.error("Unexpected error during evacuation of server %s: %s",
-                     server.id, str(e))
+                     server.id, _sanitize_message(str(e)))
         logging.debug('Exception traceback:', exc_info=True)
         _emit_k8s_event(source_host, 'InstanceEvacuationFailed',
-                        f'Instance {server.id} evacuation error: {e}',
+                        f'Instance {server.id} evacuation error: {_sanitize_message(str(e))}',
                         event_type='Warning')
         INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='failed').inc()
         return False
@@ -2251,24 +2014,17 @@ def _server_evacuate_future(connection, server, target_host=None,
             logging.debug("Could not unlock server %s (may have been deleted)", server.id)
 
 
-def nova_login(credentials: NovaLoginCredentials, ca_bundle: Optional[str] = None) -> OpenStackClient:
+def _nova_login(plugin_name: str, auth_kwargs: dict, region_name: str,
+                ca_bundle: Optional[str] = None) -> OpenStackClient:
     """Create and return Nova client connection. Raises NovaConnectionError on failure."""
     try:
-        loader = loading.get_plugin_loader("password")
-        auth = loader.load_from_options(
-            auth_url=credentials.auth_url,
-            username=credentials.username,
-            password=credentials.password,
-            project_name=credentials.project_name,
-            user_domain_name=credentials.user_domain_name,
-            project_domain_name=credentials.project_domain_name,
-        )
-
+        loader = loading.get_plugin_loader(plugin_name)
+        auth = loader.load_from_options(**auth_kwargs)
         verify = ca_bundle if ca_bundle else True
         session = ksc_session.Session(auth=auth, verify=verify, timeout=NOVA_API_TIMEOUT_SECONDS)
-        nova = client.Client("2.73", session=session, region_name=credentials.region_name)
+        nova = client.Client("2.73", session=session, region_name=region_name)
         nova.versions.get_current()
-        logging.info("Nova login successful")
+        logging.info("Nova login successful (%s)", plugin_name)
         return nova
     except (DiscoveryFailure, Unauthorized) as e:
         _safe_log_exception(f"Nova login failed: {type(e).__name__}", e)
@@ -2278,28 +2034,25 @@ def nova_login(credentials: NovaLoginCredentials, ca_bundle: Optional[str] = Non
         raise NovaConnectionError("Nova login failed") from e
 
 
-def nova_login_ac(credentials: ACLoginCredentials, ca_bundle: Optional[str] = None) -> OpenStackClient:
-    """Create and return Nova client using Application Credential auth."""
-    try:
-        loader = loading.get_plugin_loader("v3applicationcredential")
-        auth = loader.load_from_options(
-            auth_url=credentials.auth_url,
-            application_credential_id=credentials.application_credential_id,
-            application_credential_secret=credentials.application_credential_secret,
-        )
+def nova_login(credentials: NovaLoginCredentials, ca_bundle: Optional[str] = None) -> OpenStackClient:
+    """Create Nova client with password auth."""
+    return _nova_login("password", {
+        "auth_url": credentials.auth_url,
+        "username": credentials.username,
+        "password": credentials.password,
+        "project_name": credentials.project_name,
+        "user_domain_name": credentials.user_domain_name,
+        "project_domain_name": credentials.project_domain_name,
+    }, credentials.region_name, ca_bundle)
 
-        verify = ca_bundle if ca_bundle else True
-        session = ksc_session.Session(auth=auth, verify=verify, timeout=NOVA_API_TIMEOUT_SECONDS)
-        nova = client.Client("2.73", session=session, region_name=credentials.region_name)
-        nova.versions.get_current()
-        logging.info("Nova login successful (application credential)")
-        return nova
-    except (DiscoveryFailure, Unauthorized) as e:
-        _safe_log_exception(f"Nova AC login failed: {type(e).__name__}", e)
-        raise NovaConnectionError(f"Nova AC login failed: {type(e).__name__}") from e
-    except Exception as e:
-        _safe_log_exception("Nova AC login failed", e, include_traceback=True)
-        raise NovaConnectionError("Nova AC login failed") from e
+
+def nova_login_ac(credentials: ACLoginCredentials, ca_bundle: Optional[str] = None) -> OpenStackClient:
+    """Create Nova client with Application Credential auth."""
+    return _nova_login("v3applicationcredential", {
+        "auth_url": credentials.auth_url,
+        "application_credential_id": credentials.application_credential_id,
+        "application_credential_secret": credentials.application_credential_secret,
+    }, credentials.region_name, ca_bundle)
 
 
 NOVA_EXCEPTION_MESSAGES = {
@@ -2431,7 +2184,7 @@ def _host_enable(connection, nova_service, reenable: bool = False, service=None)
         return False
 
 
-def _get_power_state(agent_type: str, **kwargs) -> Optional[str]:
+def _get_power_state(agent_type: str, session: requests.Session = None, **kwargs) -> Optional[str]:
     """Query power state via redfish or ipmi. Returns uppercase string or None."""
     if agent_type == 'redfish':
         url, user, passwd, timeout, config_mgr = (
@@ -2444,7 +2197,7 @@ def _get_power_state(agent_type: str, **kwargs) -> Optional[str]:
             return None
 
         try:
-            response = _make_ssl_request('get', url, (user, passwd), timeout, config_mgr)
+            response = _make_ssl_request('get', url, (user, passwd), timeout, config_mgr, session=session)
             if response.status_code == 200:
                 data = response.json()
                 return data.get('PowerState', '').upper()
@@ -2498,10 +2251,13 @@ def _redfish_reset(url, user, passwd, timeout, action, config_mgr):
 
             if response.status_code in [200, 202, 204]:
                 if action == "ForceOff":
-                    # Wait for server to actually power off
-                    return _wait_for_power_off(
-                        lambda: _get_power_state('redfish', url=url, user=user, passwd=passwd, timeout=timeout, config_mgr=config_mgr),
-                        timeout, safe_url, 'OFF', 'Redfish')
+                    poll_session = requests.Session()
+                    try:
+                        return _wait_for_power_off(
+                            lambda: _get_power_state('redfish', session=poll_session, url=url, user=user, passwd=passwd, timeout=timeout, config_mgr=config_mgr),
+                            timeout, safe_url, 'OFF', 'Redfish')
+                    finally:
+                        poll_session.close()
                 else:
                     logging.info("Redfish reset successful: %s on %s", action, safe_url)
                     return True
@@ -2612,24 +2368,9 @@ def _bmh_fence(token, namespace, host, action, service):
 
 
 def _bmh_wait_for_power_off(get_url, headers, cacert, host, timeout, poll_interval, service):
-    """
-    Wait for BareMetal Host to power off by polling its status.
-
-    Args:
-        get_url: URL to get BMH status
-        headers: HTTP headers for authentication
-        cacert: Path to CA certificate file
-        host: Host name for logging
-        timeout: Maximum time to wait in seconds
-        poll_interval: Time between status checks in seconds
-
-    Returns:
-        bool: True if host powered off within timeout, False otherwise
-    """
+    """Wait for BareMetal Host to power off by polling its status."""
     request_timeout = service.config.get_config_value('FENCING_TIMEOUT')
-
     logging.debug("Waiting up to %d seconds for %s to power off", timeout, host)
-
     timeout_end = time.monotonic() + timeout
 
     with requests.Session() as session:
@@ -2639,41 +2380,28 @@ def _bmh_wait_for_power_off(get_url, headers, cacert, host, timeout, poll_interv
             try:
                 response = session.get(get_url, headers=headers, verify=cacert, timeout=request_timeout)
                 response.raise_for_status()
-
-            except requests.exceptions.Timeout:
-                logging.warning("Timeout checking power status for %s, continuing to wait", host)
-                continue
-            except requests.exceptions.HTTPError as e:
-                logging.warning("HTTP error checking power status for %s, continuing to wait", host)
-                continue
-            except requests.exceptions.RequestException as e:
-                logging.warning("Request error checking power status for %s, continuing to wait", host)
+            except (requests.exceptions.Timeout, requests.exceptions.HTTPError,
+                    requests.exceptions.RequestException) as e:
+                logging.warning("Error checking power status for %s: %s, continuing to wait",
+                               host, type(e).__name__)
                 continue
 
-            # Parse JSON response
             try:
                 status_data = response.json()
             except (json.JSONDecodeError, ValueError) as e:
                 logging.warning("Invalid JSON response checking power status for %s: %s, continuing to wait", host, e)
                 continue
 
-            # Extract power status
             try:
                 power_status = status_data['status']['poweredOn']
                 logging.debug("Power status for %s: %s", host, power_status)
-
                 if not power_status:
                     logging.info("BMH power off confirmed for %s", host)
                     return True
-
-            except KeyError as e:
-                logging.warning("Missing power status field for %s: %s, continuing to wait", host, e)
-                continue
-            except Exception as e:
+            except (KeyError, Exception) as e:
                 logging.warning("Error parsing power status for %s: %s, continuing to wait", host, e)
                 continue
 
-    # Timeout reached
     logging.error("BMH power off timeout: %s did not power off within %d seconds", host, timeout)
     return False
 
@@ -3266,10 +2994,7 @@ def _is_service_stale(svc, target_date: datetime) -> bool:
     """Check whether a service's updated_at timestamp is older than target_date."""
     try:
         updated = svc.updated_at
-        if isinstance(updated, datetime):
-            updated_naive = updated.replace(tzinfo=None)
-        else:
-            updated_naive = datetime.fromisoformat(updated)
+        updated_naive = datetime.fromisoformat(str(updated).replace('Z', '+00:00')).replace(tzinfo=None)
         return updated_naive < target_date.replace(tzinfo=None)
     except (ValueError, TypeError, AttributeError):
         logging.warning("Service %s has invalid updated_at: %r, skipping (not treating as stale)",
@@ -3739,12 +3464,9 @@ def _process_reenabling(conn, service, to_reenable) -> None:
 def _reconcile_orphaned_hosts(conn):
     """Reconcile hosts left in an inconsistent state after a crash.
 
-    If the pod crashed after fencing a host (setting forced_down=True) but
-    before setting the disabled_reason evacuation marker, the host would be
-    incorrectly routed to the re-enable path instead of the evacuation path.
-
-    This function finds such orphaned hosts and sets the evacuation marker
-    so the normal resume logic picks them up.
+    Finds hosts that were fenced (forced_down=True) but not yet marked with
+    the evacuation disabled_reason, and sets the marker so the normal resume
+    logic picks them up. Also unlocks VMs left locked by a crashed instanceha.
     """
     try:
         services = conn.services.list(binary="nova-compute")
@@ -3753,44 +3475,56 @@ def _reconcile_orphaned_hosts(conn):
         return
 
     recovered = 0
-    for svc in services:
-        if not (svc.forced_down and svc.state == 'down'):
-            continue
-        if 'disabled' in svc.status:
-            continue
-        try:
-            disable_reason = _make_disable_reason(DISABLED_REASON_EVACUATION, " (recovered)")
-            conn.services.disable_log_reason(svc.id, disable_reason)
-            logging.warning("Recovered orphaned fenced host %s — marked for evacuation resume", svc.host)
-            _emit_k8s_event(svc.host, 'OrphanedHostRecovered',
-                            'Recovered orphaned fenced host, marked for evacuation resume',
-                            event_type='Warning')
-            ORPHANED_HOST_RECOVERED_TOTAL.inc()
-            recovered += 1
-        except Exception as e:
-            logging.error("Failed to reconcile orphaned host %s: %s", svc.host, e)
-
-    if recovered:
-        logging.info("Startup reconciliation: recovered %d orphaned fenced host(s)", recovered)
-
-    # Unlock VMs left locked by a crashed instanceha (only our own locks)
     unlocked = 0
     for svc in services:
         if not (svc.forced_down and svc.state == 'down'):
             continue
+
+        # Mark orphaned fenced hosts for evacuation resume
+        if 'disabled' not in svc.status:
+            try:
+                disable_reason = _make_disable_reason(DISABLED_REASON_EVACUATION, " (recovered)")
+                conn.services.disable_log_reason(svc.id, disable_reason)
+                logging.warning("Recovered orphaned fenced host %s — marked for evacuation resume", svc.host)
+                _emit_k8s_event(svc.host, 'OrphanedHostRecovered',
+                                'Recovered orphaned fenced host, marked for evacuation resume',
+                                event_type='Warning')
+                ORPHANED_HOST_RECOVERED_TOTAL.inc()
+                recovered += 1
+            except Exception as e:
+                logging.error("Failed to reconcile orphaned host %s: %s", svc.host, e)
+
+        # Unlock VMs left locked by a crashed instanceha (only our own locks)
         try:
             servers = conn.servers.list(search_opts={'host': svc.host, 'all_tenants': 1})
             for s in servers:
-                locked_reason = getattr(s, 'locked_reason', None)
-                if locked_reason == LOCK_REASON_EVACUATION:
+                if getattr(s, 'locked_reason', None) == LOCK_REASON_EVACUATION:
                     conn.servers.unlock(s.id)
                     logging.warning("Unlocked orphaned locked VM %s on host %s", s.id, svc.host)
                     unlocked += 1
         except Exception as e:
             logging.warning("Failed to check/unlock VMs on host %s: %s", svc.host, e)
 
+    if recovered:
+        logging.info("Startup reconciliation: recovered %d orphaned fenced host(s)", recovered)
     if unlocked:
         logging.info("Startup reconciliation: unlocked %d orphaned locked VM(s)", unlocked)
+
+
+def _handle_poll_failure(service, consecutive_failures, poll_interval, msg, e, include_traceback=False):
+    """Handle a poll cycle failure with backoff and readiness updates. Returns new consecutive_failures."""
+    consecutive_failures += 1
+    POLL_CONSECUTIVE_FAILURES.set(consecutive_failures)
+    POLL_CYCLE_TOTAL.labels(result='error').inc()
+    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
+        service.ready = False
+        logging.warning("Readiness probe deactivated after %d consecutive failures", consecutive_failures)
+    backoff = min(poll_interval * (2 ** consecutive_failures), MAX_NOVA_BACKOFF_SECONDS)
+    logging.warning("%s (attempt %d): %s. Retrying in %ds.", msg, consecutive_failures, e, backoff)
+    if include_traceback:
+        logging.debug('Exception traceback:', exc_info=True)
+    service.shutdown_event.wait(backoff)
+    return consecutive_failures
 
 
 def main():
@@ -3815,7 +3549,10 @@ def main():
 
     def _sigterm_handler(signum, frame):
         logging.info("SIGTERM received, finishing in-flight work before shutdown")
+        service.ready = False
         service.shutdown_event.set()
+        service.kdump_listener_stop_event.set()
+        service.heartbeat_listener_stop_event.set()
 
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
@@ -3830,10 +3567,6 @@ def main():
                 logging.warning("Skipping fencing — K8s API unreachable (possible network partition)")
                 service.shutdown_event.wait(poll_interval)
                 continue
-
-            new_conn = _establish_nova_connection(service, fatal=False)
-            if new_conn:
-                conn = new_conn
 
             services = conn.services.list(binary="nova-compute")
             if not services:
@@ -3856,33 +3589,18 @@ def main():
             POLL_CYCLE_TOTAL.labels(result='success').inc()
 
         except (Unauthorized, DiscoveryFailure) as e:
-            consecutive_failures += 1
-            POLL_CONSECUTIVE_FAILURES.set(consecutive_failures)
-            POLL_CYCLE_TOTAL.labels(result='error').inc()
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
-                service.ready = False
-                logging.warning("Readiness probe deactivated after %d consecutive failures", consecutive_failures)
-            backoff = min(poll_interval * (2 ** consecutive_failures), MAX_NOVA_BACKOFF_SECONDS)
-            logging.warning("Nova session expired or discovery failed (attempt %d): %s. "
-                           "Reconnecting in %ds...", consecutive_failures, type(e).__name__, backoff)
-            service.shutdown_event.wait(backoff)
+            consecutive_failures = _handle_poll_failure(
+                service, consecutive_failures, poll_interval,
+                "Nova session expired or discovery failed", type(e).__name__)
             new_conn = _establish_nova_connection(service, fatal=False)
             if new_conn:
                 conn = new_conn
             continue
 
         except Exception as e:
-            consecutive_failures += 1
-            POLL_CONSECUTIVE_FAILURES.set(consecutive_failures)
-            POLL_CYCLE_TOTAL.labels(result='error').inc()
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES_READY and service.ready:
-                service.ready = False
-                logging.warning("Readiness probe deactivated after %d consecutive failures", consecutive_failures)
-            backoff = min(poll_interval * (2 ** consecutive_failures), MAX_NOVA_BACKOFF_SECONDS)
-            logging.warning("Failed to query Nova API (attempt %d): %s. Retrying in %ds.",
-                           consecutive_failures, e, backoff)
-            logging.debug('Exception traceback:', exc_info=True)
-            service.shutdown_event.wait(backoff)
+            consecutive_failures = _handle_poll_failure(
+                service, consecutive_failures, poll_interval,
+                "Failed to query Nova API", e, include_traceback=True)
             continue
 
         service.shutdown_event.wait(poll_interval)

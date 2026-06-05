@@ -1115,7 +1115,7 @@ class TestEvacuationFunctions(unittest.TestCase):
                 mock_as_completed.return_value = mock_futures
 
                 with patch('instanceha.time.sleep'):  # Speed up test
-                    result = instanceha._smart_evacuate(
+                    result = instanceha._concurrent_evacuate(
                         self.mock_connection, mock_servers, mock_service,
                         'test-host', 'service-123'
                     )
@@ -1220,7 +1220,7 @@ class TestEvacuationFunctions(unittest.TestCase):
 
                     with patch('instanceha.concurrent.futures.as_completed', return_value=futures):
                         with patch('instanceha.time.sleep'):
-                            instanceha._smart_evacuate(
+                            instanceha._concurrent_evacuate(
                                 self.mock_connection, mock_servers, mock_service,
                                 'test-host', 'service-123'
                             )
