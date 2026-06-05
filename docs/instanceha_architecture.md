@@ -20,9 +20,10 @@ InstanceHA is a high-availability service for OpenStack that automatically detec
 12. [Startup Reconciliation](#startup-reconciliation)
 13. [Graceful Shutdown](#graceful-shutdown)
 14. [Security](#security)
-15. [Testing](#testing)
-16. [Deployment](#deployment)
-17. [Configuration Options Reference](#configuration-options-reference)
+15. [Performance](#performance)
+16. [Testing](#testing)
+17. [Deployment](#deployment)
+18. [Configuration Options Reference](#configuration-options-reference)
 
 ---
 
@@ -1850,6 +1851,12 @@ These values are passed as `METRICS_TLS_MIN_VERSION` and `METRICS_TLS_CIPHERS` e
 **Implementation**:
 - Configuration passed explicitly as parameters
 - No global mutable state
+
+---
+
+## Performance
+
+For heartbeat filter latency, UDP listener throughput, lock contention, memory overhead, and scalability projections at 1000-node scale, see [instanceha_heartbeat_performance.md](instanceha_heartbeat_performance.md).
 
 ---
 
