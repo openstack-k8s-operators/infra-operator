@@ -70,3 +70,55 @@ func TestDeploymentDisabledEnvVar(t *testing.T) {
 		})
 	}
 }
+
+func TestDeploymentSecurityContext(t *testing.T) {
+	g := NewWithT(t)
+
+	instance := &instancehav1.InstanceHa{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instanceha",
+			Namespace: "test-namespace",
+		},
+		Spec: instancehav1.InstanceHaSpec{
+			ContainerImage:        "test-image:latest",
+			OpenStackCloud:        "default",
+			OpenStackConfigMap:    "openstack-config",
+			OpenStackConfigSecret: "openstack-config-secret",
+			FencingSecret:         "fencing-secret",
+			InstanceHaConfigMap:   "instanceha-config",
+			InstanceHaKdumpPort:   7410,
+			Disabled:              "False",
+		},
+	}
+
+	labels := map[string]string{"app": "instanceha"}
+	annotations := map[string]string{}
+
+	dep := Deployment(instance, labels, annotations, "default", "hash123", "test-image:latest", nil, "", "", nil)
+
+	container := dep.Spec.Template.Spec.Containers[0]
+
+	g.Expect(container.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+
+	// Verify /tmp emptyDir volume exists
+	var tmpVolumeFound bool
+	for _, vol := range dep.Spec.Template.Spec.Volumes {
+		if vol.Name == "tmp" {
+			tmpVolumeFound = true
+			g.Expect(vol.VolumeSource.EmptyDir).NotTo(BeNil())
+			break
+		}
+	}
+	g.Expect(tmpVolumeFound).To(BeTrue(), "/tmp emptyDir volume should exist")
+
+	// Verify /tmp mount exists
+	var tmpMountFound bool
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "tmp" && mount.MountPath == "/tmp" {
+			tmpMountFound = true
+			break
+		}
+	}
+	g.Expect(tmpMountFound).To(BeTrue(), "/tmp volume mount should exist")
+}

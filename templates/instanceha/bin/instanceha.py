@@ -3831,6 +3831,10 @@ def main():
                 service.shutdown_event.wait(poll_interval)
                 continue
 
+            new_conn = _establish_nova_connection(service, fatal=False)
+            if new_conn:
+                conn = new_conn
+
             services = conn.services.list(binary="nova-compute")
             if not services:
                 service.shutdown_event.wait(poll_interval)
