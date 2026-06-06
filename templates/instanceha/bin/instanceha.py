@@ -28,13 +28,6 @@ from typing import Dict, Any, Optional, Union, List, Protocol, Tuple, Callable
 from collections import defaultdict
 from abc import ABC, abstractmethod
 
-from novaclient import client
-from novaclient.exceptions import Conflict, NotFound, Forbidden, Unauthorized
-
-from keystoneauth1 import loading
-from keystoneauth1 import session as ksc_session
-from keystoneauth1.exceptions.discovery import DiscoveryFailure
-
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 
@@ -1761,6 +1754,7 @@ def _host_evacuate(connection, failed_service, service, target_host=None) -> boo
 
 def _server_evacuate(connection, server, target_host=None, server_obj=None) -> EvacuationResult:
     """Evacuate a single server instance, returning EvacuationResult."""
+    from novaclient.exceptions import Conflict, NotFound, Forbidden, Unauthorized
     success = False
     error_message = ""
     resp_status_code = None
@@ -2017,6 +2011,11 @@ def _server_evacuate_future(connection, server, target_host=None,
 def _nova_login(plugin_name: str, auth_kwargs: dict, region_name: str,
                 ca_bundle: Optional[str] = None) -> OpenStackClient:
     """Create and return Nova client connection. Raises NovaConnectionError on failure."""
+    from keystoneauth1 import loading
+    from keystoneauth1 import session as ksc_session
+    from keystoneauth1.exceptions.discovery import DiscoveryFailure
+    from novaclient import client
+    from novaclient.exceptions import Unauthorized
     try:
         loader = loading.get_plugin_loader(plugin_name)
         auth = loader.load_from_options(**auth_kwargs)
@@ -2055,15 +2054,14 @@ def nova_login_ac(credentials: ACLoginCredentials, ca_bundle: Optional[str] = No
     }, credentials.region_name, ca_bundle)
 
 
-NOVA_EXCEPTION_MESSAGES = {
-    NotFound: "Resource not found",
-    Conflict: "Conflicting operation",
-}
-
-
 def _handle_nova_exception(operation: str, service_info: str, e: Exception, is_critical: bool = True) -> bool:
     """Handle Nova API exceptions with consistent logging."""
-    error_msg = NOVA_EXCEPTION_MESSAGES.get(type(e))
+    from novaclient.exceptions import NotFound, Conflict
+    nova_exception_messages = {
+        NotFound: "Resource not found",
+        Conflict: "Conflicting operation",
+    }
+    error_msg = nova_exception_messages.get(type(e))
 
     if error_msg:
         logging.error("Failed to %s for %s. %s: %s", operation, service_info, error_msg, type(e).__name__)
@@ -3557,6 +3555,9 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     consecutive_failures = 0
+
+    from novaclient.exceptions import Unauthorized
+    from keystoneauth1.exceptions.discovery import DiscoveryFailure
 
     while not service.shutdown_event.is_set():
         service.update_health_hash()

@@ -178,12 +178,12 @@ class TestNovaAPIExceptions(unittest.TestCase):
         """Test Nova login with discovery failure."""
         from keystoneauth1.exceptions.discovery import DiscoveryFailure
 
-        with patch('instanceha.loading.get_plugin_loader') as mock_loader:
+        with patch('keystoneauth1.loading.get_plugin_loader') as mock_loader:
             mock_auth = Mock()
             mock_loader.return_value.load_from_options.return_value = mock_auth
 
-            with patch('instanceha.ksc_session.Session') as mock_session:
-                with patch('instanceha.client.Client') as mock_client:
+            with patch('keystoneauth1.session.Session') as mock_session:
+                with patch('novaclient.client.Client') as mock_client:
                     mock_nova = Mock()
                     mock_nova.versions.get_current.side_effect = DiscoveryFailure('Discovery failed')
                     mock_client.return_value = mock_nova
@@ -200,12 +200,12 @@ class TestNovaAPIExceptions(unittest.TestCase):
         """Test Nova login with unauthorized exception."""
         from novaclient.exceptions import Unauthorized
 
-        with patch('instanceha.loading.get_plugin_loader') as mock_loader:
+        with patch('keystoneauth1.loading.get_plugin_loader') as mock_loader:
             mock_auth = Mock()
             mock_loader.return_value.load_from_options.return_value = mock_auth
 
-            with patch('instanceha.ksc_session.Session') as mock_session:
-                with patch('instanceha.client.Client') as mock_client:
+            with patch('keystoneauth1.session.Session') as mock_session:
+                with patch('novaclient.client.Client') as mock_client:
                     mock_nova = Mock()
                     mock_nova.versions.get_current.side_effect = Unauthorized('Bad credentials')
                     mock_client.return_value = mock_nova

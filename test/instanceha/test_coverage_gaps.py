@@ -761,10 +761,6 @@ class TestMonitorEvacuation(unittest.TestCase):
 # Main loop backoff tests
 # ============================================================================
 
-class _TestDiscoveryFailure(Exception):
-    pass
-
-
 class TestMainLoopBackoff(unittest.TestCase):
     """Tests for main() exponential backoff on Nova failures."""
 
@@ -782,12 +778,13 @@ class TestMainLoopBackoff(unittest.TestCase):
         svc.shutdown_event = threading.Event()
         return svc
 
-    @patch('instanceha.DiscoveryFailure', _TestDiscoveryFailure)
     @patch('instanceha.signal.signal')
     @patch('instanceha._establish_nova_connection')
     @patch('instanceha._initialize_service')
     @patch('instanceha.ConfigManager')
     def test_unauthorized_triggers_reconnection(self, mock_cm, mock_init, mock_conn, mock_signal):
+        from novaclient.exceptions import Unauthorized
+
         mock_cm.return_value.get_config_value = Mock(return_value='INFO')
         service = self._make_service_mock()
         mock_init.return_value = service
@@ -799,14 +796,13 @@ class TestMainLoopBackoff(unittest.TestCase):
             call_count[0] += 1
             if call_count[0] >= 2:
                 service.shutdown_event.set()
-            raise instanceha.Unauthorized('expired')
+            raise Unauthorized('expired')
         conn.services.list.side_effect = unauthorized_then_stop
 
         instanceha.main()
 
         mock_conn.assert_called()
 
-    @patch('instanceha.DiscoveryFailure', _TestDiscoveryFailure)
     @patch('instanceha.signal.signal')
     @patch('instanceha._establish_nova_connection')
     @patch('instanceha._initialize_service')
@@ -830,7 +826,6 @@ class TestMainLoopBackoff(unittest.TestCase):
 
         self.assertGreaterEqual(call_count[0], 2)
 
-    @patch('instanceha.DiscoveryFailure', _TestDiscoveryFailure)
     @patch('instanceha.signal.signal')
     @patch('instanceha._process_reenabling')
     @patch('instanceha._process_stale_services')
@@ -860,7 +855,6 @@ class TestMainLoopBackoff(unittest.TestCase):
 
         mock_cat.assert_called()
 
-    @patch('instanceha.DiscoveryFailure', _TestDiscoveryFailure)
     @patch('instanceha.signal.signal')
     @patch('instanceha._establish_nova_connection')
     @patch('instanceha._initialize_service')
