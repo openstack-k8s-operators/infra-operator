@@ -711,37 +711,31 @@ class TestCriticalServicesCheck(unittest.TestCase):
         ]
         compute_nodes = [services[2]]
 
-        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn, services, compute_nodes)
+        can_evacuate, error_msg = instanceha._check_critical_services(services)
 
         self.assertFalse(can_evacuate)
         self.assertIn('nova-scheduler', error_msg)
 
     def test_at_least_one_scheduler_up(self):
         """Test that check passes when at least one scheduler is up."""
-        mock_conn = Mock()
-
         services = [
             Mock(binary='nova-scheduler', state='down', host='controller-1'),
             Mock(binary='nova-scheduler', state='up', host='controller-2'),
             Mock(binary='nova-compute', state='down', host='compute-1')
         ]
-        compute_nodes = [services[2]]
 
-        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn, services, compute_nodes)
+        can_evacuate, error_msg = instanceha._check_critical_services(services)
 
         self.assertTrue(can_evacuate)
         self.assertEqual(error_msg, "")
 
     def test_no_schedulers_defined(self):
         """Test when no schedulers are in services list."""
-        mock_conn = Mock()
-
         services = [
             Mock(binary='nova-compute', state='down', host='compute-1')
         ]
-        compute_nodes = [services[0]]
 
-        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn, services, compute_nodes)
+        can_evacuate, error_msg = instanceha._check_critical_services(services)
 
         # Should allow evacuation if no schedulers are in the list
         self.assertTrue(can_evacuate)

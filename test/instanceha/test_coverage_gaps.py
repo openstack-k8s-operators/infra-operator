@@ -912,7 +912,6 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         svc.refresh_evacuable_cache = Mock()
         svc.get_hosts_with_servers_cached = Mock(return_value={})
         svc.filter_hosts_with_servers = Mock(return_value=[])
-        svc._cleanup_dict_by_condition = Mock()
         return svc
 
     def test_empty_compute_nodes_and_resume(self):
@@ -939,7 +938,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         service.get_hosts_with_servers_cached.return_value = {'host-1': ['server-1']}
         service.filter_hosts_with_servers.return_value = [svc1]
         with patch('instanceha._emit_k8s_event'):
-            with patch('instanceha._check_critical_services', return_value=(True, None)):
+            with patch('instanceha._check_critical_services', return_value=(True, "")):
                 instanceha._process_stale_services(conn, service, [svc1], [svc1], [])
 
     def test_disabled_mode_skips_evacuation(self):
