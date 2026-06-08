@@ -757,7 +757,8 @@ class InstanceHAService(CloudConnectionProvider):
         self.hash_update_successful = False
         self._last_hash_time = 0
         self.ready = False
-        self.k8s_api_reachable = False
+        self.k8s_api_reachable = True
+        K8S_API_REACHABLE.set(1)
 
         # Caching
         self._evacuable_flavors_cache = None
@@ -2917,6 +2918,10 @@ def _initialize_service(config_mgr):
         heartbeat_thread = threading.Thread(target=_heartbeat_udp_listener, args=(service,))
         heartbeat_thread.daemon = True
         heartbeat_thread.start()
+    else:
+        logging.warning(
+            'CHECK_HEARTBEAT is disabled — fencing decisions rely solely on Nova service '
+            'timestamps. Enable heartbeat checking for split-brain protection.')
 
     return service
 
@@ -3169,6 +3174,9 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
         return
 
     # Filter out hosts still reachable via heartbeat
+    stale_count = len(compute_nodes)
+    heartbeat_skipped = []
+    cliff_detected = False
     if service.config.get_config_value('CHECK_HEARTBEAT'):
         compute_nodes, heartbeat_skipped, cliff_detected = _filter_reachable_hosts(service, compute_nodes)
         if not cliff_detected:
@@ -3180,8 +3188,15 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
                 HOST_REACHABLE_TOTAL.labels(host=svc.host).inc()
 
         if not (compute_nodes or to_resume):
+            logging.info(
+                'Fencing decision: %d stale, %d heartbeat-alive, %d to fence, cliff=%s',
+                stale_count, len(heartbeat_skipped), len(compute_nodes), cliff_detected)
             _cleanup_filtered_hosts(service, marked_hostnames, set(), current_time)
             return
+
+    logging.info(
+        'Fencing decision: %d stale, %d heartbeat-alive, %d to fence, cliff=%s',
+        stale_count, len(heartbeat_skipped), len(compute_nodes), cliff_detected)
 
     if compute_nodes:
         logging.warning('The following computes are down: %s', [svc.host for svc in compute_nodes])

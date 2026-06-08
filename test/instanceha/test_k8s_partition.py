@@ -77,7 +77,7 @@ class TestK8sHealthCheckThread(unittest.TestCase):
         self.service = instanceha.InstanceHAService(self.config)
 
     def test_initial_state(self):
-        self.assertFalse(self.service.k8s_api_reachable)
+        self.assertTrue(self.service.k8s_api_reachable)
 
     @patch('instanceha._check_k8s_api_reachable', return_value=True)
     def test_stays_reachable_on_success(self, _check):
