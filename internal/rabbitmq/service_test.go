@@ -54,13 +54,13 @@ func TestClientServiceLoadBalancerClassOverride(t *testing.T) {
 		)
 	}
 
-	// FIXME: This documents the current bug. The RabbitMq CRD accepts
-	// override.service.spec.loadBalancerClass, but ClientService does not
-	// propagate it to the generated Service. The fix should update this
-	// assertion to require svc.Spec.LoadBalancerClass to equal lbClass.
-	if svc.Spec.LoadBalancerClass != nil {
+	if svc.Spec.LoadBalancerClass == nil {
+		t.Fatal("expected loadBalancerClass override to be propagated, got nil")
+	}
+	if *svc.Spec.LoadBalancerClass != lbClass {
 		t.Fatalf(
-			"expected loadBalancerClass to be unset for current broken behavior, got %q",
+			"expected loadBalancerClass %q, got %q",
+			lbClass,
 			*svc.Spec.LoadBalancerClass,
 		)
 	}

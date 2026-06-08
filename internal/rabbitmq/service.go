@@ -26,6 +26,14 @@ func serviceOverrideIPFamilyPolicy(r *rabbitmqv1.RabbitMq) *corev1.IPFamilyPolic
 	return nil
 }
 
+// serviceOverrideLoadBalancerClass returns the LoadBalancerClass from override, or nil
+func serviceOverrideLoadBalancerClass(r *rabbitmqv1.RabbitMq) *string {
+	if r.Spec.Override.Service != nil && r.Spec.Override.Service.Spec != nil {
+		return r.Spec.Override.Service.Spec.LoadBalancerClass
+	}
+	return nil
+}
+
 const (
 	// AMQPPort is the standard AMQP port
 	AMQPPort = 5672
@@ -150,6 +158,9 @@ func ClientService(r *rabbitmqv1.RabbitMq) *corev1.Service {
 	// Apply IPFamilyPolicy from override if specified
 	if ipfp := serviceOverrideIPFamilyPolicy(r); ipfp != nil {
 		svc.Spec.IPFamilyPolicy = ipfp
+	}
+	if lbClass := serviceOverrideLoadBalancerClass(r); lbClass != nil {
+		svc.Spec.LoadBalancerClass = lbClass
 	}
 
 	return svc
