@@ -4,7 +4,7 @@ Tests for orchestrated evacuation (priority-based restart ordering).
 Covers:
 - _get_evacuation_metadata: extracting priority and group from server metadata
 - _build_evacuation_groups: grouping and sorting servers by priority
-- _orchestrated_evacuate: phased evacuation with ThreadPoolExecutor
+- _concurrent_evacuate: phased evacuation with ThreadPoolExecutor
 - _host_evacuate: branching logic for orchestrated/smart/traditional
 - ORCHESTRATED_RESTART config option (explicit enable only)
 """
@@ -197,22 +197,23 @@ class TestBuildEvacuationGroups(unittest.TestCase):
 
 
 # ============================================================================
-# _orchestrated_evacuate tests
+# _concurrent_evacuate tests
 # ============================================================================
 
 class TestOrchestratedEvacuate(unittest.TestCase):
 
-    def _make_config(self, workers=4, evacuation_retries=5):
+    def _make_config(self, workers=4, evacuation_retries=5, orchestrated=True):
         config = MagicMock()
         config.get_config_value.side_effect = lambda key: {
             'WORKERS': workers,
             'EVACUATION_RETRIES': evacuation_retries,
+            'ORCHESTRATED_RESTART': orchestrated,
         }.get(key, None)
         return config
 
-    def _make_service(self, workers=4):
+    def _make_service(self, workers=4, orchestrated=True):
         service = MagicMock()
-        service.config = self._make_config(workers)
+        service.config = self._make_config(workers, orchestrated=orchestrated)
         return service
 
     @patch('instanceha._update_service_disable_reason')
@@ -227,7 +228,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
         self.assertTrue(result)
         self.assertEqual(mock_future.call_count, 2)
         mock_update.assert_not_called()
@@ -244,7 +245,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
         self.assertFalse(result)
         # Both phases should be attempted despite phase 1 failure
         self.assertEqual(mock_future.call_count, 2)
@@ -262,7 +263,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
         self.assertFalse(result)
         self.assertEqual(mock_future.call_count, 2)
         mock_update.assert_called_once()
@@ -278,7 +279,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, phase1, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, phase1, service, 'host1', 'svc-1')
         self.assertFalse(result)
         mock_update.assert_called_once()
 
@@ -293,7 +294,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, servers, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, servers, service, 'host1', 'svc-1')
         self.assertFalse(result)
         self.assertEqual(mock_future.call_count, 3)
         mock_update.assert_called_once()
@@ -309,7 +310,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, servers, service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, servers, service, 'host1', 'svc-1')
         self.assertTrue(result)
         self.assertEqual(mock_future.call_count, 5)
 
@@ -324,7 +325,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        instanceha._orchestrated_evacuate(conn, [server], service, 'host1', 'svc-1',
+        instanceha._concurrent_evacuate(conn, [server], service, 'host1', 'svc-1',
                                           target_host='reserved-01')
         mock_future.assert_called_once_with(conn, server, 'reserved-01',
                                                    max_retries=5,
@@ -339,7 +340,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         conn = MagicMock()
         service = self._make_service()
 
-        result = instanceha._orchestrated_evacuate(conn, [], service, 'host1', 'svc-1')
+        result = instanceha._concurrent_evacuate(conn, [], service, 'host1', 'svc-1')
         self.assertTrue(result)
         mock_future.assert_not_called()
 
@@ -349,6 +350,7 @@ class TestOrchestratedEvacuate(unittest.TestCase):
 # ============================================================================
 
 class TestHostEvacuateOrchestration(unittest.TestCase):
+    """Tests that _host_evacuate dispatches to _concurrent_evacuate or _traditional_evacuate."""
 
     def _make_service(self, orchestrated=False, smart=False):
         service = MagicMock()
@@ -359,97 +361,73 @@ class TestHostEvacuateOrchestration(unittest.TestCase):
         }.get(key, None)
         return service
 
-    @patch('instanceha._orchestrated_evacuate', return_value=True)
-    @patch('instanceha._smart_evacuate', return_value=True)
+    @patch('instanceha._concurrent_evacuate', return_value=True)
     @patch('instanceha._traditional_evacuate', return_value=True)
     @patch('instanceha._get_evacuable_servers')
     @patch('instanceha.time.sleep')
-    def test_orchestrated_restart_config_enabled(self, mock_sleep, mock_get, mock_trad,
-                                                  mock_smart, mock_orch):
+    def test_orchestrated_restart_uses_concurrent(self, mock_sleep, mock_get,
+                                                   mock_trad, mock_concurrent):
         mock_get.return_value = [_make_server('s1')]
         service = self._make_service(orchestrated=True)
         failed = Mock(host='host1', id='svc-1')
 
         instanceha._host_evacuate(MagicMock(), failed, service)
-        mock_orch.assert_called_once()
-        mock_smart.assert_not_called()
+        mock_concurrent.assert_called_once()
         mock_trad.assert_not_called()
 
-    @patch('instanceha._orchestrated_evacuate', return_value=True)
-    @patch('instanceha._smart_evacuate', return_value=True)
+    @patch('instanceha._concurrent_evacuate', return_value=True)
     @patch('instanceha._traditional_evacuate', return_value=True)
     @patch('instanceha._get_evacuable_servers')
     @patch('instanceha.time.sleep')
-    def test_metadata_ignored_when_config_disabled(self, mock_sleep, mock_get, mock_trad, mock_smart, mock_orch):
-        mock_get.return_value = [
-            _make_server('s1', metadata={'instanceha:restart_priority': '900'}),
-        ]
-        service = self._make_service(orchestrated=False, smart=True)
-        failed = Mock(host='host1', id='svc-1')
-
-        instanceha._host_evacuate(MagicMock(), failed, service)
-        mock_orch.assert_not_called()
-        mock_smart.assert_called_once()
-
-    @patch('instanceha._orchestrated_evacuate', return_value=True)
-    @patch('instanceha._smart_evacuate', return_value=True)
-    @patch('instanceha._traditional_evacuate', return_value=True)
-    @patch('instanceha._get_evacuable_servers')
-    @patch('instanceha.time.sleep')
-    def test_no_metadata_smart_evacuation(self, mock_sleep, mock_get, mock_trad,
-                                          mock_smart, mock_orch):
+    def test_smart_evacuation_uses_concurrent(self, mock_sleep, mock_get,
+                                               mock_trad, mock_concurrent):
         mock_get.return_value = [_make_server('s1')]
         service = self._make_service(orchestrated=False, smart=True)
         failed = Mock(host='host1', id='svc-1')
 
         instanceha._host_evacuate(MagicMock(), failed, service)
-        mock_smart.assert_called_once()
-        mock_orch.assert_not_called()
+        mock_concurrent.assert_called_once()
         mock_trad.assert_not_called()
 
-    @patch('instanceha._orchestrated_evacuate', return_value=True)
-    @patch('instanceha._smart_evacuate', return_value=True)
+    @patch('instanceha._concurrent_evacuate', return_value=True)
     @patch('instanceha._traditional_evacuate', return_value=True)
     @patch('instanceha._get_evacuable_servers')
     @patch('instanceha.time.sleep')
-    def test_no_metadata_traditional(self, mock_sleep, mock_get, mock_trad,
-                                      mock_smart, mock_orch):
+    def test_no_smart_no_orchestrated_uses_traditional(self, mock_sleep, mock_get,
+                                                        mock_trad, mock_concurrent):
         mock_get.return_value = [_make_server('s1')]
         service = self._make_service(orchestrated=False, smart=False)
         failed = Mock(host='host1', id='svc-1')
 
         instanceha._host_evacuate(MagicMock(), failed, service)
         mock_trad.assert_called_once()
-        mock_orch.assert_not_called()
-        mock_smart.assert_not_called()
+        mock_concurrent.assert_not_called()
 
-    @patch('instanceha._orchestrated_evacuate', return_value=True)
-    @patch('instanceha._smart_evacuate', return_value=True)
+    @patch('instanceha._concurrent_evacuate', return_value=True)
+    @patch('instanceha._traditional_evacuate', return_value=True)
     @patch('instanceha._get_evacuable_servers')
     @patch('instanceha.time.sleep')
-    def test_orchestrated_takes_precedence_over_smart(self, mock_sleep, mock_get,
-                                                       mock_smart, mock_orch):
+    def test_orchestrated_and_smart_both_true_uses_concurrent(self, mock_sleep, mock_get,
+                                                               mock_trad, mock_concurrent):
         mock_get.return_value = [_make_server('s1')]
         service = self._make_service(orchestrated=True, smart=True)
         failed = Mock(host='host1', id='svc-1')
 
         instanceha._host_evacuate(MagicMock(), failed, service)
-        mock_orch.assert_called_once()
-        mock_smart.assert_not_called()
+        mock_concurrent.assert_called_once()
+        mock_trad.assert_not_called()
 
-    @patch('instanceha._orchestrated_evacuate')
-    @patch('instanceha._smart_evacuate')
+    @patch('instanceha._concurrent_evacuate')
     @patch('instanceha._traditional_evacuate')
     @patch('instanceha._get_evacuable_servers')
-    def test_empty_evacuables_returns_true(self, mock_get, mock_trad, mock_smart, mock_orch):
+    def test_empty_evacuables_returns_true(self, mock_get, mock_trad, mock_concurrent):
         mock_get.return_value = []
         service = self._make_service()
         failed = Mock(host='host1', id='svc-1')
 
         result = instanceha._host_evacuate(MagicMock(), failed, service)
         self.assertTrue(result)
-        mock_orch.assert_not_called()
-        mock_smart.assert_not_called()
+        mock_concurrent.assert_not_called()
         mock_trad.assert_not_called()
 
 

@@ -34,12 +34,30 @@ class TestGetK8sCredentials(unittest.TestCase):
         self.assertIsNone(namespace)
 
     @patch.dict(os.environ, {}, clear=True)
-    @patch('builtins.open', mock_open(read_data='my-token'))
     def test_returns_none_when_namespace_not_set(self):
-        # POD_NAMESPACE not in env → empty string → returns None
-        token, namespace = instanceha._get_k8s_credentials()
+        # POD_NAMESPACE not in env and namespace file does not exist → returns None
+        def mock_open_side_effect(path, *args, **kwargs):
+            if path == instanceha._K8S_TOKEN_PATH:
+                return mock_open(read_data='my-token')()
+            raise IOError("no such file")
+        with patch('builtins.open', side_effect=mock_open_side_effect):
+            token, namespace = instanceha._get_k8s_credentials()
         self.assertIsNone(token)
         self.assertIsNone(namespace)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reads_namespace_from_file_fallback(self):
+        # POD_NAMESPACE not in env but namespace file exists → reads from file
+        def mock_open_side_effect(path, *args, **kwargs):
+            if path == instanceha._K8S_TOKEN_PATH:
+                return mock_open(read_data='my-token')()
+            if path == instanceha._K8S_NAMESPACE_PATH:
+                return mock_open(read_data='openstack')()
+            raise IOError("no such file")
+        with patch('builtins.open', side_effect=mock_open_side_effect):
+            token, namespace = instanceha._get_k8s_credentials()
+        self.assertEqual(token, 'my-token')
+        self.assertEqual(namespace, 'openstack')
 
     @patch.dict(os.environ, {'POD_NAMESPACE': 'openstack'})
     @patch('builtins.open', mock_open(read_data='  \n'))

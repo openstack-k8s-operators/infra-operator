@@ -1115,7 +1115,7 @@ class TestEvacuationFunctions(unittest.TestCase):
                 mock_as_completed.return_value = mock_futures
 
                 with patch('instanceha.time.sleep'):  # Speed up test
-                    result = instanceha._smart_evacuate(
+                    result = instanceha._concurrent_evacuate(
                         self.mock_connection, mock_servers, mock_service,
                         'test-host', 'service-123'
                     )
@@ -1220,7 +1220,7 @@ class TestEvacuationFunctions(unittest.TestCase):
 
                     with patch('instanceha.concurrent.futures.as_completed', return_value=futures):
                         with patch('instanceha.time.sleep'):
-                            instanceha._smart_evacuate(
+                            instanceha._concurrent_evacuate(
                                 self.mock_connection, mock_servers, mock_service,
                                 'test-host', 'service-123'
                             )
@@ -2251,22 +2251,22 @@ class TestConcurrentOperations(unittest.TestCase):
 
         def refresh_cache(thread_id):
             try:
-                with patch.object(self.service, 'get_evacuable_images', return_value=[]):
-                    self.service.refresh_evacuable_cache(mock_nova, force=True)
-                    flavors_result = self.service.get_evacuable_flavors(mock_nova)
-                    results.append(len(flavors_result))
+                self.service.refresh_evacuable_cache(mock_nova, force=True)
+                flavors_result = self.service.get_evacuable_flavors(mock_nova)
+                results.append(len(flavors_result))
             except Exception as e:
                 errors.append(f"Thread {thread_id}: {str(e)}")
 
         # Run 10 concurrent cache refreshes
-        threads = []
-        for i in range(10):
-            thread = threading.Thread(target=refresh_cache, args=(i,))
-            threads.append(thread)
-            thread.start()
+        with patch.object(self.service, 'get_evacuable_images', return_value=[]):
+            threads = []
+            for i in range(10):
+                thread = threading.Thread(target=refresh_cache, args=(i,))
+                threads.append(thread)
+                thread.start()
 
-        for thread in threads:
-            thread.join(timeout=5)
+            for thread in threads:
+                thread.join(timeout=5)
 
         # Should have no errors
         self.assertEqual(errors, [], f"Concurrent cache errors: {errors}")

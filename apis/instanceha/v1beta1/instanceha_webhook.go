@@ -121,6 +121,18 @@ func (r *InstanceHa) ValidateUpdate(ctx context.Context, c client.Client, old ru
 	var allWarn []string
 	basePath := field.NewPath("spec")
 
+	oldInstance, ok := old.(*InstanceHa)
+	if !ok {
+		return nil, apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+	}
+
+	if r.Spec.OpenStackCloud != oldInstance.Spec.OpenStackCloud {
+		allErrs = append(allErrs, field.Forbidden(
+			basePath.Child("openStackCloud"),
+			"openStackCloud cannot be changed after creation",
+		))
+	}
+
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
 	allErrs = append(allErrs, r.validateCipherSuites(basePath)...)

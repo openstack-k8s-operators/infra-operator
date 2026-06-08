@@ -120,6 +120,21 @@ nova-compute crashed (heartbeat still arriving). It acquires the
 against the timestamp map. Filter performance is unaffected by the
 protocol version since it operates on the in-memory timestamp dictionary.
 
+#### Cliff Detection Overhead
+
+Before filtering individual hosts, the function performs cliff detection:
+it counts the number of hosts with a fresh heartbeat (within
+`HEARTBEAT_TIMEOUT`) by scanning all entries in the timestamp snapshot,
+and compares this count against the previous cycle's value. If the drop
+exceeds `HEARTBEAT_CLIFF_THRESHOLD` (default 50%) and the previous count
+was ≥ 3, fencing is skipped entirely for that cycle.
+
+This adds an O(n) pass over all timestamps (where n = total nodes, not
+just down hosts). At 1000 nodes this is a single dict iteration with one
+comparison per entry — well under 100 us and negligible compared to the
+Nova API call latency. The per-host filter logic that follows is
+unchanged.
+
 ### Latency by Down-Host Count
 
 The THRESHOLD determines the maximum number of simultaneously down hosts

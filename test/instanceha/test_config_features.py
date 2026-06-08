@@ -554,7 +554,7 @@ class TestDelayConfig(unittest.TestCase):
 
         with patch('time.sleep') as mock_sleep:
             with patch('instanceha._get_evacuable_servers', return_value=[mock_server]):
-                with patch('instanceha._smart_evacuate', return_value=True):
+                with patch('instanceha._concurrent_evacuate', return_value=True):
                     failed_service = Mock()
                     failed_service.host = 'test-host.example.com'
                     failed_service.id = 'service-123'

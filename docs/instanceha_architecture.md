@@ -4,8 +4,6 @@
 
 InstanceHA is a high-availability service for OpenStack that automatically detects and evacuates instances from failed compute nodes.
 
-**Version**: 2.5
-
 ## Table of Contents
 
 1. [Core Components](#core-components)
@@ -126,6 +124,7 @@ _config_map: Dict[str, ConfigItem] = {
     'KDUMP_TIMEOUT': ConfigItem('int', 30, 5, 300),
     'CHECK_HEARTBEAT': ConfigItem('bool', False),
     'HEARTBEAT_TIMEOUT': ConfigItem('int', 120, 30, 600),
+    'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
     'DISABLED': ConfigItem('bool', False),
     'SSL_VERIFY': ConfigItem('bool', True),
     'FENCING_TIMEOUT': ConfigItem('int', 30, 5, 120),
@@ -133,6 +132,7 @@ _config_map: Dict[str, ConfigItem] = {
     'ORCHESTRATED_RESTART': ConfigItem('bool', False),
     'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
     'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),  # DEFAULT_EVACUATION_RETRIES = 5
+    'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
 }
 ```
 
@@ -158,10 +158,11 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 
     # Health monitoring
     self.current_hash = ""
-    self.hash_update_successful = True
+    self.hash_update_successful = False
     self._last_hash_time = 0
     self._previous_hash = ""
     self.ready = False                              # Readiness flag (set after first poll)
+    self.k8s_api_reachable = False                  # K8s API connectivity (partition detection)
 
     # Caching
     self._host_servers_cache = {}
@@ -188,6 +189,7 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
     self.heartbeat_hosts_timestamp = defaultdict(float)
     self.heartbeat_listener_stop_event = threading.Event()
     self.heartbeat_listener_start_time = 0.0
+    self.heartbeat_previous_active_count = 0        # Cliff detection baseline
 
     # Host processing tracking
     self.hosts_processing = defaultdict(float)
@@ -1108,6 +1110,7 @@ In addition, each event emission site also increments a corresponding Prometheus
 | `AggregateThresholdExceeded` | Warning | aggregate name | Failed hosts in aggregate exceed `instanceha:max_failures` metadata limit |
 | `HostReachable` | Warning | compute host | Host reported down by Nova but still reachable via heartbeat (CHECK_HEARTBEAT) |
 | `HostReenabled` | Normal | compute host | Host re-enabled after successful evacuation |
+| `HeartbeatCliff` | Warning | `cluster` | Sudden heartbeat loss detected — possible network partition, fencing skipped for this cycle |
 | `OrphanedHostRecovered` | Warning | compute host | Startup reconciliation recovered a fenced host left without evacuation marker |
 
 ### Event Structure
@@ -1181,39 +1184,7 @@ kubectl get events -n openstack --field-selector involvedObject.kind=InstanceHa,
 
 ### Prometheus Metrics
 
-The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP server used for health checks. Metrics are served using the `prometheus_client` Python library.
-
-**Counters** (monotonically increasing, reset on pod restart):
-
-| Metric | Labels | Description |
-|--------|--------|-------------|
-| `instanceha_fencing_total` | `host`, `result` | Fencing operations (`started`/`succeeded`/`failed`) |
-| `instanceha_evacuation_total` | `host`, `result` | Host-level evacuations |
-| `instanceha_instance_evacuation_total` | `host`, `result` | Per-instance evacuations (smart/orchestrated) |
-| `instanceha_host_down_total` | `host` | Host-down detections |
-| `instanceha_host_reachable_total` | `host` | Hosts still reachable via heartbeat despite Nova reporting down |
-| `instanceha_host_reenabled_total` | `host` | Hosts re-enabled after evacuation |
-| `instanceha_threshold_exceeded_total` | | Evacuations blocked by global threshold |
-| `instanceha_aggregate_threshold_exceeded_total` | `aggregate` | Evacuations blocked by per-aggregate threshold |
-| `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed |
-| `instanceha_processing_failed_total` | `host` | Service processing failures |
-| `instanceha_orphaned_host_recovered_total` | | Orphaned hosts recovered at startup |
-| `instanceha_poll_cycles_total` | `result` | Poll cycles (`success`/`error`) |
-
-**Gauges** (current value):
-
-| Metric | Description |
-|--------|-------------|
-| `instanceha_poll_consecutive_failures` | Current consecutive Nova API failures |
-| `instanceha_hosts_processing` | Hosts currently being processed |
-
-**Histograms**:
-
-| Metric | Labels | Buckets (s) | Description |
-|--------|--------|-------------|-------------|
-| `instanceha_instance_evacuation_duration_seconds` | `host` | 10, 30, 60, 120, 180, 300, 600 | Per-instance evacuation duration |
-
-Each metric increment is co-located with the corresponding `_emit_k8s_event()` call, so the event catalog and metric catalog map 1:1.
+The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP server used for health checks. Each metric increment is co-located with the corresponding `_emit_k8s_event()` call. See [instanceha_prometheus.md](instanceha_prometheus.md) for the full metric catalog, alert rules, and Grafana dashboard queries.
 
 ---
 
@@ -1303,7 +1274,48 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 
 ---
 
-### 3. Reserved Hosts
+### 3. K8s API Connectivity Check
+
+**Purpose**: Detect when the InstanceHA pod's worker node is network-isolated from the Kubernetes API, preventing it from fencing healthy hosts it can no longer observe.
+
+**Architecture**:
+- Background thread started by `start_k8s_health_check()`
+- Polls `GET /api/v1/namespaces/{namespace}` using the in-cluster service account token
+- Interval controlled by `K8S_API_CHECK_INTERVAL` (default 15s, range 5–120)
+
+**Configuration**: `K8S_API_CHECK_INTERVAL: 15`
+
+**Behavior**:
+1. The health check thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds
+2. Any non-5xx response (status code < 500) is treated as reachable — the API is responding, even if RBAC denies the specific request
+3. After 3 consecutive failures, `k8s_api_reachable` is set to `False` and `ready` is set to `False`
+4. The main poll loop checks `k8s_api_reachable` before fencing — if `False`, the entire fencing cycle is skipped
+5. When connectivity restores, `k8s_api_reachable` is set back to `True`; readiness is restored after the next successful Nova poll
+
+**Prometheus**: `instanceha_k8s_api_reachable` gauge (1=ok, 0=isolated)
+
+---
+
+### 4. Heartbeat Cliff Detection
+
+**Purpose**: Detect sudden mass heartbeat loss that is more likely caused by a listener-side network partition than simultaneous host failures.
+
+**Architecture**:
+- Integrated into `_filter_reachable_hosts()`, runs during each poll cycle when `CHECK_HEARTBEAT` is enabled
+- Compares current active heartbeat count against the previous cycle's count stored in `heartbeat_previous_active_count`
+
+**Configuration**: `HEARTBEAT_CLIFF_THRESHOLD: 50` (default 50%, range 10–100)
+
+**Behavior**:
+1. At each poll cycle, count hosts with a fresh heartbeat (within `HEARTBEAT_TIMEOUT`)
+2. If the previous count was ≥ 3 and the drop percentage exceeds `HEARTBEAT_CLIFF_THRESHOLD`, skip fencing for this cycle
+3. Emit a `HeartbeatCliff` K8s event (Warning) and increment `instanceha_heartbeat_cliff_total`
+4. The baseline count is preserved during a cliff event, so the cliff re-triggers on subsequent cycles until heartbeats recover
+5. When no cliff is detected, update `heartbeat_previous_active_count` for the next cycle
+
+---
+
+### 5. Reserved Hosts
 
 **Purpose**: Maintain spare capacity by auto-enabling reserved hosts and optionally forcing evacuation to them.
 
@@ -1349,7 +1361,7 @@ Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 
 ---
 
-### 4. Caching System
+### 6. Caching System
 
 **Purpose**: Cache evacuable resources to reduce Nova API calls.
 
@@ -1367,7 +1379,7 @@ Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 
 ---
 
-### 5. Threshold Protection
+### 7. Threshold Protection
 
 **Purpose**: Prevent mass evacuations during datacenter-level failures.
 
@@ -1844,35 +1856,7 @@ These values are passed as `METRICS_TLS_MIN_VERSION` and `METRICS_TLS_CIPHERS` e
 
 ## Performance
 
-### 1. Caching Performance
-
-**Benchmark** (100 flavors, 100 images):
-- First call: ~50ms (with API call)
-- Cached call: ~0.1ms (without API call)
-
----
-
-### 2. Concurrent Processing
-
-**ThreadPoolExecutor** for smart evacuation:
-```python
-with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
-    future_to_server = {
-        executor.submit(_server_evacuate_future, conn, srv): srv
-        for srv in evacuables
-    }
-```
-
-**Concurrency**: WORKERS controls the number of hosts processed concurrently and, for smart/orchestrated mode, the per-host server concurrency (capped at `MAX_TOTAL_EVACUATION_THREADS=32`).
-
----
-
-### 3. Memory Management
-
-**Cleanup Strategies**:
-- Kdump timestamp cleanup (>2000 entries)
-- Host processing expiration
-- Generic cleanup helper
+For heartbeat filter latency, UDP listener throughput, lock contention, memory overhead, and scalability projections at 1000-node scale, see [instanceha_heartbeat_performance.md](instanceha_heartbeat_performance.md).
 
 ---
 

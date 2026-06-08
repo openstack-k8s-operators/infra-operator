@@ -186,6 +186,7 @@ func Deployment(
 							RunAsUser:                ptr.To(instanceHaUID),
 							RunAsGroup:               ptr.To(instanceHaUID),
 							RunAsNonRoot:             ptr.To(true),
+							ReadOnlyRootFilesystem:   ptr.To(true),
 							AllowPrivilegeEscalation: ptr.To(false),
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{
@@ -279,6 +280,10 @@ func instancehaPodVolumeMounts() []corev1.VolumeMount {
 			SubPath:   "config.yaml",
 			ReadOnly:  true,
 		},
+		{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		},
 	}
 }
 
@@ -334,6 +339,12 @@ func instancehaPodVolumes(
 						Name: instance.Spec.InstanceHaConfigMap,
 					},
 				},
+			},
+		},
+		{
+			Name: "tmp",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
 	}

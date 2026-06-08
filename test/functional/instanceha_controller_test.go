@@ -22,10 +22,12 @@ import (
 
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	//revive:disable-next-line:dot-imports
+	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	instanceha "github.com/openstack-k8s-operators/infra-operator/internal/instanceha"
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -566,6 +568,198 @@ var _ = Describe("InstanceHa Controller", func() {
 			hmacSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, hmacSecretName, hmacSecret)).Should(Succeed())
 			Expect(hmacSecret.Data["hmac-key"]).To(Equal(currentKey), "key should not have changed during idempotent removal")
+		})
+	})
+
+	When("a fully-ready InstanceHa is deleted", func() {
+		BeforeEach(func() {
+			ih := CreateInstanceHaConfig(namespace, GetDefaultInstanceHaSpec())
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "openstack-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"clouds.yaml": "test-data",
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "openstack-config-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"secure.yaml": []byte("test-data"),
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "fencing-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"fencing.yaml": []byte("test-data"),
+			}))
+
+			th.SimulateDeploymentReplicaReady(instanceHaName)
+
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+
+		It("should remove the CR and its finalizer", func() {
+			instance := GetInstanceHa(instanceHaName)
+			Expect(k8sClient.Delete(ctx, instance)).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, instanceHaName, &instancehav1.InstanceHa{})
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("prerequisite resources exist but deployment is not ready", func() {
+		BeforeEach(func() {
+			ih := CreateInstanceHaConfig(namespace, GetDefaultInstanceHaSpec())
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "openstack-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"clouds.yaml": "test-data",
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "openstack-config-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"secure.yaml": []byte("test-data"),
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "fencing-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"fencing.yaml": []byte("test-data"),
+			}))
+		})
+
+		It("should not be ready", func() {
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionFalse,
+			)
+
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+	})
+
+	When("the openstack-config ConfigMap is missing", func() {
+		BeforeEach(func() {
+			ih := CreateInstanceHaConfig(namespace, GetDefaultInstanceHaSpec())
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "openstack-config-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"secure.yaml": []byte("test-data"),
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "fencing-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"fencing.yaml": []byte("test-data"),
+			}))
+		})
+
+		It("should report InputReady as false", func() {
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.InputReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+	})
+
+	When("the openstack-config-secret is missing", func() {
+		BeforeEach(func() {
+			ih := CreateInstanceHaConfig(namespace, GetDefaultInstanceHaSpec())
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "openstack-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"clouds.yaml": "test-data",
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "fencing-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"fencing.yaml": []byte("test-data"),
+			}))
+		})
+
+		It("should report InputReady as false", func() {
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.InputReadyCondition,
+				corev1.ConditionFalse,
+			)
+		})
+	})
+
+	When("the fencing-secret is missing", func() {
+		BeforeEach(func() {
+			ih := CreateInstanceHaConfig(namespace, GetDefaultInstanceHaSpec())
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "openstack-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"clouds.yaml": "test-data",
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "openstack-config-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"secure.yaml": []byte("test-data"),
+			}))
+		})
+
+		It("should report InputReady as false", func() {
+			th.ExpectCondition(
+				instanceHaName,
+				ConditionGetterFunc(InstanceHaConditionGetter),
+				condition.InputReadyCondition,
+				corev1.ConditionFalse,
+			)
 		})
 	})
 })
