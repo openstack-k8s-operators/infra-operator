@@ -9,21 +9,22 @@ InstanceHA is a high-availability service for OpenStack that automatically detec
 1. [Core Components](#core-components)
 2. [Architecture Patterns](#architecture-patterns)
 3. [Service Workflow](#service-workflow)
-4. [Critical Services Validation](#critical-services-validation)
-5. [Configuration System](#configuration-system)
-6. [Evacuation Mechanisms](#evacuation-mechanisms)
-7. [Fencing Agents](#fencing-agents)
-8. [Kubernetes Events and Prometheus Metrics](#kubernetes-events-and-prometheus-metrics)
-9. [Advanced Features](#advanced-features)
-10. [Region Handling](#region-handling)
-11. [Authentication](#authentication)
-12. [Startup Reconciliation](#startup-reconciliation)
-13. [Graceful Shutdown](#graceful-shutdown)
-14. [Security](#security)
-15. [Performance](#performance)
-16. [Testing](#testing)
-17. [Deployment](#deployment)
-18. [Configuration Options Reference](#configuration-options-reference)
+4. [Fencing Safety Model](#fencing-safety-model)
+5. [Critical Services Validation](#critical-services-validation)
+6. [Configuration System](#configuration-system)
+7. [Evacuation Mechanisms](#evacuation-mechanisms)
+8. [Fencing Agents](#fencing-agents)
+9. [Kubernetes Events and Prometheus Metrics](#kubernetes-events-and-prometheus-metrics)
+10. [Advanced Features](#advanced-features)
+11. [Region Handling](#region-handling)
+12. [Authentication](#authentication)
+13. [Startup Reconciliation](#startup-reconciliation)
+14. [Graceful Shutdown](#graceful-shutdown)
+15. [Security](#security)
+16. [Performance](#performance)
+17. [Testing](#testing)
+18. [Deployment](#deployment)
+19. [Configuration Options Reference](#configuration-options-reference)
 
 ---
 
@@ -162,7 +163,7 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
     self._last_hash_time = 0
     self._previous_hash = ""
     self.ready = False                              # Readiness flag (set after first poll)
-    self.k8s_api_reachable = False                  # K8s API connectivity (partition detection)
+    self.k8s_api_reachable = True                   # K8s API connectivity (fail-open, see Fencing Safety Model)
 
     # Caching
     self._host_servers_cache = {}
@@ -202,6 +203,7 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 **State Management Notes**:
 
 - `ready` flag starts `False` and is set to `True` after the first successful poll cycle. This drives the `/healthz` readiness probe endpoint — Kubernetes won't route traffic until the service has completed its first poll.
+- `k8s_api_reachable` starts `True` (fail-open). The background health check thread flips it to `False` after 3 consecutive failures. See [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale.
 - `shutdown_event` is set by the SIGTERM handler to signal the main loop and all `wait()` calls to exit gracefully.
 - `kdump_lock` protects all kdump-related state since the UDP listener thread writes concurrently with the main poll loop.
 - `heartbeat_lock` similarly protects heartbeat state from concurrent UDP listener writes.
@@ -671,6 +673,93 @@ The `disabled_reason` field tracks evacuation state:
 - Services transition from `resume` → `reenable` via the disabled_reason update
 - Failed evacuations remain disabled until manually resolved
 - Both checks use substring matching with explicit exclusions to prevent incorrect categorization
+
+---
+
+## Fencing Safety Model
+
+InstanceHA uses a two-tier safety model to prevent false-positive fencing. Each gate answers a distinct question — there is no redundancy between them.
+
+### Gate Chain
+
+When `CHECK_HEARTBEAT=true` (recommended for production):
+
+```
+Poll cycle starts
+  │
+  ├─ Gate 1: K8s API reachable?
+  │   Question: "Can we trust our own observations?"
+  │   If no (3 consecutive failures) → skip entire cycle
+  │   Rationale: if InstanceHA's worker node is network-isolated,
+  │   Nova's service list may be stale — fencing would hit healthy hosts
+  │
+  ├─ Gate 2: Per-host heartbeat
+  │   Question: "Is this specific host actually down?"
+  │   If host sending heartbeats within HEARTBEAT_TIMEOUT → skip that host
+  │   Rationale: Nova reports host as down, but heartbeat proves the OS is alive —
+  │   only nova-compute crashed, not the host
+  │
+  ├─ Gate 3: Heartbeat cliff detection
+  │   Question: "Did we lose visibility, or did hosts actually fail?"
+  │   If >HEARTBEAT_CLIFF_THRESHOLD% of heartbeats vanish at once → skip ALL fencing
+  │   Rationale: simultaneous mass heartbeat loss is more likely a listener-side
+  │   network partition than N simultaneous host failures
+  │
+  ├─ Gate 4: Kdump detection (optional, CHECK_KDUMP=true)
+  │   Question: "Is this host crashing and dumping memory?"
+  │   If kdump message received → fence immediately, skip power-on during recovery
+  │
+  ├─ Gate 5: Global threshold
+  │   Question: "Are too many hosts down to safely evacuate?"
+  │   If failed percentage > THRESHOLD → skip all fencing
+  │
+  └─ Gate 6: Per-aggregate threshold
+      Question: "Is this aggregate losing too many hosts?"
+      If failed count > instanceha:max_failures metadata → skip hosts in that aggregate
+```
+
+When `CHECK_HEARTBEAT=false`, gates 2 and 3 are not evaluated. A warning is logged at startup to alert operators that split-brain protection is limited to the K8s API check.
+
+### Fail-Open vs Fail-Closed Semantics
+
+| Gate | On error / no data | Rationale |
+|------|-------------------|-----------|
+| K8s API (startup) | Fail-open (allow fencing) | No data yet — blocking fencing on startup would silently prevent all evacuations until the health check thread runs |
+| K8s API (after 3 failures) | Fail-closed (block fencing) | Confirmed partition — fencing would hit healthy hosts |
+| Heartbeat (grace period) | Fail-open (allow fencing) | No heartbeat history in first `HEARTBEAT_TIMEOUT` seconds — cannot distinguish "no heartbeat" from "never received one" |
+| Heartbeat (steady state) | Fail-open (allow fencing) | No heartbeat = host is down = proceed with fencing |
+| Cliff detection | Fail-closed (block fencing) | Mass heartbeat loss is treated as observer failure |
+
+### Startup Race Window
+
+`k8s_api_reachable` initializes to `True` before the background health check thread confirms K8s API connectivity. If the K8s API is genuinely unreachable at startup, fencing could proceed for up to ~45 seconds (3 failures × 15s `K8S_API_CHECK_INTERVAL`) before the check blocks it.
+
+In practice this window is smaller: the health check thread starts during `_initialize_service()` and runs its first probe almost immediately, while the main loop still needs to complete `_establish_nova_connection()` and `_reconcile_orphaned_hosts()` before its first poll. The health check typically completes its first probe before the main loop is ready to fence.
+
+This is a deliberate trade-off. The alternative (`k8s_api_reachable = False` at startup) caused a deadlock: if the health check thread failed to start or was delayed, fencing was silently blocked forever with no log output indicating the problem.
+
+### Fencing Decision Log
+
+Every poll cycle that reaches the fencing decision point emits a single summary line:
+
+```
+INFO Fencing decision: 3 stale, 1 heartbeat-alive, 2 to fence, cliff=False
+```
+
+This line is emitted in all cases — including when all hosts are filtered out by heartbeat or cliff detection — so operators can diagnose fencing decisions from a single log grep.
+
+### Relationship to MedIK8s
+
+InstanceHA and MedIK8s (NHC/FAR/SNR) operate at different layers with no overlap:
+
+| Layer | Scope | What it handles |
+|-------|-------|-----------------|
+| MedIK8s | OpenShift cluster | Kubernetes node failures, pod recovery, node remediation |
+| InstanceHA | EDPM data plane | Compute host fencing, VM evacuation |
+
+MedIK8s watches Kubernetes Node objects. EDPM compute nodes are **not** Kubernetes nodes — they are external bare-metal hosts managed outside the cluster. MedIK8s cannot detect or remediate EDPM compute node failures; InstanceHA handles those independently.
+
+MedIK8s is relevant for control plane recovery (e.g., if the node running RabbitMQ or the InstanceHA pod itself fails). InstanceHA is relevant for data plane recovery (compute host failures requiring VM evacuation).
 
 ---
 
@@ -1286,11 +1375,12 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 **Configuration**: `K8S_API_CHECK_INTERVAL: 15`
 
 **Behavior**:
-1. The health check thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds
-2. Any non-5xx response (status code < 500) is treated as reachable — the API is responding, even if RBAC denies the specific request
-3. After 3 consecutive failures, `k8s_api_reachable` is set to `False` and `ready` is set to `False`
-4. The main poll loop checks `k8s_api_reachable` before fencing — if `False`, the entire fencing cycle is skipped
-5. When connectivity restores, `k8s_api_reachable` is set back to `True`; readiness is restored after the next successful Nova poll
+1. `k8s_api_reachable` initializes to `True` (fail-open) — see [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale
+2. The health check thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds
+3. Any non-5xx response (status code < 500) is treated as reachable — the API is responding, even if RBAC denies the specific request
+4. After 3 consecutive failures, `k8s_api_reachable` is set to `False` and `ready` is set to `False`
+5. The main poll loop checks `k8s_api_reachable` before fencing — if `False`, the entire fencing cycle is skipped
+6. When connectivity restores, `k8s_api_reachable` is set back to `True`; readiness is restored after the next successful Nova poll
 
 **Prometheus**: `instanceha_k8s_api_reachable` gauge (1=ok, 0=isolated)
 

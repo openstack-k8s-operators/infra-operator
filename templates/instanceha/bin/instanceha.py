@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from enum import Enum
 import concurrent.futures
 import requests
-import requests.exceptions
 import yaml
 import subprocess
 from yaml.loader import SafeLoader
@@ -27,13 +26,6 @@ import uuid
 from typing import Dict, Any, Optional, Union, List, Protocol, Tuple, Callable
 from collections import defaultdict
 from abc import ABC, abstractmethod
-
-from novaclient import client
-from novaclient.exceptions import Conflict, NotFound, Forbidden, Unauthorized
-
-from keystoneauth1 import loading
-from keystoneauth1 import session as ksc_session
-from keystoneauth1.exceptions.discovery import DiscoveryFailure
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
@@ -186,18 +178,9 @@ class MatchType(Enum):
     ZONE = "zone"
 
 
-class MigrationStatus(Enum):
-    """Migration status values."""
-    COMPLETED = "completed"
-    DONE = "done"
-    ERROR = "error"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
 # Migration status constants for checking migration state
-MIGRATION_STATUS_COMPLETED = [MigrationStatus.COMPLETED.value, MigrationStatus.DONE.value]
-MIGRATION_STATUS_ERROR = [MigrationStatus.ERROR.value, MigrationStatus.FAILED.value, MigrationStatus.CANCELLED.value]
+MIGRATION_STATUS_COMPLETED = ["completed", "done"]
+MIGRATION_STATUS_ERROR = ["error", "failed", "cancelled"]
 
 
 # Dataclasses
@@ -319,8 +302,6 @@ VALIDATION_PATTERNS = {
     'power_action': (['on', 'off', 'status', 'reset', 'cycle', 'soft', 'On', 'ForceOff',
                       'GracefulShutdown', 'GracefulRestart', 'ForceRestart', 'Nmi',
                       'ForceOn', 'PushPowerButton'], None),
-    'ip_address': ('ip', None),  # Special marker for IP address validation
-    'port': ('port', None),  # Special marker for port validation
     'username': (r'^[a-zA-Z0-9_-]{1,64}$', USERNAME_MAX_LENGTH),
     'hostname': (r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$', USERNAME_MAX_LENGTH)
 }
@@ -775,9 +756,9 @@ class InstanceHAService(CloudConnectionProvider):
         self.current_hash = ""
         self.hash_update_successful = False
         self._last_hash_time = 0
-        self._previous_hash = ""
         self.ready = False
-        self.k8s_api_reachable = False
+        self.k8s_api_reachable = True
+        K8S_API_REACHABLE.set(1)
 
         # Caching
         self._evacuable_flavors_cache = None
@@ -845,7 +826,6 @@ class InstanceHAService(CloudConnectionProvider):
         if current_timestamp - self._last_hash_time > hash_interval:
             self.current_hash = hashlib.sha256(str(current_timestamp).encode()).hexdigest()
             self.hash_update_successful = True
-            self._previous_hash = self.current_hash
             self._last_hash_time = current_timestamp
 
     def get_connection(self) -> Optional[OpenStackClient]:
@@ -960,8 +940,7 @@ class InstanceHAService(CloudConnectionProvider):
         try:
             cache_data = fetch_func(connection)
         except Exception as e:
-            logging.error("Failed to get evacuable resources (%s): %s", config_key, e)
-            logging.debug('Exception traceback:', exc_info=True)
+            _safe_log_exception(f"Failed to get evacuable resources ({config_key})", e, include_traceback=True)
             cache_data = []
         with self._cache_lock:
             setattr(self, cache_attr, cache_data)
@@ -1122,8 +1101,7 @@ class InstanceHAService(CloudConnectionProvider):
             return any(host in agg.hosts for agg in aggregates
                       if self._is_resource_evacuable(agg, self.evacuable_tag, ['metadata']))
         except Exception as e:
-            logging.error("Failed to check aggregate evacuability for %s: %s", host, e)
-            logging.debug('Exception traceback:', exc_info=True)
+            _safe_log_exception(f"Failed to check aggregate evacuability for {host}", e, include_traceback=True)
             return False
 
     def get_hosts_with_servers_cached(self, connection, services):
@@ -1297,15 +1275,7 @@ class InstanceHAService(CloudConnectionProvider):
         except Exception as e:
             logging.error('Health check server failed: %s', e)
 
-    def _cleanup_dict_by_condition(self, dictionary: dict, condition_func: Callable[[Any, Any], bool],
-                                   log_message: Optional[str] = None) -> int:
-        """Remove dictionary entries matching condition function."""
-        to_remove = [k for k, v in dictionary.items() if condition_func(k, v)]
-        for k in to_remove:
-            del dictionary[k]
-            if log_message:
-                logging.debug(log_message.format(k))
-        return len(to_remove)
+
 
     def refresh_evacuable_cache(self, connection=None, force=False, cache_timeout=CACHE_TIMEOUT_SECONDS):
         """Refresh evacuable flavors and images cache with intelligent timing."""
@@ -1558,8 +1528,7 @@ def _update_service_disable_reason(connection, host, service_id=None) -> bool:
         logging.debug('Updated disabled reason for host %s after evacuation failure', host)
         return True
     except Exception as e:
-        logging.error('Failed to update disable_reason for host %s. Error: %s', host, e)
-        logging.debug('Exception traceback:', exc_info=True)
+        _safe_log_exception(f"Failed to update disable_reason for host {host}", e, include_traceback=True)
         return False
 
 
@@ -1761,6 +1730,7 @@ def _host_evacuate(connection, failed_service, service, target_host=None) -> boo
 
 def _server_evacuate(connection, server, target_host=None, server_obj=None) -> EvacuationResult:
     """Evacuate a single server instance, returning EvacuationResult."""
+    from novaclient.exceptions import Conflict, NotFound, Forbidden, Unauthorized
     success = False
     error_message = ""
     resp_status_code = None
@@ -1905,9 +1875,7 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
 
         except Exception as e:
             api_error_count += 1
-            logging.error("Error checking evacuation status for %s: %s",
-                         response_uuid, _sanitize_message(str(e)))
-            logging.debug('Exception traceback:', exc_info=True)
+            _safe_log_exception(f"Error checking evacuation status for {response_uuid}", e, include_traceback=True)
             if api_error_count >= MAX_API_RETRIES:
                 logging.error("Too many API errors checking evacuation status for %s. Giving up.",
                              response_uuid)
@@ -1999,9 +1967,7 @@ def _server_evacuate_future(connection, server, target_host=None,
         return result
 
     except Exception as e:
-        logging.error("Unexpected error during evacuation of server %s: %s",
-                     server.id, _sanitize_message(str(e)))
-        logging.debug('Exception traceback:', exc_info=True)
+        _safe_log_exception(f"Unexpected error during evacuation of server {server.id}", e, include_traceback=True)
         _emit_k8s_event(source_host, 'InstanceEvacuationFailed',
                         f'Instance {server.id} evacuation error: {_sanitize_message(str(e))}',
                         event_type='Warning')
@@ -2017,6 +1983,11 @@ def _server_evacuate_future(connection, server, target_host=None,
 def _nova_login(plugin_name: str, auth_kwargs: dict, region_name: str,
                 ca_bundle: Optional[str] = None) -> OpenStackClient:
     """Create and return Nova client connection. Raises NovaConnectionError on failure."""
+    from keystoneauth1 import loading
+    from keystoneauth1 import session as ksc_session
+    from keystoneauth1.exceptions.discovery import DiscoveryFailure
+    from novaclient import client
+    from novaclient.exceptions import Unauthorized
     try:
         loader = loading.get_plugin_loader(plugin_name)
         auth = loader.load_from_options(**auth_kwargs)
@@ -2055,15 +2026,14 @@ def nova_login_ac(credentials: ACLoginCredentials, ca_bundle: Optional[str] = No
     }, credentials.region_name, ca_bundle)
 
 
-NOVA_EXCEPTION_MESSAGES = {
-    NotFound: "Resource not found",
-    Conflict: "Conflicting operation",
-}
-
-
 def _handle_nova_exception(operation: str, service_info: str, e: Exception, is_critical: bool = True) -> bool:
     """Handle Nova API exceptions with consistent logging."""
-    error_msg = NOVA_EXCEPTION_MESSAGES.get(type(e))
+    from novaclient.exceptions import NotFound, Conflict
+    nova_exception_messages = {
+        NotFound: "Resource not found",
+        Conflict: "Conflicting operation",
+    }
+    error_msg = nova_exception_messages.get(type(e))
 
     if error_msg:
         logging.error("Failed to %s for %s. %s: %s", operation, service_info, error_msg, type(e).__name__)
@@ -2522,12 +2492,6 @@ def _host_fence(host, action, service):
         logging.error("Invalid fence parameters: missing host")
         return False
 
-    # Validate action parameter at entry point
-    if not validate_input(action, 'power_action', "host fencing"):
-        logging.error("Invalid fence action: %s", action)
-        return False
-
-    # Additional check for fence-specific actions
     if action not in ['on', 'off']:
         logging.error("Unsupported fence action: %s (only 'on' and 'off' supported)", action)
         return False
@@ -2560,14 +2524,7 @@ def _host_fence(host, action, service):
 
 def _get_nova_connection(service):
     """Establish a connection to Nova using service configuration."""
-    try:
-        return service.create_connection()
-    except NovaConnectionError:
-        logging.error("Nova connection failed")
-        return None
-    except Exception as e:
-        _safe_log_exception("Failed to establish Nova connection", e)
-        return None
+    return _establish_nova_connection(service, fatal=False)
 
 
 def _enable_matching_reserved_host(conn, failed_service, reserved_hosts, service,
@@ -2961,6 +2918,10 @@ def _initialize_service(config_mgr):
         heartbeat_thread = threading.Thread(target=_heartbeat_udp_listener, args=(service,))
         heartbeat_thread.daemon = True
         heartbeat_thread.start()
+    else:
+        logging.warning(
+            'CHECK_HEARTBEAT is disabled — fencing decisions rely solely on Nova service '
+            'timestamps. Enable heartbeat checking for split-brain protection.')
 
     return service
 
@@ -3021,7 +2982,7 @@ def _categorize_services(services: List[Any], target_date: datetime) -> tuple:
 
     return compute_nodes, resume, reenable
 
-def _check_critical_services(conn, services, compute_nodes):
+def _check_critical_services(services):
     """Check if critical Nova services are operational for evacuation."""
     # Check if at least one scheduler is up
     schedulers = [s for s in services if s.binary == 'nova-scheduler']
@@ -3050,10 +3011,11 @@ def _filter_processing_hosts(service, compute_nodes, to_resume):
 
     with service.processing_lock:
         # Clean up expired processing entries
-        service._cleanup_dict_by_condition(
-            service.hosts_processing,
-            lambda h, t: current_time - t > max_processing_time + MAX_PROCESSING_TIME_PADDING_SECONDS,
-            'Cleaned up expired processing entry for {}')
+        expired = [h for h, t in service.hosts_processing.items()
+                   if current_time - t > max_processing_time + MAX_PROCESSING_TIME_PADDING_SECONDS]
+        for h in expired:
+            del service.hosts_processing[h]
+            logging.debug('Cleaned up expired processing entry for %s', h)
 
         # Filter out hosts currently being processed
         original_count = len(compute_nodes)
@@ -3212,6 +3174,9 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
         return
 
     # Filter out hosts still reachable via heartbeat
+    stale_count = len(compute_nodes)
+    heartbeat_skipped = []
+    cliff_detected = False
     if service.config.get_config_value('CHECK_HEARTBEAT'):
         compute_nodes, heartbeat_skipped, cliff_detected = _filter_reachable_hosts(service, compute_nodes)
         if not cliff_detected:
@@ -3223,8 +3188,15 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
                 HOST_REACHABLE_TOTAL.labels(host=svc.host).inc()
 
         if not (compute_nodes or to_resume):
+            logging.info(
+                'Fencing decision: %d stale, %d heartbeat-alive, %d to fence, cliff=%s',
+                stale_count, len(heartbeat_skipped), len(compute_nodes), cliff_detected)
             _cleanup_filtered_hosts(service, marked_hostnames, set(), current_time)
             return
+
+    logging.info(
+        'Fencing decision: %d stale, %d heartbeat-alive, %d to fence, cliff=%s',
+        stale_count, len(heartbeat_skipped), len(compute_nodes), cliff_detected)
 
     if compute_nodes:
         logging.warning('The following computes are down: %s', [svc.host for svc in compute_nodes])
@@ -3280,7 +3252,7 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
     # Process evacuations
     if not service.config.get_config_value('DISABLED'):
         # Check if critical services are operational
-        can_evacuate, error_msg = _check_critical_services(conn, services, compute_nodes)
+        can_evacuate, error_msg = _check_critical_services(services)
         if not can_evacuate:
             logging.error('Cannot evacuate: %s. Skipping evacuation.', error_msg)
             _cleanup_filtered_hosts(service, marked_hostnames, set(), current_time)
@@ -3557,6 +3529,9 @@ def main():
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     consecutive_failures = 0
+
+    from novaclient.exceptions import Unauthorized
+    from keystoneauth1.exceptions.discovery import DiscoveryFailure
 
     while not service.shutdown_event.is_set():
         service.update_health_hash()

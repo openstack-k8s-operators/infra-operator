@@ -610,18 +610,14 @@ class TestEvacuationFunctions(unittest.TestCase):
 
     def test_server_evacuate_exception(self):
         """Test server evacuation with exception."""
-        # Mock the exception class
-        class MockNotFound(Exception):
-            pass
+        from novaclient.exceptions import NotFound
 
-        # Patch the module to use our mock exception
-        with patch('instanceha.NotFound', MockNotFound):
-            self.mock_connection.servers.evacuate.side_effect = MockNotFound('Server not found')
+        self.mock_connection.servers.evacuate.side_effect = NotFound('Server not found')
 
-            result = instanceha._server_evacuate(self.mock_connection, 'server-123')
+        result = instanceha._server_evacuate(self.mock_connection, 'server-123')
 
-            self.assertFalse(result.accepted)
-            self.assertIn('not found', result.reason)
+        self.assertFalse(result.accepted)
+        self.assertIn('not found', result.reason)
 
     def test_host_disable_success(self):
         """Test successful host disable operation."""
@@ -634,18 +630,14 @@ class TestEvacuationFunctions(unittest.TestCase):
 
     def test_host_disable_force_down_failure(self):
         """Test host disable when force_down fails."""
-        # Mock the exception class
-        class MockNotFound(Exception):
-            pass
+        from novaclient.exceptions import NotFound
 
-        with patch('instanceha.NotFound', MockNotFound):
-            self.mock_connection.services.force_down.side_effect = MockNotFound('Service not found')
+        self.mock_connection.services.force_down.side_effect = NotFound('Service not found')
 
-            result = instanceha._host_disable(self.mock_connection, self.mock_service)
-            self.assertFalse(result)
+        result = instanceha._host_disable(self.mock_connection, self.mock_service)
+        self.assertFalse(result)
 
-            # disable_log_reason should not be called if force_down fails
-            self.mock_connection.services.disable_log_reason.assert_not_called()
+        self.mock_connection.services.disable_log_reason.assert_not_called()
 
     @patch('time.sleep')
     def test_server_evacuation_status(self, mock_sleep):
@@ -727,79 +719,45 @@ class TestEvacuationFunctions(unittest.TestCase):
 
     def test_host_disable_log_reason_fails_non_critical(self):
         """Test that disable_log_reason failure is handled gracefully."""
-        # disable_log_reason fails
         self.mock_connection.services.disable_log_reason.side_effect = Exception("Logging failed")
 
-        # Mock NotFound and Conflict to avoid isinstance issues
-        class MockNotFound(Exception):
-            pass
-        class MockConflict(Exception):
-            pass
+        result = instanceha._host_disable(self.mock_connection, self.mock_service)
 
-        with patch('instanceha.NotFound', MockNotFound), \
-             patch('instanceha.Conflict', MockConflict):
-            result = instanceha._host_disable(self.mock_connection, self.mock_service)
-
-            # Should return False but service is still forced down
-            self.assertFalse(result)
-            self.mock_connection.services.force_down.assert_called_once()
-            self.mock_connection.services.disable_log_reason.assert_called_once()
+        self.assertFalse(result)
+        self.mock_connection.services.force_down.assert_called_once()
+        self.mock_connection.services.disable_log_reason.assert_called_once()
 
     def test_handle_nova_exception_notfound(self):
         """Test handling NotFound exception."""
-        class MockNotFound(Exception):
-            pass
+        from novaclient.exceptions import NotFound
 
-        with patch('instanceha.NotFound', MockNotFound):
-            result = instanceha._handle_nova_exception(
-                "test operation", "test-service", MockNotFound("Not found"), is_critical=True
-            )
-            self.assertFalse(result)
+        result = instanceha._handle_nova_exception(
+            "test operation", "test-service", NotFound("Not found"), is_critical=True
+        )
+        self.assertFalse(result)
 
     def test_handle_nova_exception_conflict(self):
         """Test handling Conflict exception."""
-        class MockNotFound(Exception):
-            pass
-        class MockConflict(Exception):
-            pass
+        from novaclient.exceptions import Conflict
 
-        # Patch both NotFound and Conflict to avoid isinstance issues
-        with patch('instanceha.NotFound', MockNotFound), \
-             patch('instanceha.Conflict', MockConflict):
-            result = instanceha._handle_nova_exception(
-                "test operation", "test-service", MockConflict("Conflict"), is_critical=True
-            )
-            self.assertFalse(result)
+        result = instanceha._handle_nova_exception(
+            "test operation", "test-service", Conflict("Conflict"), is_critical=True
+        )
+        self.assertFalse(result)
 
     def test_handle_nova_exception_generic(self):
         """Test handling generic exception."""
-        # Mock NotFound and Conflict to avoid isinstance issues
-        class MockNotFound(Exception):
-            pass
-        class MockConflict(Exception):
-            pass
-
-        with patch('instanceha.NotFound', MockNotFound), \
-             patch('instanceha.Conflict', MockConflict):
-            result = instanceha._handle_nova_exception(
-                "test operation", "test-service", Exception("Generic error"), is_critical=True
-            )
-            self.assertFalse(result)
+        result = instanceha._handle_nova_exception(
+            "test operation", "test-service", Exception("Generic error"), is_critical=True
+        )
+        self.assertFalse(result)
 
     def test_handle_nova_exception_non_critical(self):
         """Test handling non-critical exception (should log warning)."""
-        # Mock NotFound and Conflict to avoid isinstance issues
-        class MockNotFound(Exception):
-            pass
-        class MockConflict(Exception):
-            pass
-
-        with patch('instanceha.NotFound', MockNotFound), \
-             patch('instanceha.Conflict', MockConflict):
-            result = instanceha._handle_nova_exception(
-                "test operation", "test-service", Exception("Error"), is_critical=False
-            )
-            self.assertFalse(result)
+        result = instanceha._handle_nova_exception(
+            "test operation", "test-service", Exception("Error"), is_critical=False
+        )
+        self.assertFalse(result)
 
     def test_update_service_disable_reason_with_id(self):
         """Test updating disable reason with provided service ID."""
@@ -1436,17 +1394,10 @@ class TestSecretExposure(unittest.TestCase):
         test_password = 'super_secret_openstack_password_123'
         test_username = 'test_os_user'
 
-        # Mock exception classes to be proper exceptions
-        class MockDiscoveryFailure(Exception):
-            pass
-        class MockUnauthorized(Exception):
-            pass
+        from keystoneauth1.exceptions.discovery import DiscoveryFailure
 
-        # Mock keystoneauth1 to raise an exception
-        with patch('instanceha.loading.get_plugin_loader') as mock_loader, \
-             patch('instanceha.DiscoveryFailure', MockDiscoveryFailure), \
-             patch('instanceha.Unauthorized', MockUnauthorized):
-            mock_loader.side_effect = MockDiscoveryFailure("Connection failed: password=invalid")
+        with patch('keystoneauth1.loading.get_plugin_loader') as mock_loader:
+            mock_loader.side_effect = DiscoveryFailure("Connection failed: password=invalid")
 
             # Try to login - should not expose password
             credentials = instanceha.NovaLoginCredentials(
@@ -1596,18 +1547,9 @@ class TestSecretExposure(unittest.TestCase):
         self.log_capture.seek(0)
         self.log_capture.truncate(0)
 
-        # Create exception that might contain sensitive info
         test_exception = Exception("Auth failed: password=secret123")
 
-        # Mock NotFound and Conflict to avoid isinstance issues
-        class MockNotFound(Exception):
-            pass
-        class MockConflict(Exception):
-            pass
-
-        with patch('instanceha.NotFound', MockNotFound), \
-             patch('instanceha.Conflict', MockConflict):
-            instanceha._handle_nova_exception("test_operation", "test_service", test_exception)
+        instanceha._handle_nova_exception("test_operation", "test_service", test_exception)
 
         self._assert_no_secrets_in_logs()
 
