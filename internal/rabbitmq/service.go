@@ -1,27 +1,57 @@
 package rabbitmq
 
 import (
+	"encoding/json"
 	"fmt"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/utils/ptr"
 )
 
-// serviceOverrideType returns the service type from override, or empty string
-func serviceOverrideType(r *rabbitmqv1.RabbitMq) corev1.ServiceType {
-	if r.Spec.Override.Service != nil && r.Spec.Override.Service.Spec != nil {
-		return r.Spec.Override.Service.Spec.Type
+// applyServiceOverride applies override metadata and spec fields to a Service.
+// The full corev1.ServiceSpec override is converted to lib-common's restricted
+// service.OverrideServiceSpec before merging via strategic merge patch, so only
+// the whitelisted fields are applied and unsafe fields like Selector, Ports, or
+// ClusterIP cannot be overridden.
+func applyServiceOverride(svc *corev1.Service, override *rabbitmqv1.RabbitMQServiceOverride) error {
+	if override == nil {
+		return nil
 	}
-	return ""
-}
+	if override.EmbeddedLabelsAnnotations != nil {
+		svc.Labels = util.MergeStringMaps(override.Labels, svc.Labels)
+		svc.Annotations = util.MergeStringMaps(override.Annotations, svc.Annotations)
+	}
+	if override.Spec != nil {
+		overrideSpecJSON, err := json.Marshal(override.Spec)
+		if err != nil {
+			return fmt.Errorf("error marshalling service override spec: %w", err)
+		}
+		whitelisted := &service.OverrideServiceSpec{}
+		if err := json.Unmarshal(overrideSpecJSON, whitelisted); err != nil {
+			return fmt.Errorf("error converting to OverrideServiceSpec: %w", err)
+		}
 
-// serviceOverrideIPFamilyPolicy returns the IPFamilyPolicy from override, or nil
-func serviceOverrideIPFamilyPolicy(r *rabbitmqv1.RabbitMq) *corev1.IPFamilyPolicy {
-	if r.Spec.Override.Service != nil && r.Spec.Override.Service.Spec != nil {
-		return r.Spec.Override.Service.Spec.IPFamilyPolicy
+		originalJSON, err := json.Marshal(svc.Spec)
+		if err != nil {
+			return fmt.Errorf("error marshalling service spec: %w", err)
+		}
+		patchJSON, err := json.Marshal(whitelisted)
+		if err != nil {
+			return fmt.Errorf("error marshalling override patch: %w", err)
+		}
+		patchedJSON, err := strategicpatch.StrategicMergePatch(originalJSON, patchJSON, corev1.ServiceSpec{})
+		if err != nil {
+			return fmt.Errorf("error applying service spec override: %w", err)
+		}
+		if err := json.Unmarshal(patchedJSON, &svc.Spec); err != nil {
+			return fmt.Errorf("error unmarshalling patched service spec: %w", err)
+		}
 	}
 	return nil
 }
@@ -64,7 +94,7 @@ const (
 
 // HeadlessService creates the headless service for StatefulSet pod DNS
 // matching the old rabbitmq-cluster-operator layout
-func HeadlessService(r *rabbitmqv1.RabbitMq) *corev1.Service {
+func HeadlessService(r *rabbitmqv1.RabbitMq) (*corev1.Service, error) {
 	ls := CommonLabels(r.Name)
 	selector := SelectorLabels(r.Name)
 
@@ -98,61 +128,57 @@ func HeadlessService(r *rabbitmqv1.RabbitMq) *corev1.Service {
 		},
 	}
 
-	// Apply override settings if specified
-	if ipfp := serviceOverrideIPFamilyPolicy(r); ipfp != nil {
-		svc.Spec.IPFamilyPolicy = ipfp
+	if override := r.Spec.Override.Service; override != nil {
+		if override.EmbeddedLabelsAnnotations != nil {
+			svc.Labels = util.MergeStringMaps(override.Labels, svc.Labels)
+			svc.Annotations = util.MergeStringMaps(override.Annotations, svc.Annotations)
+		}
+		// Only IPFamilyPolicy is applicable to headless services — other spec
+		// fields (Type, ExternalTrafficPolicy, LoadBalancerClass, etc.) are
+		// either invalid or meaningless for ClusterIP/None services.
+		if override.Spec != nil && override.Spec.IPFamilyPolicy != nil {
+			svc.Spec.IPFamilyPolicy = override.Spec.IPFamilyPolicy
+		}
 	}
 
-	return svc
+	return svc, nil
 }
 
 // ClientService creates the client-facing service for RabbitMQ
 // matching the old rabbitmq-cluster-operator layout
-func ClientService(r *rabbitmqv1.RabbitMq) *corev1.Service {
+func ClientService(r *rabbitmqv1.RabbitMq) (*corev1.Service, error) {
 	ls := CommonLabels(r.Name)
 	selector := SelectorLabels(r.Name)
 
 	ports := buildClientServicePorts(r)
 
-	serviceType := corev1.ServiceTypeClusterIP
-	annotations := make(map[string]string)
-
-	// Apply override settings if specified
-	if overrideType := serviceOverrideType(r); overrideType != "" {
-		serviceType = overrideType
-	}
-	if r.Spec.Override.Service != nil && r.Spec.Override.Service.EmbeddedLabelsAnnotations != nil {
-		for k, v := range r.Spec.Override.Service.Annotations {
-			annotations[k] = v
-		}
-	}
-
-	if serviceType == corev1.ServiceTypeLoadBalancer {
-		if _, exists := annotations["dnsmasq.network.openstack.org/hostname"]; !exists {
-			annotations["dnsmasq.network.openstack.org/hostname"] = fmt.Sprintf("%s.%s.svc", r.Name, r.Namespace)
-		}
-	}
-
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        r.Name,
-			Namespace:   r.Namespace,
-			Labels:      ls,
-			Annotations: annotations,
+			Name:      r.Name,
+			Namespace: r.Namespace,
+			Labels:    ls,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     serviceType,
+			Type:     corev1.ServiceTypeClusterIP,
 			Selector: selector,
 			Ports:    ports,
 		},
 	}
 
-	// Apply IPFamilyPolicy from override if specified
-	if ipfp := serviceOverrideIPFamilyPolicy(r); ipfp != nil {
-		svc.Spec.IPFamilyPolicy = ipfp
+	if err := applyServiceOverride(svc, r.Spec.Override.Service); err != nil {
+		return nil, fmt.Errorf("client service override: %w", err)
 	}
 
-	return svc
+	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		if svc.Annotations == nil {
+			svc.Annotations = make(map[string]string)
+		}
+		if _, exists := svc.Annotations["dnsmasq.network.openstack.org/hostname"]; !exists {
+			svc.Annotations["dnsmasq.network.openstack.org/hostname"] = fmt.Sprintf("%s.%s.svc", r.Name, r.Namespace)
+		}
+	}
+
+	return svc, nil
 }
 
 // buildClientServicePorts builds the list of ports for the client service
