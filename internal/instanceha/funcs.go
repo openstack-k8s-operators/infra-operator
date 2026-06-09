@@ -177,7 +177,7 @@ func Deployment(
 						FSGroup: ptr.To(instanceHaUID),
 					},
 					Volumes:                       volumes,
-					TerminationGracePeriodSeconds: ptr.To[int64](30),
+					TerminationGracePeriodSeconds: ptr.To[int64](45),
 					Containers: []corev1.Container{{
 						Name:    "instanceha",
 						Image:   containerImage,

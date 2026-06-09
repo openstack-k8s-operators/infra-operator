@@ -274,16 +274,20 @@ class TestFenceIpmi(unittest.TestCase):
     def test_valid_params_calls_execute(self, mock_exec):
         """Valid params delegates to _execute_ipmi_fence."""
         data = {"ipaddr": "192.168.1.10", "ipport": "623", "login": "admin", "passwd": "secret"}
-        result = instanceha._fence_ipmi("host1", "off", data, self._make_service())
+        svc = self._make_service()
+        result = instanceha._fence_ipmi("host1", "off", data, svc)
         self.assertTrue(result)
-        mock_exec.assert_called_once_with("host1", "off", data, 30)
+        mock_exec.assert_called_once_with("host1", "off", data, 30,
+                                          shutdown_event=svc.shutdown_event)
 
     @patch('instanceha._execute_ipmi_fence', return_value=True)
     def test_uses_custom_timeout_from_fencing_data(self, mock_exec):
         """Uses timeout from fencing_data if provided."""
         data = {"ipaddr": "192.168.1.10", "ipport": "623", "login": "admin", "passwd": "secret", "timeout": 60}
-        instanceha._fence_ipmi("host1", "off", data, self._make_service())
-        mock_exec.assert_called_once_with("host1", "off", data, 60)
+        svc = self._make_service()
+        instanceha._fence_ipmi("host1", "off", data, svc)
+        mock_exec.assert_called_once_with("host1", "off", data, 60,
+                                          shutdown_event=svc.shutdown_event)
 
     @patch('instanceha._execute_ipmi_fence', return_value=False)
     def test_returns_false_when_execute_fails(self, mock_exec):

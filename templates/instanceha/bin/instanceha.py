@@ -405,11 +405,18 @@ def _make_ssl_request(method: str, url: str, auth: tuple, timeout: int,
 
 
 def _wait_for_power_off(check_func: Callable[[], Optional[str]], timeout: int,
-                       host_identifier: str, expected_state: str, agent_type: str) -> bool:
+                       host_identifier: str, expected_state: str, agent_type: str,
+                       shutdown_event=None) -> bool:
     """Wait for host to power off by polling power state."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        time.sleep(1)
+        if shutdown_event and shutdown_event.is_set():
+            logging.warning("Shutdown requested, aborting power-off wait for %s", host_identifier)
+            return False
+        if shutdown_event:
+            shutdown_event.wait(1)
+        else:
+            time.sleep(1)
         power_state = check_func()
         if power_state == expected_state:
             logging.info("%s power off successful for %s", agent_type, host_identifier)
@@ -1720,7 +1727,7 @@ def _host_evacuate(connection, failed_service, service, target_host=None) -> boo
         logging.info("Nothing to evacuate")
         return True
 
-    time.sleep(service.config.get_config_value('DELAY'))
+    _interruptible_sleep(service.shutdown_event, service.config.get_config_value('DELAY'))
 
     if service.config.get_config_value('ORCHESTRATED_RESTART') is True or service.config.get_config_value('SMART_EVACUATION'):
         return _concurrent_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host)
@@ -1929,7 +1936,7 @@ def _server_evacuate_future(connection, server, target_host=None,
             return False
 
         logging.debug("Starting evacuation of %s", response.uuid)
-        time.sleep(INITIAL_EVACUATION_WAIT_SECONDS)
+        _interruptible_sleep(shutdown_event, INITIAL_EVACUATION_WAIT_SECONDS)
 
         result = _monitor_evacuation(connection, server.id, response.uuid, start_time,
                                      max_retries=max_retries,
@@ -2194,7 +2201,7 @@ def _get_power_state(agent_type: str, session: requests.Session = None, **kwargs
 
     return None
 
-def _redfish_reset(url, user, passwd, timeout, action, config_mgr):
+def _redfish_reset(url, user, passwd, timeout, action, config_mgr, shutdown_event=None):
     """Perform a Redfish reset operation on a computer system."""
     if not all([url, user, passwd, action]):
         logging.error("Redfish reset failed: missing required parameters")
@@ -2225,7 +2232,8 @@ def _redfish_reset(url, user, passwd, timeout, action, config_mgr):
                     try:
                         return _wait_for_power_off(
                             lambda: _get_power_state('redfish', session=poll_session, url=url, user=user, passwd=passwd, timeout=timeout, config_mgr=config_mgr),
-                            timeout, safe_url, 'OFF', 'Redfish')
+                            timeout, safe_url, 'OFF', 'Redfish',
+                            shutdown_event=shutdown_event)
                     finally:
                         poll_session.close()
                 else:
@@ -2345,7 +2353,13 @@ def _bmh_wait_for_power_off(get_url, headers, cacert, host, timeout, poll_interv
 
     with requests.Session() as session:
         while time.monotonic() < timeout_end:
-            time.sleep(poll_interval)
+            if service.shutdown_event and service.shutdown_event.is_set():
+                logging.warning("Shutdown requested, aborting power-off wait for %s", host)
+                return False
+            if service.shutdown_event:
+                service.shutdown_event.wait(poll_interval)
+            else:
+                time.sleep(poll_interval)
 
             try:
                 response = session.get(get_url, headers=headers, verify=cacert, timeout=request_timeout)
@@ -2393,7 +2407,7 @@ def _validate_fencing_inputs(fencing_data, agent_name) -> bool:
         validations['username'] = fencing_data["login"]
     return validate_inputs(validations, agent_name)
 
-def _execute_ipmi_fence(host, action, fencing_data, timeout) -> bool:
+def _execute_ipmi_fence(host, action, fencing_data, timeout, shutdown_event=None) -> bool:
     """Execute IPMI fencing operation with retry logic."""
     timeout = max(5, min(300, int(timeout or 30)))
     ipaddr, ipport, login, passwd = fencing_data["ipaddr"], fencing_data["ipport"], \
@@ -2415,7 +2429,8 @@ def _execute_ipmi_fence(host, action, fencing_data, timeout) -> bool:
     if action == 'off':
         return _wait_for_power_off(
             lambda: _get_power_state('ipmi', ip=ipaddr, port=ipport, user=login, passwd=passwd, timeout=timeout),
-            timeout, host, 'CHASSIS POWER IS OFF', 'IPMI')
+            timeout, host, 'CHASSIS POWER IS OFF', 'IPMI',
+            shutdown_event=shutdown_event)
 
     logging.info("IPMI %s successful for %s", action, host)
     return True
@@ -2433,7 +2448,8 @@ def _fence_ipmi(host, action, fencing_data, service):
     if not _validate_fencing_inputs(fencing_data, "IPMI"):
         return False
     timeout = fencing_data.get("timeout", service.config.get_config_value('FENCING_TIMEOUT'))
-    return _execute_ipmi_fence(host, action, fencing_data, timeout)
+    return _execute_ipmi_fence(host, action, fencing_data, timeout,
+                              shutdown_event=service.shutdown_event)
 
 
 def _fence_redfish(host, action, fencing_data, service):
@@ -2448,7 +2464,8 @@ def _fence_redfish(host, action, fencing_data, service):
     redfish_action = "ForceOff" if action == "off" else "On"
     timeout = fencing_data.get("timeout", service.config.get_config_value('FENCING_TIMEOUT'))
     return _redfish_reset(url, fencing_data["login"], fencing_data["passwd"],
-                        timeout, redfish_action, service.config)
+                        timeout, redfish_action, service.config,
+                        shutdown_event=service.shutdown_event)
 
 
 def _fence_bmh(host, action, fencing_data, service):
@@ -3545,6 +3562,7 @@ def main():
 
             services = conn.services.list(binary="nova-compute")
             if not services:
+                logging.info("Poll cycle completed: no compute services found, next poll in %ds", poll_interval)
                 service.shutdown_event.wait(poll_interval)
                 continue
 
@@ -3556,9 +3574,12 @@ def main():
             _process_stale_services(conn, service, services, compute_nodes_list, to_resume)
             _process_reenabling(conn, service, to_reenable)
 
+            stale_count = len(compute_nodes_list)
             if not service.ready:
                 service.ready = True
                 logging.info("Readiness probe active — first poll cycle completed")
+            logging.info("Poll cycle completed: %d compute services, %d stale, next poll in %ds",
+                         len(services), stale_count, poll_interval)
             consecutive_failures = 0
             POLL_CONSECUTIVE_FAILURES.set(0)
             POLL_CYCLE_TOTAL.labels(result='success').inc()

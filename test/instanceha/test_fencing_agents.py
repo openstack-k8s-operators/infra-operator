@@ -591,8 +591,7 @@ class TestIPMIFencing(unittest.TestCase):
 
     @patch('instanceha._get_power_state')
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
-    def test_ipmi_power_off_wait_success(self, mock_sleep, mock_run, mock_get_power_state):
+    def test_ipmi_power_off_wait_success(self, mock_run, mock_get_power_state):
         """Test IPMI power off waits for confirmation."""
         # Mock successful power off command
         mock_run.return_value = Mock()
@@ -603,6 +602,7 @@ class TestIPMIFencing(unittest.TestCase):
         # Create mock service and fencing data
         mock_service = Mock()
         mock_service.config.get_config_value.return_value = 30
+        mock_service.shutdown_event.is_set.return_value = False
 
         # Test the function
         result = instanceha._execute_fence_operation('test-host', 'off', {
@@ -617,15 +617,12 @@ class TestIPMIFencing(unittest.TestCase):
         # Should return True after power off confirmation
         self.assertTrue(result)
         self.assertEqual(mock_get_power_state.call_count, 2)  # Called twice
-        # Sleep should be called at least once with value 1
-        self.assertGreaterEqual(mock_sleep.call_count, 1)
-        # Check that sleep was called with 1 at least once
-        self.assertIn(call(1), mock_sleep.call_args_list)
+        # Interruptible wait should be called at least once with value 1
+        mock_service.shutdown_event.wait.assert_called_with(1)
 
     @patch('instanceha._get_power_state')
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
-    def test_ipmi_power_off_timeout(self, mock_sleep, mock_run, mock_get_power_state):
+    def test_ipmi_power_off_timeout(self, mock_run, mock_get_power_state):
         """Test IPMI power off times out waiting for confirmation."""
         # Mock successful power off command
         mock_run.return_value = Mock()
@@ -636,6 +633,7 @@ class TestIPMIFencing(unittest.TestCase):
         # Create mock service and fencing data
         mock_service = Mock()
         mock_service.config.get_config_value.return_value = 30
+        mock_service.shutdown_event.is_set.return_value = False
 
         # Test the function with timeout=2
         result = instanceha._execute_fence_operation('test-host', 'off', {
@@ -650,9 +648,9 @@ class TestIPMIFencing(unittest.TestCase):
         # Should return False due to timeout
         self.assertFalse(result)
         # With deadline-based loop, exact call count depends on timing;
-        # verify it was called at least once and sleep was invoked
+        # verify it was called at least once and interruptible wait was used
         self.assertGreaterEqual(mock_get_power_state.call_count, 1)
-        self.assertGreaterEqual(mock_sleep.call_count, 1)
+        mock_service.shutdown_event.wait.assert_called_with(1)
 
     @patch('instanceha.subprocess.run')
     def test_ipmi_power_on_no_wait(self, mock_run):
@@ -823,6 +821,7 @@ class TestBMHFencing(unittest.TestCase):
         self.mock_service = Mock()
         self.mock_service.config = Mock()
         self.mock_service.config.get_config_value = Mock(return_value=30)
+        self.mock_service.shutdown_event.is_set.return_value = False
 
     @patch('instanceha.os.path.exists')
     @patch('instanceha.requests.patch')
@@ -899,9 +898,8 @@ class TestBMHFencing(unittest.TestCase):
     @patch('instanceha.os.path.exists')
     @patch('instanceha.requests.Session')
     @patch('instanceha.requests.patch')
-    @patch('instanceha.time.sleep')
     @patch('instanceha.time.monotonic')
-    def test_bmh_wait_for_power_off_success(self, mock_monotonic, mock_sleep, mock_patch, mock_session_class, mock_exists):
+    def test_bmh_wait_for_power_off_success(self, mock_monotonic, mock_patch, mock_session_class, mock_exists):
         """Test BMH wait for power off successfully detects power off."""
         # Mock CA cert exists
         mock_exists.return_value = True
@@ -1346,6 +1344,7 @@ class TestBMHFencingEdgeCases(unittest.TestCase):
         """Test race condition when power state changes during polling."""
         service = Mock()
         service.config.get_config_value.return_value = 600  # FENCING_TIMEOUT
+        service.shutdown_event.is_set.return_value = False
 
         call_count = [0]
 
@@ -1367,8 +1366,7 @@ class TestBMHFencingEdgeCases(unittest.TestCase):
         mock_session.__exit__ = Mock(return_value=None)
         mock_session.get.side_effect = side_effect
 
-        with patch('requests.Session', return_value=mock_session), \
-             patch('time.sleep'):  # Mock sleep to avoid delays
+        with patch('requests.Session', return_value=mock_session):
             get_url = 'https://api.test.com/apis/metal3.io/v1alpha1/namespaces/test-ns/baremetalhosts/test-bmh'
             headers = {'Authorization': 'Bearer fake-token'}
 
@@ -1425,6 +1423,7 @@ class TestBMHFencingEdgeCases(unittest.TestCase):
         """Test that status check respects polling interval."""
         service = Mock()
         service.config.get_config_value.return_value = 600  # FENCING_TIMEOUT
+        service.shutdown_event.is_set.return_value = False
 
         mock_response = Mock()
         mock_response.status_code = 200
@@ -1437,8 +1436,7 @@ class TestBMHFencingEdgeCases(unittest.TestCase):
         mock_session.__exit__ = Mock(return_value=None)
         mock_session.get.return_value = mock_response
 
-        with patch('requests.Session', return_value=mock_session), \
-             patch('time.sleep') as mock_sleep:
+        with patch('requests.Session', return_value=mock_session):
             get_url = 'https://api.test.com/apis/metal3.io/v1alpha1/namespaces/test-ns/baremetalhosts/test-bmh'
             headers = {'Authorization': 'Bearer fake-token'}
 
@@ -1448,9 +1446,8 @@ class TestBMHFencingEdgeCases(unittest.TestCase):
 
             # Should complete on first check (poweredOn=False)
             self.assertTrue(result)
-            # Should only sleep once (at start of loop before check)
-            self.assertEqual(mock_sleep.call_count, 1)
-            mock_sleep.assert_called_with(0.5)
+            # Should only wait once (at start of loop before check)
+            service.shutdown_event.wait.assert_called_once_with(0.5)
 
 
 

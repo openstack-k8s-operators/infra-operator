@@ -94,6 +94,47 @@ class TestResolveHostnamePacket(unittest.TestCase):
         result = instanceha._resolve_hostname_packet(data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[bad_key])
         self.assertIsNone(result)
 
+    def test_current_key_accepted_in_dual_key_list(self):
+        """Current key (first in list) validates the packet."""
+        current_key = b'\x01' * 32
+        previous_key = b'\x02' * 32
+        data = self._make_packet(b'compute-01')  # signed with _TEST_HMAC_KEY == current_key
+        result = instanceha._resolve_hostname_packet(
+            data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[current_key, previous_key])
+        self.assertEqual(result, 'compute-01')
+
+    def test_previous_key_accepted_during_rotation(self):
+        """Previous key (second in list) still validates — critical for rotation window."""
+        current_key = b'\x03' * 32
+        previous_key = _TEST_HMAC_KEY  # packet was signed with this key
+        data = self._make_packet(b'compute-01')
+        result = instanceha._resolve_hostname_packet(
+            data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[current_key, previous_key])
+        self.assertEqual(result, 'compute-01')
+
+    def test_unknown_key_rejected_with_dual_keys(self):
+        """Packet signed with a key not in the key list is rejected."""
+        key_a = b'\x03' * 32
+        key_b = b'\x04' * 32
+        data = self._make_packet(b'compute-01')  # signed with _TEST_HMAC_KEY, neither key_a nor key_b
+        result = instanceha._resolve_hostname_packet(
+            data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[key_a, key_b])
+        self.assertIsNone(result)
+
+    def test_no_hmac_keys_rejects_valid_packet(self):
+        """A valid packet is rejected when no HMAC keys are configured."""
+        data = self._make_packet(b'compute-01')
+        result = instanceha._resolve_hostname_packet(
+            data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=None)
+        self.assertIsNone(result)
+
+    def test_empty_hmac_keys_rejects_valid_packet(self):
+        """A valid packet is rejected when HMAC key list is empty."""
+        data = self._make_packet(b'compute-01')
+        result = instanceha._resolve_hostname_packet(
+            data, ('10.0.0.1', 12345), 'Heartbeat', hmac_keys=[])
+        self.assertIsNone(result)
+
     def test_stale_timestamp_rejected(self):
         payload = struct.pack('!I', instanceha.HEARTBEAT_MAGIC_NUMBER)
         payload += struct.pack('!Q', int(time.time()) - 700)
