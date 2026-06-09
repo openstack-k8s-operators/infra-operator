@@ -632,15 +632,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		},
 	}
 	hsop, err := controllerutil.CreateOrPatch(ctx, r.Client, headlessSvc, func() error {
-		desired := rabbitmq.HeadlessService(instance)
-		headlessSvc.Spec.ClusterIP = desired.Spec.ClusterIP
-		headlessSvc.Spec.PublishNotReadyAddresses = desired.Spec.PublishNotReadyAddresses
-		mergeServicePorts(&headlessSvc.Spec.Ports, desired.Spec.Ports)
-		headlessSvc.Spec.Selector = desired.Spec.Selector
-		headlessSvc.Labels = desired.Labels
-		if desired.Spec.IPFamilyPolicy != nil {
-			headlessSvc.Spec.IPFamilyPolicy = desired.Spec.IPFamilyPolicy
+		desired, err := rabbitmq.HeadlessService(instance)
+		if err != nil {
+			return err
 		}
+		savedPorts := headlessSvc.Spec.Ports
+		headlessSvc.Spec = desired.Spec
+		mergeServicePorts(&savedPorts, desired.Spec.Ports)
+		headlessSvc.Spec.Ports = savedPorts
+		headlessSvc.Labels = desired.Labels
+		headlessSvc.Annotations = util.MergeStringMaps(desired.Annotations, headlessSvc.Annotations)
 		return r.setOwnership(headlessSvc, instance, isMigration)
 	})
 	if err != nil {
@@ -658,18 +659,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		},
 	}
 	csop, err := controllerutil.CreateOrPatch(ctx, r.Client, clientSvc, func() error {
-		desired := rabbitmq.ClientService(instance)
-		mergeServicePorts(&clientSvc.Spec.Ports, desired.Spec.Ports)
-		clientSvc.Spec.Selector = desired.Spec.Selector
-		clientSvc.Spec.Type = desired.Spec.Type
+		desired, err := rabbitmq.ClientService(instance)
+		if err != nil {
+			return err
+		}
+		savedPorts := clientSvc.Spec.Ports
+		clientSvc.Spec = desired.Spec
+		mergeServicePorts(&savedPorts, desired.Spec.Ports)
+		clientSvc.Spec.Ports = savedPorts
 		// Merge annotations: set our desired ones without removing externally-added
 		// annotations (e.g. from MetalLB) to avoid reconcile loops
-		if clientSvc.Annotations == nil {
-			clientSvc.Annotations = map[string]string{}
-		}
-		for k, v := range desired.Annotations {
-			clientSvc.Annotations[k] = v
-		}
+		clientSvc.Annotations = util.MergeStringMaps(desired.Annotations, clientSvc.Annotations)
 		clientSvc.Labels = desired.Labels
 		return r.setOwnership(clientSvc, instance, isMigration)
 	})
