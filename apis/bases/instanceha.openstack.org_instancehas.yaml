@@ -233,6 +233,14 @@ spec:
                   HeartbeatHMACSecret is the name of the auto-generated Secret
                   containing the HMAC key for heartbeat authentication
                 type: string
+              hmacKeyRotationSynced:
+                description: |-
+                  HMACKeyRotationSynced tracks EDPM deployment progress during HMAC
+                  key rotation. See HMACRotationSyncState constants.
+                enum:
+                - ""
+                - WaitingForDeployment
+                type: string
               lastAppliedTopology:
                 description: LastAppliedTopology - the last applied Topology
                 properties:

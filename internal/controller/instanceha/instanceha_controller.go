@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -61,6 +62,8 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	commonservice "github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
+
+	edpm "github.com/openstack-k8s-operators/lib-common/modules/edpm/unstructured"
 
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
@@ -96,6 +99,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=dataplane.openstack.org,resources=openstackdataplanenodesets,verbs=get;list;watch
 
 // Reconcile -
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
@@ -564,6 +568,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
+	if ctrlResult, err := r.tryNullifyPreviousKey(ctx, instance, hmacSecret); err != nil || ctrlResult.RequeueAfter > 0 {
+		return ctrlResult, err
+	}
+
 	_, hmacSecretHash, err := secret.GetSecret(ctx, helper, heartbeatHMACSecretName, instance.Namespace)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to hash heartbeat HMAC secret: %w", err)
@@ -848,7 +856,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&instancehav1.InstanceHa{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -869,8 +877,18 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(&topologyv1.Topology{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Complete(r)
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+
+	gk := schema.GroupKind{Group: edpm.NodeSetGVK.Group, Kind: edpm.NodeSetGVK.Kind}
+	if _, err := mgr.GetRESTMapper().RESTMapping(gk, edpm.NodeSetGVK.Version); err == nil {
+		b = b.Watches(
+			edpm.NewNodeSetObject(),
+			handler.EnqueueRequestsFromMapFunc(r.findInstanceHaWithPendingRotation),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		)
+	}
+
+	return b.Complete(r)
 }
 
 func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
@@ -921,11 +939,70 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, instance *instancehav1
 		return ctrlResult, err
 	}
 
+	// Clear any in-flight rotation state.
+	instance.Status.HMACKeyRotationSynced = instancehav1.HMACRotationIdle
+
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
 	Log.Info("Reconciled Service delete successfully")
 
 	return ctrl.Result{}, nil
+}
+
+func (r *Reconciler) tryNullifyPreviousKey(ctx context.Context, instance *instancehav1.InstanceHa, hmacSecret *corev1.Secret) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+
+	if len(hmacSecret.Data["hmac-key-previous"]) == 0 {
+		if instance.Status.HMACKeyRotationSynced != instancehav1.HMACRotationIdle {
+			instance.Status.HMACKeyRotationSynced = instancehav1.HMACRotationIdle
+		}
+		return ctrl.Result{}, nil
+	}
+
+	secretName := hmacSecret.Name
+	inSync, info, err := edpm.IsSecretHashInSync(ctx, r.Client, instance.Namespace, secretName)
+	if err != nil {
+		Log.Error(err, "Failed to check nodeset sync status for HMAC key rotation, will retry")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	if !inSync {
+		if instance.Status.HMACKeyRotationSynced != instancehav1.HMACRotationWaitingDeployment {
+			instance.Status.HMACKeyRotationSynced = instancehav1.HMACRotationWaitingDeployment
+			Log.Info("HMAC key change detected by EDPM, waiting for deployment",
+				"secret", secretName, "info", info)
+		} else {
+			Log.Info("HMAC key deployment in progress", "secret", secretName, "info", info)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	hmacSecret.Data["hmac-key-previous"] = []byte{}
+	if err := r.Update(ctx, hmacSecret); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to nullify previous HMAC key: %w", err)
+	}
+	instance.Status.HMACKeyRotationSynced = instancehav1.HMACRotationIdle
+	Log.Info("Nullified previous HMAC key after successful EDPM deployment", "secret", secretName)
+	return ctrl.Result{}, nil
+}
+
+func (r *Reconciler) findInstanceHaWithPendingRotation(ctx context.Context, _ client.Object) []reconcile.Request {
+	crList := &instancehav1.InstanceHaList{}
+	if err := r.List(ctx, crList); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for _, cr := range crList.Items {
+		if cr.Status.HMACKeyRotationSynced != instancehav1.HMACRotationIdle {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      cr.Name,
+					Namespace: cr.Namespace,
+				},
+			})
+		}
+	}
+	return requests
 }
 
 // GetContainerImage returns the container image to use for the instance, either from
