@@ -495,7 +495,7 @@ class TestDelayConfig(unittest.TestCase):
         mock_server.id = 'server-123'
 
         # Mock the evacuation functions to avoid actual evacuation
-        with patch('time.sleep') as mock_sleep:
+        with patch('instanceha._interruptible_sleep') as mock_sleep:
             with patch('instanceha._get_evacuable_servers', return_value=[mock_server]):
                 with patch('instanceha._traditional_evacuate', return_value=True):
                     failed_service = Mock()
@@ -505,8 +505,8 @@ class TestDelayConfig(unittest.TestCase):
                     # Call _host_evacuate which contains the DELAY sleep
                     result = instanceha._host_evacuate(mock_conn, failed_service, service)
 
-                    # Verify sleep was called with 0 (DELAY=0)
-                    mock_sleep.assert_called_once_with(0)
+                    # Verify interruptible sleep was called with shutdown_event and 0 (DELAY=0)
+                    mock_sleep.assert_called_once_with(service.shutdown_event, 0)
 
     def test_delay_non_zero_delays_evacuation(self):
         """Test that DELAY>0 delays evacuation by specified seconds."""
@@ -524,7 +524,7 @@ class TestDelayConfig(unittest.TestCase):
         mock_server = Mock()
         mock_server.id = 'server-123'
 
-        with patch('time.sleep') as mock_sleep:
+        with patch('instanceha._interruptible_sleep') as mock_sleep:
             with patch('instanceha._get_evacuable_servers', return_value=[mock_server]):
                 with patch('instanceha._traditional_evacuate', return_value=True):
                     failed_service = Mock()
@@ -533,8 +533,8 @@ class TestDelayConfig(unittest.TestCase):
 
                     result = instanceha._host_evacuate(mock_conn, failed_service, service)
 
-                    # Verify sleep was called with configured DELAY value
-                    mock_sleep.assert_called_once_with(5)
+                    # Verify interruptible sleep was called with shutdown_event and configured DELAY value
+                    mock_sleep.assert_called_once_with(service.shutdown_event, 5)
 
     def test_delay_with_smart_evacuation(self):
         """Test that DELAY works with SMART_EVACUATION enabled."""
@@ -552,7 +552,7 @@ class TestDelayConfig(unittest.TestCase):
         mock_server = Mock()
         mock_server.id = 'server-123'
 
-        with patch('time.sleep') as mock_sleep:
+        with patch('instanceha._interruptible_sleep') as mock_sleep:
             with patch('instanceha._get_evacuable_servers', return_value=[mock_server]):
                 with patch('instanceha._concurrent_evacuate', return_value=True):
                     failed_service = Mock()
@@ -561,8 +561,8 @@ class TestDelayConfig(unittest.TestCase):
 
                     result = instanceha._host_evacuate(mock_conn, failed_service, service)
 
-                    # Verify sleep was called with DELAY before smart evacuation
-                    mock_sleep.assert_called_once_with(3)
+                    # Verify interruptible sleep was called with shutdown_event and DELAY before smart evacuation
+                    mock_sleep.assert_called_once_with(service.shutdown_event, 3)
 
     def test_delay_boundary_values(self):
         """Test DELAY boundary values (min=0, max=300)."""

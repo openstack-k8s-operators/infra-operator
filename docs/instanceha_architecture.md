@@ -2122,7 +2122,7 @@ spec:
       serviceAccountName: instanceha-instanceha
       securityContext:
         fsGroup: 42401
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 45
       containers:
       - name: instanceha
         image: <resolved from infra-instanceha-config ConfigMap or RELATED_IMAGE env var>
@@ -2215,6 +2215,52 @@ spec:
         configMap:
           name: instanceha-config          # from spec.instanceHaConfigMap
 ```
+
+---
+
+## Small Cluster Tuning
+
+InstanceHA works on clusters of any size, but the default safety thresholds are tuned for medium-to-large deployments. On clusters with 3–5 compute nodes, the percentage-based safety gates can block evacuation during legitimate multi-node failures because a small absolute number of failures translates to a large percentage.
+
+### Affected Safety Gates
+
+| Gate | Default | 3-node impact | 4-node impact |
+|------|---------|---------------|---------------|
+| **THRESHOLD** (global, `>`) | 50% | 2 failures = 66.7% → **blocked** | 2 failures = 50% → allowed (check is `>`, not `>=`) |
+| **HEARTBEAT_CLIFF_THRESHOLD** (`>=`) | 50% | 2 heartbeat losses = 66.7% → **cliff triggered** | 2 losses = 50% → **cliff triggered** (check is `>=`) |
+| **Per-aggregate threshold** | N/A (absolute count) | Not affected (uses absolute `instanceha:max_failures`) | Not affected |
+
+Single-node failures are handled correctly at any cluster size.
+
+### Recommended Configuration
+
+For clusters with 3–5 compute nodes where simultaneous multi-node failures are a realistic scenario (not just network partitions):
+
+```yaml
+config:
+  THRESHOLD: 100              # Disable global threshold — trust fencing to proceed
+  CHECK_HEARTBEAT: true       # Enable heartbeat detection to distinguish host vs nova-compute failures
+  HEARTBEAT_CLIFF_THRESHOLD: 100  # Disable cliff detection — trust individual heartbeat status
+```
+
+Setting `THRESHOLD: 100` disables the global percentage check entirely. This is safe because:
+1. Heartbeat detection (`CHECK_HEARTBEAT`) provides the primary protection against fencing during network partitions
+2. The K8s API reachability gate (gate 1) suppresses fencing if the pod itself loses network connectivity
+3. Per-aggregate thresholds (if configured) still apply as an absolute count, which is better suited to small clusters
+
+If heartbeats are not deployed, a more conservative approach:
+
+```yaml
+config:
+  THRESHOLD: 67               # Allow up to 2/3 failure ratio
+```
+
+### Why the Defaults Are Conservative
+
+The default `THRESHOLD: 50` and `HEARTBEAT_CLIFF_THRESHOLD: 50` are deliberately conservative because:
+- False positives (unnecessary fencing) are more dangerous than false negatives (delayed evacuation)
+- On larger clusters, losing >50% of nodes simultaneously almost always indicates a network partition, not real failures
+- Small clusters are the exception, not the rule, in production OpenStack deployments
 
 ---
 
@@ -2345,6 +2391,7 @@ config:
 - Value of `0` blocks all evacuations (any failure percentage exceeds 0%)
 - Value of `100` disables threshold checking (nothing can exceed 100%)
 - Aggregate-aware calculation uses only evacuable hosts as denominator
+- **Small clusters**: On a 3-node cluster, 2 simultaneous failures = 66.7%, which exceeds the default 50%. On a 4-node cluster, 2 failures = 50% (not blocked, since the check is `>`). Operators of small clusters who expect multi-node failures should raise this value. See [Small Cluster Tuning](#small-cluster-tuning).
 
 ---
 
@@ -3005,6 +3052,34 @@ config:
 ```
 
 **Notes**: Should be at least 2x the heartbeat send interval (default 30s) to tolerate missed packets.
+
+---
+
+#### HEARTBEAT_CLIFF_THRESHOLD
+**Type**: Integer
+**Default**: `50`
+**Range**: `10-100` (percentage)
+
+**Description**: Maximum percentage of heartbeat-active hosts that can disappear in a single poll cycle before cliff detection triggers. When the drop exceeds this threshold, InstanceHA assumes a listener-side network partition rather than simultaneous host failures and skips all fencing for that cycle.
+
+**Usage**:
+- Evaluated in `_filter_reachable_hosts()` each poll cycle when `CHECK_HEARTBEAT` is enabled
+- Compares `heartbeat_previous_active_count` (previous cycle) against current active count
+- Only evaluated when the previous active count was >= 3 (avoids false triggers during startup ramp-up)
+
+**Behavior**:
+- If drop percentage >= `HEARTBEAT_CLIFF_THRESHOLD`: skip all fencing this cycle, emit `HeartbeatCliff` K8s event (Warning)
+- Baseline count is preserved during a cliff event, so the cliff re-triggers on subsequent cycles until heartbeats recover
+- When no cliff is detected, update `heartbeat_previous_active_count` for the next cycle
+
+**Small Cluster Considerations**: On a 3-node cluster with all nodes sending heartbeats, losing 2 nodes simultaneously causes a 66.7% drop — exceeding the default 50% threshold. This blocks fencing for that cycle. If simultaneous multi-node failures are expected (not partitions), raise this value (e.g., `100` to disable cliff detection entirely). See [Small Cluster Tuning](#small-cluster-tuning).
+
+**Example**:
+```yaml
+config:
+  CHECK_HEARTBEAT: true
+  HEARTBEAT_CLIFF_THRESHOLD: 100  # Disable cliff detection (trust individual heartbeat status)
+```
 
 ---
 

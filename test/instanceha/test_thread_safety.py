@@ -227,6 +227,7 @@ class TestMonotonicTimeouts(unittest.TestCase):
         """Test that _bmh_wait_for_power_off uses time.monotonic for timeout."""
         mock_service = Mock()
         mock_service.config.get_config_value.return_value = 30
+        mock_service.shutdown_event.is_set.return_value = False
 
         mock_session = Mock()
         mock_session.__enter__ = Mock(return_value=mock_session)
@@ -238,12 +239,11 @@ class TestMonotonicTimeouts(unittest.TestCase):
         mock_session.get.return_value = mock_response
 
         with patch('instanceha.time.monotonic', side_effect=[0, 0, 1]) as mock_mono:
-            with patch('instanceha.time.sleep'):
-                with patch('instanceha.requests.Session', return_value=mock_session):
-                    result = instanceha._bmh_wait_for_power_off(
-                        'https://api/bmh', {'Authorization': 'Bearer test'},
-                        None, 'test-host', 30, 1, mock_service
-                    )
+            with patch('instanceha.requests.Session', return_value=mock_session):
+                result = instanceha._bmh_wait_for_power_off(
+                    'https://api/bmh', {'Authorization': 'Bearer test'},
+                    None, 'test-host', 30, 1, mock_service
+                )
 
         mock_mono.assert_called()
         self.assertTrue(result)
