@@ -964,6 +964,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
     def test_no_evacuable_servers_after_filtering(self):
         service = self._make_service()
         conn = Mock()
+        conn.services.list.return_value = []
         svc1 = Mock(host='host-1', status='enabled', forced_down=False)
         service.get_hosts_with_servers_cached.return_value = {}
         service.filter_hosts_with_servers.return_value = []
@@ -1458,6 +1459,551 @@ class TestTraditionalModeWarning(unittest.TestCase):
             warning_calls = [c for c in mock_logging.warning.call_args_list
                            if 'Traditional evacuation mode' in str(c)]
             self.assertEqual(len(warning_calls), 0, "Should not warn when smart is enabled")
+
+
+# ============================================================================
+# _handle_poll_failure tests (M5)
+# ============================================================================
+
+class TestHandlePollFailure(unittest.TestCase):
+    """Tests for _handle_poll_failure backoff and readiness behavior."""
+
+    def _make_service(self):
+        svc = Mock()
+        svc.ready = True
+        svc.shutdown_event = Mock()
+        svc.shutdown_event.wait = Mock()
+        return svc
+
+    def test_increments_consecutive_failures(self):
+        service = self._make_service()
+        result = instanceha._handle_poll_failure(service, 0, 5, "Poll failed", Exception("err"))
+        self.assertEqual(result, 1)
+
+    def test_returns_incremented_count(self):
+        service = self._make_service()
+        result = instanceha._handle_poll_failure(service, 4, 5, "Poll failed", Exception("err"))
+        self.assertEqual(result, 5)
+
+    def test_deactivates_readiness_at_threshold(self):
+        service = self._make_service()
+        service.ready = True
+        instanceha._handle_poll_failure(
+            service, instanceha.MAX_CONSECUTIVE_FAILURES_READY - 1, 5, "Poll failed", Exception("err"))
+        self.assertFalse(service.ready)
+
+    def test_does_not_deactivate_readiness_below_threshold(self):
+        service = self._make_service()
+        service.ready = True
+        instanceha._handle_poll_failure(service, 0, 5, "Poll failed", Exception("err"))
+        self.assertTrue(service.ready)
+
+    def test_does_not_reactivate_readiness(self):
+        service = self._make_service()
+        service.ready = False
+        instanceha._handle_poll_failure(service, 0, 5, "Poll failed", Exception("err"))
+        self.assertFalse(service.ready)
+
+    def test_backoff_is_exponential(self):
+        service = self._make_service()
+        instanceha._handle_poll_failure(service, 1, 10, "Poll failed", Exception("err"))
+        wait_call = service.shutdown_event.wait.call_args[0][0]
+        # consecutive_failures becomes 2, so backoff = min(10 * 2^2, 300) = 40
+        self.assertEqual(wait_call, 40)
+
+    def test_backoff_capped_at_max(self):
+        service = self._make_service()
+        instanceha._handle_poll_failure(service, 20, 60, "Poll failed", Exception("err"))
+        wait_call = service.shutdown_event.wait.call_args[0][0]
+        self.assertLessEqual(wait_call, instanceha.MAX_NOVA_BACKOFF_SECONDS)
+
+    def test_uses_interruptible_wait(self):
+        service = self._make_service()
+        instanceha._handle_poll_failure(service, 0, 5, "Poll failed", Exception("err"))
+        service.shutdown_event.wait.assert_called_once()
+
+
+# ============================================================================
+# _retry_with_backoff tests (M6)
+# ============================================================================
+
+class TestRetryWithBackoff(unittest.TestCase):
+    """Tests for _retry_with_backoff retry logic."""
+
+    @patch('instanceha._interruptible_sleep')
+    def test_returns_on_first_success(self, mock_sleep):
+        result = instanceha._retry_with_backoff(lambda: 42, 3, "test")
+        self.assertEqual(result, 42)
+        mock_sleep.assert_not_called()
+
+    @patch('instanceha._interruptible_sleep')
+    def test_retries_on_failure_then_succeeds(self, mock_sleep):
+        attempts = [0]
+        def flaky():
+            attempts[0] += 1
+            if attempts[0] < 3:
+                raise RuntimeError("fail")
+            return "ok"
+        result = instanceha._retry_with_backoff(flaky, 3, "test")
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch('instanceha._interruptible_sleep')
+    def test_raises_after_all_retries_exhausted(self, mock_sleep):
+        with self.assertRaises(RuntimeError):
+            instanceha._retry_with_backoff(lambda: (_ for _ in ()).throw(RuntimeError("fail")), 3, "test")
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch('instanceha._interruptible_sleep')
+    def test_delay_increases_linearly(self, mock_sleep):
+        calls = [0]
+        def always_fail():
+            calls[0] += 1
+            raise RuntimeError("fail")
+
+        with self.assertRaises(RuntimeError):
+            instanceha._retry_with_backoff(always_fail, 3, "test", delay=2)
+
+        delays = [c[0][1] for c in mock_sleep.call_args_list]
+        self.assertEqual(delays, [2, 4])  # delay*(attempt+1): 2*1, 2*2
+
+    @patch('instanceha._interruptible_sleep')
+    def test_single_attempt_no_retry(self, mock_sleep):
+        with self.assertRaises(RuntimeError):
+            instanceha._retry_with_backoff(lambda: (_ for _ in ()).throw(RuntimeError("fail")), 1, "test")
+        mock_sleep.assert_not_called()
+
+    @patch('instanceha._interruptible_sleep')
+    def test_shutdown_event_passed_through(self, mock_sleep):
+        sentinel = Mock()
+        calls = [0]
+        def fail_once():
+            calls[0] += 1
+            if calls[0] < 2:
+                raise RuntimeError("fail")
+            return True
+
+        instanceha._retry_with_backoff(fail_once, 3, "test", shutdown_event=sentinel)
+        mock_sleep.assert_called_once()
+        self.assertEqual(mock_sleep.call_args[0][0], sentinel)
+
+
+# ============================================================================
+# _run_concurrent tests (M7)
+# ============================================================================
+
+class TestRunConcurrent(unittest.TestCase):
+    """Tests for _run_concurrent concurrent execution wrapper."""
+
+    def test_all_succeed_returns_true(self):
+        result = instanceha._run_concurrent(
+            lambda x: True,
+            ['a', 'b', 'c'],
+            max_workers=2,
+            item_id_func=lambda x: x,
+        )
+        self.assertTrue(result)
+
+    def test_one_failure_returns_false(self):
+        def func(x):
+            if x == 'b':
+                return False
+            return True
+
+        result = instanceha._run_concurrent(func, ['a', 'b', 'c'], 2, lambda x: x)
+        self.assertFalse(result)
+
+    def test_exception_returns_false(self):
+        def func(x):
+            if x == 'b':
+                raise RuntimeError("boom")
+            return True
+
+        result = instanceha._run_concurrent(func, ['a', 'b', 'c'], 2, lambda x: x)
+        self.assertFalse(result)
+
+    def test_empty_items_returns_true(self):
+        result = instanceha._run_concurrent(lambda x: True, [], 2, lambda x: x)
+        self.assertTrue(result)
+
+    def test_timeout_logged_as_error(self):
+        import concurrent.futures
+        with patch.object(concurrent.futures.Future, 'result',
+                          side_effect=concurrent.futures.TimeoutError()):
+            with self.assertLogs(level='ERROR') as cm:
+                result = instanceha._run_concurrent(lambda x: True, ['a'], 1, lambda x: x)
+            self.assertFalse(result)
+            self.assertTrue(any('timed out' in msg for msg in cm.output))
+
+    def test_log_prefix_used(self):
+        with self.assertLogs(level='DEBUG') as cm:
+            instanceha._run_concurrent(lambda x: True, ['item1'], 1, lambda x: x, log_prefix="[test] ")
+        self.assertTrue(any('[test] item1 succeeded' in msg for msg in cm.output))
+
+    def test_item_id_func_applied(self):
+        items = [{'name': 'host-1'}, {'name': 'host-2'}]
+        with self.assertLogs(level='DEBUG') as cm:
+            instanceha._run_concurrent(lambda x: True, items, 2, lambda x: x['name'])
+        self.assertTrue(any('host-1 succeeded' in msg for msg in cm.output))
+
+
+# ============================================================================
+# Application Credential auth tests (M8)
+# ============================================================================
+
+class TestLoadACCredentials(unittest.TestCase):
+    """Tests for _load_ac_credentials file loading."""
+
+    @patch('builtins.open')
+    @patch('os.path.join', side_effect=lambda *a: '/'.join(a))
+    def test_loads_credentials_from_files(self, mock_join, mock_open):
+        mock_open.side_effect = [
+            unittest.mock.mock_open(read_data='my-ac-id').return_value,
+            unittest.mock.mock_open(read_data='my-ac-secret').return_value,
+        ]
+        result = instanceha._load_ac_credentials('https://keystone:5000/v3', 'regionOne')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.application_credential_id, 'my-ac-id')
+        self.assertEqual(result.application_credential_secret, 'my-ac-secret')
+        self.assertEqual(result.auth_url, 'https://keystone:5000/v3')
+        self.assertEqual(result.region_name, 'regionOne')
+
+    @patch('builtins.open', side_effect=FileNotFoundError("not found"))
+    def test_returns_none_on_missing_files(self, mock_open):
+        result = instanceha._load_ac_credentials('https://keystone:5000/v3', 'regionOne')
+        self.assertIsNone(result)
+
+    @patch('builtins.open')
+    @patch('os.path.join', side_effect=lambda *a: '/'.join(a))
+    def test_returns_none_on_empty_credentials(self, mock_join, mock_open):
+        mock_open.side_effect = [
+            unittest.mock.mock_open(read_data='').return_value,
+            unittest.mock.mock_open(read_data='secret').return_value,
+        ]
+        result = instanceha._load_ac_credentials('https://keystone:5000/v3', 'regionOne')
+        self.assertIsNone(result)
+
+    @patch('builtins.open')
+    @patch('os.path.join', side_effect=lambda *a: '/'.join(a))
+    def test_strips_whitespace(self, mock_join, mock_open):
+        mock_open.side_effect = [
+            unittest.mock.mock_open(read_data='  my-id  \n').return_value,
+            unittest.mock.mock_open(read_data='  my-secret  \n').return_value,
+        ]
+        result = instanceha._load_ac_credentials('https://keystone:5000/v3', 'regionOne')
+        self.assertIsNotNone(result)
+        self.assertEqual(result.application_credential_id, 'my-id')
+        self.assertEqual(result.application_credential_secret, 'my-secret')
+
+
+class TestNovaLoginAC(unittest.TestCase):
+    """Tests for nova_login_ac Application Credential auth path."""
+
+    @patch('instanceha._nova_login')
+    def test_calls_nova_login_with_ac_auth(self, mock_login):
+        mock_login.return_value = Mock()
+        creds = instanceha.ACLoginCredentials(
+            auth_url='https://keystone:5000/v3',
+            application_credential_id='ac-id',
+            application_credential_secret='ac-secret',
+            region_name='regionOne',
+        )
+        result = instanceha.nova_login_ac(creds)
+        mock_login.assert_called_once_with(
+            "v3applicationcredential",
+            {
+                "auth_url": "https://keystone:5000/v3",
+                "application_credential_id": "ac-id",
+                "application_credential_secret": "ac-secret",
+            },
+            "regionOne",
+            None,
+        )
+        self.assertIsNotNone(result)
+
+    @patch('instanceha._nova_login')
+    def test_passes_ca_bundle(self, mock_login):
+        mock_login.return_value = Mock()
+        creds = instanceha.ACLoginCredentials(
+            auth_url='https://keystone:5000/v3',
+            application_credential_id='ac-id',
+            application_credential_secret='ac-secret',
+            region_name='regionOne',
+        )
+        instanceha.nova_login_ac(creds, ca_bundle='/etc/pki/ca-trust.crt')
+        self.assertEqual(mock_login.call_args[0][3], '/etc/pki/ca-trust.crt')
+
+    @patch('instanceha._nova_login', side_effect=instanceha.NovaConnectionError("auth failed"))
+    def test_propagates_connection_error(self, mock_login):
+        creds = instanceha.ACLoginCredentials(
+            auth_url='https://keystone:5000/v3',
+            application_credential_id='ac-id',
+            application_credential_secret='ac-secret',
+            region_name='regionOne',
+        )
+        with self.assertRaises(instanceha.NovaConnectionError):
+            instanceha.nova_login_ac(creds)
+
+
+# ============================================================================
+# Per-cycle rate limiter tests (MAX_HOSTS_PER_CYCLE)
+# ============================================================================
+
+class TestFencingRateLimiter(unittest.TestCase):
+    """Tests for MAX_HOSTS_PER_CYCLE rate limiting in _process_stale_services."""
+
+    def _make_service(self):
+        import threading
+        from collections import defaultdict
+        svc = Mock()
+        svc.config = Mock()
+        svc.config.get_config_value = Mock(side_effect=lambda key: {
+            'DISABLED': False, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
+            'CHECK_HEARTBEAT': False,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
+            'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
+            'MAX_HOSTS_PER_CYCLE': 3,
+        }.get(key, Mock()))
+        svc.processing_lock = threading.Lock()
+        svc.hosts_processing = defaultdict(float)
+        svc.refresh_evacuable_cache = Mock()
+        svc.get_hosts_with_servers_cached = Mock(return_value={})
+        svc.filter_hosts_with_servers = Mock(side_effect=lambda nodes, cache: nodes)
+        return svc
+
+    def _make_compute_svc(self, host):
+        svc = Mock()
+        svc.host = host
+        svc.status = 'enabled'
+        svc.forced_down = False
+        svc.state = 'down'
+        return svc
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    @patch('instanceha._execute_fence_operation', return_value=True)
+    def test_rate_limit_caps_hosts(self, mock_fence, _crit, _event):
+        """MAX_HOSTS_PER_CYCLE=3 caps fencing to 3 hosts when 5 are down."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(5)]
+        # Add healthy hosts so all-services-stale check doesn't fire
+        healthy_hosts = [self._make_compute_svc(f'healthy-{i}') for i in range(5)]
+        for h in healthy_hosts:
+            h.state = 'up'
+        all_services = stale_hosts + healthy_hosts
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(5)
+        }
+
+        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+
+        fenced_hosts = [c[0][0] for c in mock_fence.call_args_list]
+        self.assertLessEqual(len(fenced_hosts), 3)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    @patch('instanceha._execute_fence_operation', return_value=True)
+    def test_rate_limit_not_triggered_under_cap(self, mock_fence, _crit, mock_event):
+        """When hosts <= MAX_HOSTS_PER_CYCLE, no rate limiting occurs."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(2)]
+        healthy_hosts = [self._make_compute_svc(f'healthy-{i}') for i in range(5)]
+        for h in healthy_hosts:
+            h.state = 'up'
+        all_services = stale_hosts + healthy_hosts
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(2)
+        }
+
+        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+
+        rate_events = [c for c in mock_event.call_args_list
+                       if len(c[0]) >= 2 and c[0][1] == 'FencingRateLimited']
+        self.assertEqual(len(rate_events), 0)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    @patch('instanceha._execute_fence_operation', return_value=True)
+    def test_rate_limit_emits_event(self, mock_fence, _crit, mock_event):
+        """FencingRateLimited K8s event is emitted when the cap is hit."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(5)]
+        healthy_hosts = [self._make_compute_svc(f'healthy-{i}') for i in range(5)]
+        for h in healthy_hosts:
+            h.state = 'up'
+        all_services = stale_hosts + healthy_hosts
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(5)
+        }
+
+        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+
+        rate_events = [c for c in mock_event.call_args_list
+                       if len(c[0]) >= 2 and c[0][1] == 'FencingRateLimited']
+        self.assertEqual(len(rate_events), 1)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    @patch('instanceha._execute_fence_operation', return_value=True)
+    def test_rate_limit_increments_metric(self, mock_fence, _crit, _event):
+        """FENCING_RATE_LIMITED_TOTAL metric increments when rate limit fires."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(5)]
+        healthy_hosts = [self._make_compute_svc(f'healthy-{i}') for i in range(5)]
+        for h in healthy_hosts:
+            h.state = 'up'
+        all_services = stale_hosts + healthy_hosts
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(5)
+        }
+
+        before = instanceha.FENCING_RATE_LIMITED_TOTAL._value.get()
+        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        after = instanceha.FENCING_RATE_LIMITED_TOTAL._value.get()
+        self.assertEqual(after - before, 1)
+
+
+# ============================================================================
+# All-services-stale circuit breaker tests
+# ============================================================================
+
+class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
+    """Tests for the all-services-stale safety check in _process_stale_services."""
+
+    def _make_service(self):
+        import threading
+        from collections import defaultdict
+        svc = Mock()
+        svc.config = Mock()
+        svc.config.get_config_value = Mock(side_effect=lambda key: {
+            'DISABLED': False, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
+            'CHECK_HEARTBEAT': False,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
+            'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
+            'MAX_HOSTS_PER_CYCLE': 10,
+        }.get(key, Mock()))
+        svc.processing_lock = threading.Lock()
+        svc.hosts_processing = defaultdict(float)
+        svc.refresh_evacuable_cache = Mock()
+        svc.get_hosts_with_servers_cached = Mock(return_value={})
+        svc.filter_hosts_with_servers = Mock(side_effect=lambda nodes, cache: nodes)
+        return svc
+
+    def _make_compute_svc(self, host, status='enabled', forced_down=False):
+        svc = Mock()
+        svc.host = host
+        svc.status = status
+        svc.forced_down = forced_down
+        svc.state = 'down'
+        return svc
+
+    @patch('instanceha._emit_k8s_event')
+    def test_all_stale_triggers_when_all_active_services_down(self, mock_event):
+        """When every active service is in compute_nodes, skip fencing."""
+        service = self._make_service()
+        conn = Mock()
+        hosts = [self._make_compute_svc(f'host-{i}') for i in range(5)]
+        all_services = list(hosts)
+
+        with patch('instanceha._execute_fence_operation') as mock_fence:
+            instanceha._process_stale_services(conn, service, all_services, hosts, [])
+            mock_fence.assert_not_called()
+
+        stale_events = [c for c in mock_event.call_args_list
+                        if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
+        self.assertEqual(len(stale_events), 1)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_all_stale_increments_metric(self, _event):
+        """ALL_SERVICES_STALE_TOTAL metric increments when circuit breaker fires."""
+        service = self._make_service()
+        conn = Mock()
+        hosts = [self._make_compute_svc(f'host-{i}') for i in range(5)]
+        all_services = list(hosts)
+
+        before = instanceha.ALL_SERVICES_STALE_TOTAL._value.get()
+        instanceha._process_stale_services(conn, service, all_services, hosts, [])
+        after = instanceha.ALL_SERVICES_STALE_TOTAL._value.get()
+        self.assertEqual(after - before, 1)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    def test_all_stale_does_not_trigger_on_partial_failure(self, _crit, mock_event):
+        """When only a subset of active services are stale, circuit breaker does not fire."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(3)]
+        healthy_hosts = [self._make_compute_svc(f'host-{i}', status='enabled') for i in range(3, 8)]
+        all_services = stale_hosts + healthy_hosts
+        for h in healthy_hosts:
+            h.state = 'up'
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(3)
+        }
+
+        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+
+        stale_events = [c for c in mock_event.call_args_list
+                        if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
+        self.assertEqual(len(stale_events), 0, "AllServicesStale should NOT fire on partial failure")
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._check_critical_services', return_value=(True, ""))
+    def test_all_stale_skipped_with_2_active_services(self, _crit, mock_event):
+        """With only 2 active services, the >=3 minimum guard prevents the check."""
+        service = self._make_service()
+        conn = Mock()
+        hosts = [self._make_compute_svc(f'host-{i}') for i in range(2)]
+        all_services = list(hosts)
+        service.get_hosts_with_servers_cached.return_value = {
+            f'host-{i}': [f'server-{i}'] for i in range(2)
+        }
+
+        instanceha._process_stale_services(conn, service, all_services, hosts, [])
+
+        stale_events = [c for c in mock_event.call_args_list
+                        if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
+        self.assertEqual(len(stale_events), 0, "AllServicesStale should NOT fire with <3 active services")
+
+    @patch('instanceha._emit_k8s_event')
+    def test_all_stale_excludes_disabled_services(self, mock_event):
+        """Disabled services don't count toward the active_services denominator."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(3)]
+        disabled_hosts = [self._make_compute_svc(f'host-{i}', status='disabled') for i in range(3, 5)]
+        all_services = stale_hosts + disabled_hosts
+
+        with patch('instanceha._execute_fence_operation') as mock_fence:
+            instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+            mock_fence.assert_not_called()
+
+        stale_events = [c for c in mock_event.call_args_list
+                        if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
+        self.assertEqual(len(stale_events), 1)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_all_stale_excludes_forced_down_services(self, mock_event):
+        """Forced-down services don't count toward active_services."""
+        service = self._make_service()
+        conn = Mock()
+        stale_hosts = [self._make_compute_svc(f'host-{i}') for i in range(3)]
+        forced_hosts = [self._make_compute_svc(f'host-{i}', forced_down=True) for i in range(3, 5)]
+        all_services = stale_hosts + forced_hosts
+
+        with patch('instanceha._execute_fence_operation') as mock_fence:
+            instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+            mock_fence.assert_not_called()
+
+        stale_events = [c for c in mock_event.call_args_list
+                        if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
+        self.assertEqual(len(stale_events), 1)
 
 
 if __name__ == '__main__':

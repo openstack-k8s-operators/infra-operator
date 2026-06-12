@@ -37,7 +37,7 @@ class TestKdumpLock(unittest.TestCase):
                 for i in range(50):
                     hostname = f'host-{thread_id}-{i}'
                     with self.service.kdump_lock:
-                        self.service.kdump_hosts_timestamp[hostname] = time.time()
+                        self.service.kdump_hosts_timestamp[hostname] = time.monotonic()
             except Exception as e:
                 errors.append(str(e))
 
@@ -57,7 +57,7 @@ class TestKdumpLock(unittest.TestCase):
 
         with self.service.kdump_lock:
             for i in range(100):
-                self.service.kdump_hosts_timestamp[f'host-{i}'] = time.time()
+                self.service.kdump_hosts_timestamp[f'host-{i}'] = time.monotonic()
 
         def reader():
             try:
@@ -71,7 +71,7 @@ class TestKdumpLock(unittest.TestCase):
             try:
                 for i in range(100):
                     with self.service.kdump_lock:
-                        self.service.kdump_hosts_timestamp[f'new-host-{i}'] = time.time()
+                        self.service.kdump_hosts_timestamp[f'new-host-{i}'] = time.monotonic()
             except Exception as e:
                 errors.append(f"writer: {e}")
 
@@ -111,10 +111,10 @@ class TestKdumpLock(unittest.TestCase):
         """Test that timestamp cleanup (dict reassignment) is safe under lock."""
         with self.service.kdump_lock:
             for i in range(200):
-                self.service.kdump_hosts_timestamp[f'host-{i}'] = time.time() - 500
+                self.service.kdump_hosts_timestamp[f'host-{i}'] = time.monotonic() - 500
 
         with self.service.kdump_lock:
-            cutoff = time.time() - 300
+            cutoff = time.monotonic() - 300
             self.service.kdump_hosts_timestamp = defaultdict(float,
                 {k: v for k, v in self.service.kdump_hosts_timestamp.items() if v >= cutoff})
 

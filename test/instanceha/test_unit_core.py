@@ -32,7 +32,7 @@ from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime, timedelta
 from io import StringIO
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 
 # Suppress configuration warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -275,19 +275,7 @@ class TestInstanceHAService(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        self.mock_config = Mock()
-        # Set up get_config_value to return appropriate values based on key
-        config_values = {
-            'EVACUABLE_TAG': 'evacuable',
-            'TAGGED_IMAGES': True,
-            'TAGGED_FLAVORS': True,
-            'TAGGED_AGGREGATES': False,
-            'SMART_EVACUATION': True,
-            'WORKERS': 4,
-            'DELAY': 0,
-        }
-        self.mock_config.get_config_value.side_effect = lambda key: config_values.get(key, False)
-
+        self.mock_config = make_mock_config(SMART_EVACUATION=True)
         self.mock_cloud_client = Mock()
         self.service = instanceha.InstanceHAService(self.mock_config, self.mock_cloud_client)
 
@@ -363,7 +351,7 @@ class TestInstanceHAService(unittest.TestCase):
         """Test cache refresh functionality."""
         # Set up initial cache
         self.service._evacuable_flavors_cache = ['cached-flavor']
-        self.service._cache_timestamp = time.time() - 400  # Make cache stale
+        self.service._cache_timestamp = time.monotonic() - 400  # Make cache stale
 
         mock_flavor = Mock()
         mock_flavor.id = 'new-flavor'
@@ -619,6 +607,51 @@ class TestEvacuationFunctions(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn('not found', result.reason)
 
+    def test_extract_request_id_from_tuple_with_meta(self):
+        """Test extracting request ID from a TupleWithMeta-like object."""
+        obj = Mock(spec=['request_ids'])
+        obj.request_ids = ['req-abc-123']
+        self.assertEqual(instanceha._extract_request_id(obj), 'req-abc-123')
+
+    def test_extract_request_id_from_exception(self):
+        """Test extracting request ID from a novaclient exception."""
+        obj = Mock(spec=['request_id'])
+        obj.request_id = 'req-def-456'
+        self.assertEqual(instanceha._extract_request_id(obj), 'req-def-456')
+
+    def test_extract_request_id_returns_none_for_unknown(self):
+        """Test that unknown objects return None."""
+        self.assertIsNone(instanceha._extract_request_id(object()))
+
+    def test_server_evacuate_captures_request_id_on_success(self):
+        """Test that successful evacuation captures the Nova request ID."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.reason = 'OK'
+
+        mock_result = Mock()
+        mock_result.request_ids = ['req-evac-success']
+        mock_result.__iter__ = Mock(return_value=iter((mock_response, {})))
+        self.mock_connection.servers.evacuate.return_value = mock_result
+
+        result = instanceha._server_evacuate(self.mock_connection, 'server-123')
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.request_id, 'req-evac-success')
+
+    def test_server_evacuate_captures_request_id_on_exception(self):
+        """Test that failed evacuation captures request ID from the exception."""
+        from novaclient.exceptions import Conflict
+        exc = Conflict('already evacuating')
+        exc.request_id = 'req-evac-conflict'
+        self.mock_connection.servers.evacuate.side_effect = exc
+
+        result = instanceha._server_evacuate(self.mock_connection, 'server-123')
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.request_id, 'req-evac-conflict')
+        self.assertEqual(result.status_code, 409)
+
     def test_host_disable_success(self):
         """Test successful host disable operation."""
         result = instanceha._host_disable(self.mock_connection, self.mock_service)
@@ -653,7 +686,7 @@ class TestEvacuationFunctions(unittest.TestCase):
 
     def test_check_evacuable_tag_dict(self):
         """Test evacuable tag checking with dictionary data."""
-        service = instanceha.InstanceHAService(Mock(), Mock())
+        service = instanceha.InstanceHAService(make_mock_config(), Mock())
 
         # Test exact match
         data = {'evacuable': 'true'}
@@ -672,7 +705,7 @@ class TestEvacuationFunctions(unittest.TestCase):
 
     def test_check_evacuable_tag_list(self):
         """Test evacuable tag checking with list data."""
-        service = instanceha.InstanceHAService(Mock(), Mock())
+        service = instanceha.InstanceHAService(make_mock_config(), Mock())
 
         # Test exact match in list
         data = ['evacuable', 'other_tag']
@@ -1554,8 +1587,8 @@ class TestSecretExposure(unittest.TestCase):
         self._assert_no_secrets_in_logs()
 
     @patch.dict(os.environ, {'OS_CLOUD': 'testcloud'})
-    def test_get_nova_connection_exception_no_secret_exposure(self):
-        """Test that _get_nova_connection exceptions don't expose passwords."""
+    def test_establish_nova_connection_nonfatal_exception_no_secret_exposure(self):
+        """Test that _establish_nova_connection(fatal=False) exceptions don't expose passwords."""
         # Clear log capture
         self.log_capture.seek(0)
         self.log_capture.truncate(0)
@@ -1571,7 +1604,7 @@ class TestSecretExposure(unittest.TestCase):
         with patch('instanceha.nova_login') as mock_login:
             mock_login.side_effect = Exception("Connection error: password=wrong")
 
-            instanceha._get_nova_connection(service)
+            instanceha._establish_nova_connection(service, fatal=False)
 
             self._assert_no_secrets_in_logs()
 
@@ -2440,18 +2473,18 @@ class TestPerformanceAndMemory(unittest.TestCase):
     def test_kdump_timestamp_memory_management(self):
         """Test that kdump timestamps are cleaned up."""
         # Add many old timestamps
-        old_time = time.time() - 400
+        old_time = time.monotonic() - 400
         for i in range(200):
             self.service.kdump_hosts_timestamp[f'old-host-{i}'] = old_time
 
         # Add some recent ones
-        recent_time = time.time()
+        recent_time = time.monotonic()
         for i in range(10):
             self.service.kdump_hosts_timestamp[f'recent-host-{i}'] = recent_time
 
         # Simulate cleanup (threshold is 100 entries)
         if len(self.service.kdump_hosts_timestamp) > 100:
-            cutoff = time.time() - 300
+            cutoff = time.monotonic() - 300
             old_keys = [k for k, v in self.service.kdump_hosts_timestamp.items() if v < cutoff]
             for k in old_keys:
                 del self.service.kdump_hosts_timestamp[k]
@@ -2657,7 +2690,7 @@ class TestFunctionalIntegration(unittest.TestCase):
 
         # Mock fencing, connection retrieval, and filter to succeed
         with patch('instanceha._execute_fence_operation', return_value=True), \
-             patch('instanceha._get_nova_connection', return_value=mock_nova), \
+             patch('instanceha._establish_nova_connection', return_value=mock_nova), \
              patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
             # Process the service (simulate one host being processed)
             result = instanceha.process_service(failed_service, [], False, service)
@@ -2737,7 +2770,7 @@ class TestFunctionalIntegration(unittest.TestCase):
         # Mock fencing, kdump, connection retrieval, and filter
         with patch('instanceha._execute_fence_operation', return_value=True), \
              patch('instanceha._check_kdump', return_value=(nova_state['services'][:2], [])), \
-             patch('instanceha._get_nova_connection', return_value=mock_nova), \
+             patch('instanceha._establish_nova_connection', return_value=mock_nova), \
              patch.object(service, 'get_hosts_with_servers_cached', return_value=host_servers_cache), \
              patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
 
@@ -2858,7 +2891,7 @@ class TestFunctionalIntegration(unittest.TestCase):
 
         with patch('instanceha._execute_fence_operation', return_value=True), \
              patch('instanceha._check_kdump', return_value=(down_list, [])), \
-             patch('instanceha._get_nova_connection', return_value=mock_nova), \
+             patch('instanceha._establish_nova_connection', return_value=mock_nova), \
              patch.object(service, 'get_hosts_with_servers_cached', return_value=host_servers_cache), \
              patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
 
@@ -3032,7 +3065,7 @@ class TestFunctionalIntegration(unittest.TestCase):
                             if magic == 0x1B302A40:
                                 # Valid kdump message - extract hostname
                                 hostname = addr[0]
-                                service.kdump_hosts_timestamp[hostname] = time.time()
+                                service.kdump_hosts_timestamp[hostname] = time.monotonic()
                     except socket.timeout:
                         continue
                 sock.close()
@@ -3069,7 +3102,7 @@ class TestFunctionalIntegration(unittest.TestCase):
 
         # Verify timestamp is recent
         timestamp = service.kdump_hosts_timestamp['127.0.0.1']
-        self.assertGreater(timestamp, time.time() - 3)
+        self.assertGreater(timestamp, time.monotonic() - 3)
 
     def test_cache_lifecycle_integration(self):
         """Test cache lifecycle: initial load, staleness, refresh, usage."""
@@ -3104,7 +3137,7 @@ class TestFunctionalIntegration(unittest.TestCase):
         self.assertEqual(mock_nova.flavors.list.call_count, 1, "Should still be 1 (cached)")
 
         # Make cache stale
-        service._cache_timestamp = time.time() - 400  # Older than 300s
+        service._cache_timestamp = time.monotonic() - 400  # Older than 300s
 
         # Add new flavor to Nova
         new_flavor = Mock()
@@ -3123,7 +3156,7 @@ class TestFunctionalIntegration(unittest.TestCase):
         self.assertIn('flavor-new', evacuable_flavors_new)
 
         # Verify cache is fresh
-        cache_age = time.time() - service._cache_timestamp
+        cache_age = time.monotonic() - service._cache_timestamp
         self.assertLess(cache_age, 5, "Cache should be fresh (< 5 seconds old)")
 
 

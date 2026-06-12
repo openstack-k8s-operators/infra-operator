@@ -20,7 +20,7 @@ from collections import defaultdict
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -156,9 +156,7 @@ class TestFilterReachableHosts(unittest.TestCase):
     """Test _filter_reachable_hosts heartbeat filtering logic."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120  # HEARTBEAT_TIMEOUT
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.heartbeat_hosts_timestamp.clear()
 
     def _make_compute_svc(self, hostname):
@@ -182,10 +180,10 @@ class TestFilterReachableHosts(unittest.TestCase):
 
     def test_grace_period_listener_too_young(self):
         """All hosts bypass filtering when listener started less than HEARTBEAT_TIMEOUT ago."""
-        self.service.heartbeat_listener_start_time = time.time() - 10  # 10s ago, timeout is 120s
+        self.service.heartbeat_listener_start_time = time.monotonic() - 10  # 10s ago, timeout is 120s
 
         svc = self._make_compute_svc('compute-01')
-        self.service.heartbeat_hosts_timestamp['compute-01'] = time.time() - 5
+        self.service.heartbeat_hosts_timestamp['compute-01'] = time.monotonic() - 5
 
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, [svc])
         # During grace period, all hosts pass through unfiltered
@@ -194,10 +192,10 @@ class TestFilterReachableHosts(unittest.TestCase):
 
     def test_recent_heartbeat_skips_fencing(self):
         """Host with recent heartbeat is skipped (not fenced)."""
-        self.service.heartbeat_listener_start_time = time.time() - 300  # Well past grace period
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300  # Well past grace period
 
         svc = self._make_compute_svc('compute-01')
-        self.service.heartbeat_hosts_timestamp['compute-01'] = time.time() - 30  # 30s ago, within 120s timeout
+        self.service.heartbeat_hosts_timestamp['compute-01'] = time.monotonic() - 30  # 30s ago, within 120s timeout
 
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, [svc])
         self.assertEqual(len(unreachable), 0)
@@ -206,10 +204,10 @@ class TestFilterReachableHosts(unittest.TestCase):
 
     def test_stale_heartbeat_allows_fencing(self):
         """Host with stale heartbeat (older than timeout) is fenced."""
-        self.service.heartbeat_listener_start_time = time.time() - 300
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
 
         svc = self._make_compute_svc('compute-01')
-        self.service.heartbeat_hosts_timestamp['compute-01'] = time.time() - 200  # 200s ago, beyond 120s timeout
+        self.service.heartbeat_hosts_timestamp['compute-01'] = time.monotonic() - 200  # 200s ago, beyond 120s timeout
 
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, [svc])
         self.assertEqual(len(unreachable), 1)
@@ -217,7 +215,7 @@ class TestFilterReachableHosts(unittest.TestCase):
 
     def test_no_heartbeat_entry_allows_fencing(self):
         """Host with no heartbeat entry at all is fenced."""
-        self.service.heartbeat_listener_start_time = time.time() - 300
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
 
         svc = self._make_compute_svc('compute-01')
         # No entry in heartbeat_hosts_timestamp
@@ -228,15 +226,15 @@ class TestFilterReachableHosts(unittest.TestCase):
 
     def test_mixed_hosts(self):
         """Test with a mix of reachable and unreachable hosts."""
-        self.service.heartbeat_listener_start_time = time.time() - 300
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
 
         svcs = [self._make_compute_svc(f'compute-{i:02d}') for i in range(5)]
 
         # compute-00 and compute-02 have recent heartbeats
-        self.service.heartbeat_hosts_timestamp['compute-00'] = time.time() - 10
-        self.service.heartbeat_hosts_timestamp['compute-02'] = time.time() - 50
+        self.service.heartbeat_hosts_timestamp['compute-00'] = time.monotonic() - 10
+        self.service.heartbeat_hosts_timestamp['compute-02'] = time.monotonic() - 50
         # compute-01 has stale heartbeat
-        self.service.heartbeat_hosts_timestamp['compute-01'] = time.time() - 200
+        self.service.heartbeat_hosts_timestamp['compute-01'] = time.monotonic() - 200
         # compute-03 and compute-04 have no heartbeat entries
 
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, svcs)
@@ -254,7 +252,7 @@ class TestHeartbeatCliffDetection(unittest.TestCase):
     def setUp(self):
         self.config = instanceha.ConfigManager()
         self.service = instanceha.InstanceHAService(self.config)
-        self.service.heartbeat_listener_start_time = time.time() - 300
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
 
     def _make_svc(self, host):
         svc = Mock()
@@ -262,7 +260,7 @@ class TestHeartbeatCliffDetection(unittest.TestCase):
         return svc
 
     def _set_active_heartbeats(self, hostnames, age=10):
-        now = time.time()
+        now = time.monotonic()
         with self.service.heartbeat_lock:
             for h in hostnames:
                 self.service.heartbeat_hosts_timestamp[h] = now - age
@@ -275,7 +273,7 @@ class TestHeartbeatCliffDetection(unittest.TestCase):
         with self.service.heartbeat_lock:
             self.service.heartbeat_hosts_timestamp.clear()
             for h in hosts[:2]:
-                self.service.heartbeat_hosts_timestamp[h] = time.time() - 10
+                self.service.heartbeat_hosts_timestamp[h] = time.monotonic() - 10
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, svcs)
         self.assertEqual(len(unreachable), 0)
         self.assertEqual(len(skipped), 3)
@@ -307,7 +305,7 @@ class TestHeartbeatCliffDetection(unittest.TestCase):
         self.service.heartbeat_previous_active_count = 10
         with self.service.heartbeat_lock:
             self.service.heartbeat_hosts_timestamp.clear()
-            self.service.heartbeat_hosts_timestamp['compute-00'] = time.time() - 10
+            self.service.heartbeat_hosts_timestamp['compute-00'] = time.monotonic() - 10
         svcs = [self._make_svc('compute-01')]
         instanceha._filter_reachable_hosts(self.service, svcs)
         self.assertEqual(self.service.heartbeat_previous_active_count, 10)
@@ -342,11 +340,173 @@ class TestHeartbeatCliffDetection(unittest.TestCase):
         with self.service.heartbeat_lock:
             self.service.heartbeat_hosts_timestamp.clear()
             for h in hosts[:5]:
-                self.service.heartbeat_hosts_timestamp[h] = time.time() - 10
+                self.service.heartbeat_hosts_timestamp[h] = time.monotonic() - 10
         svcs = [self._make_svc(hosts[9])]
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, svcs)
         self.assertEqual(len(unreachable), 0)
         self.assertEqual(len(skipped), 1)
+
+
+class TestHeartbeatCliffExpiry(unittest.TestCase):
+    """Tests for cliff detection expiry after HEARTBEAT_CLIFF_MAX_CYCLES."""
+
+    def setUp(self):
+        self.config = instanceha.ConfigManager()
+        self.service = instanceha.InstanceHAService(self.config)
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
+
+    def _make_svc(self, host):
+        svc = Mock()
+        svc.host = host
+        return svc
+
+    def _set_active_heartbeats(self, hostnames, age=10):
+        now = time.monotonic()
+        with self.service.heartbeat_lock:
+            for h in hostnames:
+                self.service.heartbeat_hosts_timestamp[h] = now - age
+
+    def _trigger_cliff(self, svcs):
+        """Trigger one cliff detection cycle. Returns the result."""
+        return instanceha._filter_reachable_hosts(self.service, svcs)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_expires_after_max_cycles(self, _event):
+        """After HEARTBEAT_CLIFF_MAX_CYCLES consecutive cliff detections, fencing proceeds."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        # Kill all heartbeats to trigger cliff
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc('compute-99')]
+
+        max_cycles = self.config.get_config_value('HEARTBEAT_CLIFF_MAX_CYCLES')  # default 3
+
+        # Cycles 1 through max_cycles-1: cliff suppresses fencing
+        for cycle in range(max_cycles - 1):
+            unreachable, skipped, cliff = self._trigger_cliff(svcs)
+            self.assertEqual(len(unreachable), 0, f"Cycle {cycle+1} should suppress fencing")
+            self.assertTrue(cliff, f"Cycle {cycle+1} should report cliff_detected")
+            self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, cycle + 1)
+
+        # Cycle max_cycles: cliff expires, fencing proceeds
+        unreachable, skipped, cliff = self._trigger_cliff(svcs)
+        self.assertEqual(len(unreachable), 1, "After expiry, hosts should be fenced")
+        self.assertFalse(cliff, "After expiry, cliff_detected should be False")
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_counter_resets_after_expiry(self, _event):
+        """After cliff expiry, the consecutive counter resets to 0."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc('compute-99')]
+
+        max_cycles = self.config.get_config_value('HEARTBEAT_CLIFF_MAX_CYCLES')
+        for _ in range(max_cycles):
+            self._trigger_cliff(svcs)
+
+        self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, 0)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_baseline_resets_after_expiry(self, _event):
+        """After cliff expiry, previous_active_count is reset to current_active."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        # Keep only 2 heartbeats alive
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+            self.service.heartbeat_hosts_timestamp['compute-00'] = time.monotonic() - 5
+            self.service.heartbeat_hosts_timestamp['compute-01'] = time.monotonic() - 5
+        svcs = [self._make_svc('compute-99')]
+
+        max_cycles = self.config.get_config_value('HEARTBEAT_CLIFF_MAX_CYCLES')
+        for _ in range(max_cycles):
+            self._trigger_cliff(svcs)
+
+        self.assertEqual(self.service.heartbeat_previous_active_count, 2)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_counter_resets_on_non_cliff_cycle(self, _event):
+        """A normal (non-cliff) cycle resets the consecutive counter to 0."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+
+        # Trigger one cliff cycle
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc('compute-99')]
+        self._trigger_cliff(svcs)
+        self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, 1)
+
+        # Restore heartbeats — next cycle is not a cliff
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        svcs = [self._make_svc('compute-99')]
+        self._trigger_cliff(svcs)
+        self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, 0)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_max_cycles_1_expires_immediately(self, _event):
+        """With HEARTBEAT_CLIFF_MAX_CYCLES=1, cliff expires on the first detection."""
+        original = self.service.config._config_map['HEARTBEAT_CLIFF_MAX_CYCLES']
+        try:
+            self.service.config._config_map['HEARTBEAT_CLIFF_MAX_CYCLES'] = instanceha.ConfigItem('int', 1, 1, 20)
+            hosts = [f'compute-{i:02d}' for i in range(10)]
+            self._set_active_heartbeats(hosts)
+            self.service.heartbeat_previous_active_count = 10
+            with self.service.heartbeat_lock:
+                self.service.heartbeat_hosts_timestamp.clear()
+            svcs = [self._make_svc('compute-99')]
+
+            unreachable, skipped, cliff = self._trigger_cliff(svcs)
+            self.assertEqual(len(unreachable), 1, "max_cycles=1 should expire immediately")
+            self.assertFalse(cliff)
+        finally:
+            self.service.config._config_map['HEARTBEAT_CLIFF_MAX_CYCLES'] = original
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_expiry_emits_event(self, mock_event):
+        """Cliff expiry emits a HeartbeatCliffExpired K8s event."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc('compute-99')]
+
+        max_cycles = self.config.get_config_value('HEARTBEAT_CLIFF_MAX_CYCLES')
+        for _ in range(max_cycles):
+            self._trigger_cliff(svcs)
+
+        event_calls = [c for c in mock_event.call_args_list if c[0][1] == 'HeartbeatCliffExpired']
+        self.assertEqual(len(event_calls), 1)
+
+    @patch('instanceha._emit_k8s_event')
+    def test_cliff_partial_recovery_resets_counter(self, _event):
+        """If heartbeats partially recover (no longer a cliff), counter resets even mid-sequence."""
+        hosts = [f'compute-{i:02d}' for i in range(10)]
+        self._set_active_heartbeats(hosts)
+        self.service.heartbeat_previous_active_count = 10
+
+        # Trigger 2 cliff cycles (one short of default max_cycles=3)
+        with self.service.heartbeat_lock:
+            self.service.heartbeat_hosts_timestamp.clear()
+        svcs = [self._make_svc('compute-99')]
+        self._trigger_cliff(svcs)
+        self._trigger_cliff(svcs)
+        self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, 2)
+
+        # Partial recovery: 9 out of 10 heartbeats return (10% drop, below 50% threshold)
+        # previous_active is still 10 (preserved during cliff), so 9/10 = 10% drop < 50%
+        self._set_active_heartbeats([f'compute-{i:02d}' for i in range(9)])
+        self._trigger_cliff(svcs)
+        self.assertEqual(self.service.heartbeat_consecutive_cliff_cycles, 0)
 
 
 class TestHeartbeatPort(unittest.TestCase):
@@ -399,7 +559,7 @@ class TestHeartbeatLockConcurrency(unittest.TestCase):
                 for i in range(50):
                     hostname = f'host-{thread_id}-{i}'
                     with self.service.heartbeat_lock:
-                        self.service.heartbeat_hosts_timestamp[hostname] = time.time()
+                        self.service.heartbeat_hosts_timestamp[hostname] = time.monotonic()
             except Exception as e:
                 errors.append(str(e))
 
@@ -420,7 +580,7 @@ class TestHeartbeatLockConcurrency(unittest.TestCase):
             try:
                 for i in range(100):
                     with self.service.heartbeat_lock:
-                        self.service.heartbeat_hosts_timestamp[f'host-{i}'] = time.time()
+                        self.service.heartbeat_hosts_timestamp[f'host-{i}'] = time.monotonic()
             except Exception as e:
                 errors.append(f'writer: {e}')
 

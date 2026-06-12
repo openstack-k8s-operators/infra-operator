@@ -76,6 +76,52 @@ if _abs_path not in sys.path:
 
 import instanceha  # noqa: E402
 
+# Default config values matching ConfigManager._config_map defaults
+_CONFIG_DEFAULTS = {
+    'EVACUABLE_TAG': 'evacuable',
+    'DELTA': 30,
+    'POLL': 45,
+    'THRESHOLD': 50,
+    'WORKERS': 4,
+    'DELAY': 0,
+    'LOGLEVEL': 'INFO',
+    'SMART_EVACUATION': False,
+    'RESERVED_HOSTS': False,
+    'FORCE_RESERVED_HOST_EVACUATION': False,
+    'TAGGED_IMAGES': True,
+    'TAGGED_FLAVORS': True,
+    'TAGGED_AGGREGATES': True,
+    'LEAVE_DISABLED': False,
+    'FORCE_ENABLE': False,
+    'CHECK_KDUMP': False,
+    'KDUMP_TIMEOUT': 30,
+    'CHECK_HEARTBEAT': False,
+    'HEARTBEAT_TIMEOUT': 120,
+    'DISABLED': False,
+    'SSL_VERIFY': True,
+    'FENCING_TIMEOUT': 30,
+    'HASH_INTERVAL': 60,
+    'ORCHESTRATED_RESTART': False,
+    'SKIP_SERVERS_WITH_NAME': [],
+    'EVACUATION_RETRIES': 5,
+    'HEARTBEAT_CLIFF_THRESHOLD': 50,
+    'HEARTBEAT_CLIFF_MAX_CYCLES': 3,
+    'MAX_HOSTS_PER_CYCLE': 10,
+    'K8S_API_CHECK_INTERVAL': 15,
+}
+
+
+def make_mock_config(**overrides):
+    """Create a Mock config manager that returns real defaults for get_config_value.
+
+    Any keyword argument overrides the default for that key.
+    Keys not in _CONFIG_DEFAULTS or overrides fall through to Mock's default behavior.
+    """
+    values = {**_CONFIG_DEFAULTS, **overrides}
+    mock_config = MagicMock()
+    mock_config.get_config_value = MagicMock(side_effect=lambda key: values.get(key, MagicMock()))
+    return mock_config
+
 
 @contextmanager
 def patch_pipeline(conn=None, fence=True, disable=True,
@@ -87,7 +133,7 @@ def patch_pipeline(conn=None, fence=True, disable=True,
     """
     if reserved is None:
         reserved = instanceha.ReservedHostResult(success=True, hostname=None)
-    with patch('instanceha._get_nova_connection', return_value=conn) as m_conn, \
+    with patch('instanceha._establish_nova_connection', return_value=conn) as m_conn, \
          patch('instanceha._host_fence', return_value=fence) as m_fence, \
          patch('instanceha._host_disable', return_value=disable) as m_disable, \
          patch('instanceha._manage_reserved_hosts', return_value=reserved) as m_reserved, \

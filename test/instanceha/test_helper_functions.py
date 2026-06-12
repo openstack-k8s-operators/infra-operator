@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 from collections import defaultdict
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 
@@ -23,8 +23,7 @@ class TestCleanupFilteredHosts(unittest.TestCase):
 
     def test_cleanup_filtered_hosts_basic(self):
         """Test basic cleanup of filtered hosts."""
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         current_time = time.time()
 
@@ -50,8 +49,7 @@ class TestCleanupFilteredHosts(unittest.TestCase):
 
     def test_cleanup_filtered_hosts_empty_sets(self):
         """Test cleanup with empty sets."""
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         current_time = time.time()
         marked_hostnames = set()
@@ -64,8 +62,7 @@ class TestCleanupFilteredHosts(unittest.TestCase):
 
     def test_cleanup_filtered_hosts_no_cleanup_needed(self):
         """Test cleanup when all marked hosts are finalized."""
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         current_time = time.time()
         service.hosts_processing['host1'] = current_time
@@ -82,8 +79,7 @@ class TestCleanupFilteredHosts(unittest.TestCase):
 
     def test_cleanup_filtered_hosts_thread_safety(self):
         """Test that cleanup works correctly with threading lock."""
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         current_time = time.time()
         service.hosts_processing['host1'] = current_time
@@ -106,9 +102,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
     def test_filter_processing_hosts_basic(self):
         """Test basic filtering of hosts already being processed."""
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value=30)  # FENCING_TIMEOUT
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Create mock services
         svc1 = Mock()
@@ -140,9 +134,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
     def test_filter_processing_hosts_expired_entries(self):
         """Test that expired processing entries are cleaned up."""
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value=30)  # FENCING_TIMEOUT
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Add an expired entry (more than max timeout + padding ago)
         old_time = time.monotonic() - 500  # Way in the past
@@ -160,9 +152,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
     def test_filter_processing_hosts_marks_new_hosts(self):
         """Test that new hosts are marked as being processed."""
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value=30)
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         svc1 = Mock()
         svc1.host = 'host1.example.com'
@@ -185,9 +175,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
     def test_filter_processing_hosts_empty_lists(self):
         """Test filtering with empty lists."""
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value=30)
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         result = instanceha._filter_processing_hosts(service, [], [])
         compute_filtered, resume_filtered, marked, current_time = result
@@ -198,9 +186,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
 
     def test_filter_processing_hosts_resume_list(self):
         """Test filtering works correctly for resume list."""
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value=30)
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Mark a host as being processed
         service.hosts_processing['resume-host'] = time.monotonic()
@@ -223,16 +209,9 @@ class TestPrepareEvacuationResources(unittest.TestCase):
     def test_prepare_evacuation_resources_basic(self):
         """Test basic resource preparation for evacuation."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'RESERVED_HOSTS': False,
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(
+            RESERVED_HOSTS=False, TAGGED_IMAGES=False,
+            TAGGED_FLAVORS=False, TAGGED_AGGREGATES=False))
 
         # Create mock services
         svc1 = Mock()
@@ -263,8 +242,7 @@ class TestPrepareEvacuationResources(unittest.TestCase):
     def test_prepare_evacuation_resources_empty_compute_nodes(self):
         """Test preparation with no compute nodes."""
         mock_conn = Mock()
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         result = instanceha._prepare_evacuation_resources(mock_conn, service, [], [])
         nodes, reserved, images, flavors = result
@@ -277,16 +255,9 @@ class TestPrepareEvacuationResources(unittest.TestCase):
     def test_prepare_evacuation_resources_with_reserved_hosts(self):
         """Test resource preparation with RESERVED_HOSTS enabled."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'RESERVED_HOSTS': True,
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(
+            RESERVED_HOSTS=True, TAGGED_IMAGES=False,
+            TAGGED_FLAVORS=False, TAGGED_AGGREGATES=False))
 
         # Create services including reserved host
         svc1 = Mock()
@@ -316,16 +287,9 @@ class TestPrepareEvacuationResources(unittest.TestCase):
     def test_prepare_evacuation_resources_with_tagged_resources(self):
         """Test resource preparation with tagged images and flavors."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'RESERVED_HOSTS': False,
-            'TAGGED_IMAGES': True,
-            'TAGGED_FLAVORS': True,
-            'TAGGED_AGGREGATES': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(
+            RESERVED_HOSTS=False, TAGGED_IMAGES=True,
+            TAGGED_FLAVORS=True, TAGGED_AGGREGATES=False))
 
         # Create mock compute node
         svc1 = Mock()
@@ -356,16 +320,9 @@ class TestPrepareEvacuationResources(unittest.TestCase):
     def test_prepare_evacuation_resources_filters_no_servers(self):
         """Test that hosts without servers are filtered out."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'RESERVED_HOSTS': False,
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(
+            RESERVED_HOSTS=False, TAGGED_IMAGES=False,
+            TAGGED_FLAVORS=False, TAGGED_AGGREGATES=False))
 
         svc1 = Mock()
         svc1.host = 'host-with-servers'
@@ -394,10 +351,7 @@ class TestCountEvacuableHosts(unittest.TestCase):
     def test_count_evacuable_hosts_basic(self):
         """Test basic counting of evacuable hosts."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value='evacuable')
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.evacuable_tag = 'evacuable'
 
         # Create mock aggregates
@@ -427,10 +381,7 @@ class TestCountEvacuableHosts(unittest.TestCase):
     def test_count_evacuable_hosts_no_aggregates(self):
         """Test counting when there are no aggregates."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value='evacuable')
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.evacuable_tag = 'evacuable'
 
         mock_conn.aggregates.list.return_value = []
@@ -446,8 +397,7 @@ class TestCountEvacuableHosts(unittest.TestCase):
     def test_count_evacuable_hosts_exception_handling(self):
         """Test that exceptions are handled gracefully."""
         mock_conn = Mock()
-        mock_config = Mock()
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Simulate exception when listing aggregates
         mock_conn.aggregates.list.side_effect = Exception("API Error")
@@ -464,10 +414,7 @@ class TestCountEvacuableHosts(unittest.TestCase):
     def test_count_evacuable_hosts_multiple_aggregates(self):
         """Test counting with hosts in multiple aggregates."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(return_value='evacuable')
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.evacuable_tag = 'evacuable'
 
         # Create overlapping aggregates

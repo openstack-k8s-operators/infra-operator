@@ -1,5 +1,7 @@
 # InstanceHA Heartbeat Performance at 1000-Node Scale
 
+> **Related docs**: [instanceha_guide.md -- Heartbeat Verification](instanceha_guide.md#heartbeat-verification) (operator setup) | [instanceha_architecture.md](instanceha_architecture.md) (internal design)
+
 ## Overview
 
 This document presents performance profiling results for the InstanceHA
@@ -18,7 +20,7 @@ measurements were taken using the benchmark script at
 | HEARTBEAT_TIMEOUT     | 120s            |
 | THRESHOLD             | 5% and 10%      |
 | POLL                  | 45s             |
-| HEARTBEAT_CLEANUP_THRESHOLD | 2000      |
+| UDP_CLEANUP_THRESHOLD | 2000      |
 
 ### HBV2 Packet Format
 
@@ -29,7 +31,7 @@ Each heartbeat packet carries HMAC-SHA256 authentication:
 | Magic     | 4 bytes | Network (BE)    |
 | Timestamp | 8 bytes | Network (BE)    |
 | Hostname  | 1-64 bytes | UTF-8        |
-| HMAC-SHA256 | 32 bytes | —            |
+| HMAC-SHA256 | 32 bytes | --            |
 
 Minimum packet size: 45 bytes. Typical packet for a hostname like
 `compute-0000`: 56 bytes. The HMAC is computed over everything except
@@ -127,11 +129,11 @@ it counts the number of hosts with a fresh heartbeat (within
 `HEARTBEAT_TIMEOUT`) by scanning all entries in the timestamp snapshot,
 and compares this count against the previous cycle's value. If the drop
 exceeds `HEARTBEAT_CLIFF_THRESHOLD` (default 50%) and the previous count
-was ≥ 3, fencing is skipped entirely for that cycle.
+was >= 3, fencing is skipped entirely for that cycle.
 
 This adds an O(n) pass over all timestamps (where n = total nodes, not
 just down hosts). At 1000 nodes this is a single dict iteration with one
-comparison per entry — well under 100 us and negligible compared to the
+comparison per entry -- well under 100 us and negligible compared to the
 Nova API call latency. The per-host filter logic that follows is
 unchanged.
 
@@ -203,7 +205,7 @@ The function-level CPU breakdown is consistent across both threshold
 values. Shown here for 10,000 iterations at the respective threshold
 limits:
 
-#### THRESHOLD=5% (50 down hosts, 10,000 iterations — 1.48s total)
+#### THRESHOLD=5% (50 down hosts, 10,000 iterations -- 1.48s total)
 
 | Function                  | % Time | Notes                          |
 |---------------------------|-------:|--------------------------------|
@@ -213,7 +215,7 @@ limits:
 | `dict.get`                |   4.6% | Timestamp lookup per host      |
 | `list.append`             |   4.1% | Building result lists          |
 
-#### THRESHOLD=10% (100 down hosts, 10,000 iterations — 2.64s total)
+#### THRESHOLD=10% (100 down hosts, 10,000 iterations -- 2.64s total)
 
 | Function                  | % Time | Notes                          |
 |---------------------------|-------:|--------------------------------|
@@ -235,7 +237,7 @@ acceptable overhead.
 Simulates 10 consecutive polling cycles with concurrent heartbeat
 packet arrival and increasing down-host counts.
 
-### THRESHOLD=5% (down hosts: 10 → 50)
+### THRESHOLD=5% (down hosts: 10 -> 50)
 
 | Cycle | Down Hosts | Fenced | Skipped | Filter Time |
 |------:|-----------:|-------:|--------:|------------:|
@@ -253,7 +255,7 @@ packet arrival and increasing down-host counts.
 - **Average filter time: 59 us**
 - **Maximum filter time: 144 us**
 
-### THRESHOLD=10% (down hosts: 10 → 55)
+### THRESHOLD=10% (down hosts: 10 -> 55)
 
 | Cycle | Down Hosts | Fenced | Skipped | Filter Time |
 |------:|-----------:|-------:|--------:|------------:|
@@ -324,7 +326,7 @@ heartbeat overhead is < 0.2% of total process memory.
 
 Each HBV2 heartbeat packet is ~56 bytes (4-byte magic + 8-byte timestamp
 + hostname + 32-byte HMAC). At 33 packets/second, the bandwidth is
-**~1.8 KB/s** — negligible on any network.
+**~1.8 KB/s** -- negligible on any network.
 
 ### Container Resource Limits
 

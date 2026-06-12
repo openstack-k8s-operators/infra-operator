@@ -226,6 +226,24 @@ class TestEmitK8sEvent(unittest.TestCase):
 
         self.assertEqual(mock_post.call_args[1]['timeout'], 5)
 
+    @patch('instanceha.requests.post')
+    @patch('instanceha._get_k8s_credentials', return_value=('token123', 'openstack'))
+    @patch.dict(os.environ, {'INSTANCEHA_CR_NAME': 'instanceha', 'POD_NAME': 'instanceha-0'})
+    def test_auto_sanitizes_credentials_from_message(self, mock_creds, mock_post):
+        mock_response = Mock()
+        mock_response.status_code = 201
+        mock_post.return_value = mock_response
+
+        instanceha._emit_k8s_event(
+            'compute-0', 'FencingFailed',
+            'Error: password=hunter2 auth failed',
+            event_type='Warning',
+        )
+
+        event = mock_post.call_args[1]['json']
+        self.assertNotIn('hunter2', event['message'])
+        self.assertIn('***', event['message'])
+
 
 class TestProcessServiceEvents(unittest.TestCase):
     """Tests that process_service emits events at key lifecycle points."""
@@ -258,7 +276,7 @@ class TestProcessServiceEvents(unittest.TestCase):
     @patch('instanceha._manage_reserved_hosts')
     @patch('instanceha._host_disable', return_value=True)
     @patch('instanceha._host_fence', return_value=True)
-    @patch('instanceha._get_nova_connection')
+    @patch('instanceha._establish_nova_connection')
     def test_emits_events_on_successful_workflow(self, mock_conn, mock_fence,
                                                   mock_disable, mock_reserved,
                                                   mock_evacuate, mock_recovery,
@@ -281,7 +299,7 @@ class TestProcessServiceEvents(unittest.TestCase):
 
     @patch('instanceha._emit_k8s_event')
     @patch('instanceha._host_fence', return_value=False)
-    @patch('instanceha._get_nova_connection')
+    @patch('instanceha._establish_nova_connection')
     def test_emits_fencing_failed_event(self, mock_conn, mock_fence, mock_event):
         mock_conn.return_value = Mock()
         service = self._make_service()
@@ -300,7 +318,7 @@ class TestProcessServiceEvents(unittest.TestCase):
     @patch('instanceha._manage_reserved_hosts')
     @patch('instanceha._host_disable', return_value=True)
     @patch('instanceha._host_fence', return_value=True)
-    @patch('instanceha._get_nova_connection')
+    @patch('instanceha._establish_nova_connection')
     def test_emits_evacuation_failed_event(self, mock_conn, mock_fence,
                                            mock_disable, mock_reserved,
                                            mock_evacuate, mock_event):
@@ -322,7 +340,7 @@ class TestProcessServiceEvents(unittest.TestCase):
     @patch('instanceha._host_evacuate', return_value=True)
     @patch('instanceha._manage_reserved_hosts')
     @patch('instanceha._host_disable', return_value=True)
-    @patch('instanceha._get_nova_connection')
+    @patch('instanceha._establish_nova_connection')
     def test_skips_fencing_events_on_resume(self, mock_conn, mock_disable,
                                             mock_reserved, mock_evacuate,
                                             mock_recovery, mock_event):
@@ -340,7 +358,7 @@ class TestProcessServiceEvents(unittest.TestCase):
         self.assertIn('EvacuationStarted', event_reasons)
 
     @patch('instanceha._emit_k8s_event')
-    @patch('instanceha._get_nova_connection', side_effect=Exception("boom"))
+    @patch('instanceha._establish_nova_connection', side_effect=Exception("boom"))
     def test_emits_processing_failed_on_exception(self, mock_conn, mock_event):
         service = self._make_service()
         failed_svc = self._make_failed_service()
