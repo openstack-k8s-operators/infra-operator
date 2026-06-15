@@ -26,7 +26,7 @@ import concurrent.futures
 # Suppress warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 
@@ -395,21 +395,11 @@ class TestEvacuationWorkflow(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.mock_env = MockOpenStackEnvironment()
-        self.mock_config = Mock()
-        # Set up get_config_value with side_effect for all config keys
-        config_values = {
-            'EVACUABLE_TAG': 'evacuable',
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': False,
-            'RESERVED_HOSTS': False,
-            'THRESHOLD': 50,
-            'DISABLED': False,
-            'CHECK_KDUMP': False,
-            'POLL': 30,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(
+            TAGGED_IMAGES=False, TAGGED_FLAVORS=False,
+            TAGGED_AGGREGATES=False, RESERVED_HOSTS=False,
+            POLL=30,
+        )
 
     def test_complete_evacuation_workflow(self):
         """Test complete evacuation workflow from start to finish."""
@@ -472,20 +462,11 @@ class TestEvacuationWorkflow(unittest.TestCase):
 
     def test_evacuation_with_flavor_tagging(self):
         """Test evacuation with flavor-based tagging."""
-        # Update the config dictionary to enable flavor tagging
-        config_values = {
-            'EVACUABLE_TAG': 'evacuable',
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': True,  # Enable flavor tagging
-            'TAGGED_AGGREGATES': False,
-            'RESERVED_HOSTS': False,
-            'THRESHOLD': 50,
-            'DISABLED': False,
-            'CHECK_KDUMP': False,
-            'POLL': 30,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(
+            TAGGED_IMAGES=False, TAGGED_FLAVORS=True,
+            TAGGED_AGGREGATES=False, RESERVED_HOSTS=False,
+            POLL=30,
+        )
 
         # Setup host with mixed servers
         failed_host = 'compute-01'
@@ -511,20 +492,11 @@ class TestEvacuationWorkflow(unittest.TestCase):
 
     def test_evacuation_with_aggregate_filtering(self):
         """Test evacuation with aggregate-based filtering."""
-        # Update the config dictionary to enable aggregate tagging
-        config_values = {
-            'EVACUABLE_TAG': 'evacuable',
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': True,  # Enable aggregate tagging
-            'RESERVED_HOSTS': False,
-            'THRESHOLD': 50,
-            'DISABLED': False,
-            'CHECK_KDUMP': False,
-            'POLL': 30,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(
+            TAGGED_IMAGES=False, TAGGED_FLAVORS=False,
+            TAGGED_AGGREGATES=True, RESERVED_HOSTS=False,
+            POLL=30,
+        )
 
         # Setup aggregates
         evacuable_agg = self.mock_env.add_aggregate(
@@ -562,14 +534,7 @@ class TestReenablingWorkflow(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.mock_env = MockOpenStackEnvironment()
-        self.mock_config = Mock()
-        # Set up get_config_value with default values
-        config_values = {
-            'FORCE_ENABLE': False,
-            'LEAVE_DISABLED': False,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config()
 
     def test_reenable_services_with_completed_migrations(self):
         """Test re-enabling services with completed migrations."""
@@ -614,13 +579,7 @@ class TestReenablingWorkflow(unittest.TestCase):
 
     def test_force_reenable_services(self):
         """Test force re-enabling of services."""
-        # Update config to enable FORCE_ENABLE
-        config_values = {
-            'FORCE_ENABLE': True,
-            'LEAVE_DISABLED': False,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(FORCE_ENABLE=True)
 
         service_to_reenable = self.mock_env.add_compute_service(
             'compute-01', state='up', status='enabled', forced_down=True
@@ -640,12 +599,7 @@ class TestReenablingWorkflow(unittest.TestCase):
         Test FORCE_ENABLE + LEAVE_DISABLED interaction.
         LEAVE_DISABLED should take precedence and filter out instanceha-evacuated services.
         """
-        config_values = {
-            'FORCE_ENABLE': True,
-            'LEAVE_DISABLED': True,
-            'FENCING_TIMEOUT': 30
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(FORCE_ENABLE=True, LEAVE_DISABLED=True)
 
         instanceha_evacuated = self.mock_env.add_compute_service(
             'compute-01', state='up', status='disabled', forced_down=False,
@@ -705,22 +659,7 @@ class TestReenablingWorkflow(unittest.TestCase):
 
     def test_disabled_service_reenabled_when_up(self):
         """Test that disabled services ARE re-enabled when they come back up."""
-        # Enable FORCE_ENABLE to skip migration checking
-        config_values = {
-            'EVACUABLE_TAG': 'evacuable',
-            'TAGGED_IMAGES': False,
-            'TAGGED_FLAVORS': False,
-            'TAGGED_AGGREGATES': False,
-            'RESERVED_HOSTS': False,
-            'THRESHOLD': 50,
-            'DISABLED': False,
-            'CHECK_KDUMP': False,
-            'POLL': 30,
-            'FENCING_TIMEOUT': 30,
-            'FORCE_ENABLE': True,  # Skip migration checks
-            'LEAVE_DISABLED': False  # Allow re-enabling
-        }
-        self.mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
+        self.mock_config = make_mock_config(FORCE_ENABLE=True)
 
         # Service is disabled (evacuation complete) and has come back up
         service_disabled_up = self.mock_env.add_compute_service(
@@ -760,15 +699,7 @@ class TestPerformanceAndScaling(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.mock_env = MockOpenStackEnvironment()
-        self.mock_config = Mock()
-        self.mock_config.get_evacuable_tag.return_value = 'evacuable'
-        self.mock_config.is_tagged_images_enabled.return_value = False
-        self.mock_config.is_tagged_flavors_enabled.return_value = False
-        self.mock_config.is_tagged_aggregates_enabled.return_value = False
-        self.mock_config.is_reserved_hosts_enabled.return_value = False
-        self.mock_config.get_threshold.return_value = 30  # Lower threshold to allow processing
-        self.mock_config.is_disabled.return_value = False
-        self.mock_config.get_config_value.return_value = 30  # Default FENCING_TIMEOUT
+        self.mock_config = make_mock_config(THRESHOLD=30)
 
     def test_large_scale_evacuation_performance(self):
         """Test evacuation performance with large number of hosts."""
@@ -868,15 +799,7 @@ class TestErrorHandlingAndRecovery(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.mock_env = MockOpenStackEnvironment()
-        self.mock_config = Mock()
-        self.mock_config.get_evacuable_tag.return_value = 'evacuable'
-        self.mock_config.is_tagged_images_enabled.return_value = False
-        self.mock_config.is_tagged_flavors_enabled.return_value = False
-        self.mock_config.is_tagged_aggregates_enabled.return_value = False
-        self.mock_config.is_reserved_hosts_enabled.return_value = False
-        self.mock_config.get_threshold.return_value = 50
-        self.mock_config.is_disabled.return_value = False
-        self.mock_config.get_config_value.return_value = 30  # Default FENCING_TIMEOUT
+        self.mock_config = make_mock_config()
 
     def test_nova_api_failure_handling(self):
         """Test handling of Nova API failures."""

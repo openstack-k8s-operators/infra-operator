@@ -125,7 +125,6 @@ _config_map: Dict[str, ConfigItem] = {
     'KDUMP_TIMEOUT': ConfigItem('int', 30, 5, 300),
     'CHECK_HEARTBEAT': ConfigItem('bool', False),
     'HEARTBEAT_TIMEOUT': ConfigItem('int', 120, 30, 600),
-    'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
     'DISABLED': ConfigItem('bool', False),
     'SSL_VERIFY': ConfigItem('bool', True),
     'FENCING_TIMEOUT': ConfigItem('int', 30, 5, 120),
@@ -133,6 +132,9 @@ _config_map: Dict[str, ConfigItem] = {
     'ORCHESTRATED_RESTART': ConfigItem('bool', False),
     'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
     'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),  # DEFAULT_EVACUATION_RETRIES = 5
+    'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
+    'HEARTBEAT_CLIFF_MAX_CYCLES': ConfigItem('int', 3, 1, 20),
+    'MAX_HOSTS_PER_CYCLE': ConfigItem('int', 10, 1, 100),
     'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
 }
 ```
@@ -161,12 +163,11 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
     self.current_hash = ""
     self.hash_update_successful = False
     self._last_hash_time = 0
-    self._previous_hash = ""
     self.ready = False                              # Readiness flag (set after first poll)
     self.k8s_api_reachable = True                   # K8s API connectivity (fail-open, see Fencing Safety Model)
+    K8S_API_REACHABLE.set(1)
 
     # Caching
-    self._host_servers_cache = {}
     self._evacuable_flavors_cache = None
     self._evacuable_images_cache = None
     self._cache_timestamp = 0
@@ -175,22 +176,29 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 
     # Threading
     self.health_check_thread = None
+    self._http_server = None
     self.udp_ip = ''
     self.shutdown_event = threading.Event()          # Graceful SIGTERM shutdown
 
-    # Kdump state (protected by kdump_lock)
-    self.kdump_lock = threading.Lock()               # Protects all kdump state
+    # Kdump state (protected by kdump_lock - UDP listener writes concurrently)
+    self.kdump_lock = threading.Lock()
     self.kdump_hosts_timestamp = defaultdict(float)
     self.kdump_hosts_checking = defaultdict(float)
     self.kdump_listener_stop_event = threading.Event()
     self.kdump_fenced_hosts = set()
 
-    # Heartbeat state (protected by heartbeat_lock)
+    # Heartbeat state (protected by heartbeat_lock - UDP listener writes concurrently)
     self.heartbeat_lock = threading.Lock()
     self.heartbeat_hosts_timestamp = defaultdict(float)
     self.heartbeat_listener_stop_event = threading.Event()
     self.heartbeat_listener_start_time = 0.0
     self.heartbeat_previous_active_count = 0        # Cliff detection baseline
+    self.heartbeat_consecutive_cliff_cycles = 0
+    self.last_poll_time = time.monotonic()
+
+    self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
+    if self.heartbeat_hmac_keys:
+        logging.info("Heartbeat HMAC authentication enabled with %d key(s)", len(self.heartbeat_hmac_keys))
 
     # Host processing tracking
     self.hosts_processing = defaultdict(float)
@@ -202,7 +210,7 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 
 **State Management Notes**:
 
-- `ready` flag starts `False` and is set to `True` after the first successful poll cycle. This drives the `/healthz` readiness probe endpoint — Kubernetes won't route traffic until the service has completed its first poll.
+- `ready` flag starts `False` and is set to `True` after the first successful poll cycle. This drives the `/healthz` readiness probe endpoint -- Kubernetes won't route traffic until the service has completed its first poll.
 - `k8s_api_reachable` starts `True` (fail-open). The background health check thread flips it to `False` after 3 consecutive failures. See [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale.
 - `shutdown_event` is set by the SIGTERM handler to signal the main loop and all `wait()` calls to exit gracefully.
 - `kdump_lock` protects all kdump-related state since the UDP listener thread writes concurrently with the main poll loop.
@@ -222,28 +230,6 @@ The initialization is split into five methods, each responsible for a specific d
 
 ---
 
-### 3. CloudConnectionProvider (ABC)
-
-**Purpose**: Abstract interface for cloud connection management.
-
-**Pattern**: ABC-based dependency injection for testability.
-
-**Interface**:
-```python
-class CloudConnectionProvider(ABC):
-    @abstractmethod
-    def get_connection(self) -> Optional[OpenStackClient]:
-        """Get a connection to the cloud provider."""
-        pass
-
-    @abstractmethod
-    def create_connection(self) -> Optional[OpenStackClient]:
-        """Create a new connection to the cloud provider."""
-        pass
-```
-
-**Implementation**: InstanceHAService implements this protocol.
-
 ---
 
 ## Architecture Patterns
@@ -254,7 +240,7 @@ class CloudConnectionProvider(ABC):
 
 **Example**:
 ```python
-class InstanceHAService(CloudConnectionProvider):
+class InstanceHAService:
     def __init__(self, config_manager: ConfigManager,
                  cloud_client: Optional[OpenStackClient] = None):
         self.config = config_manager
@@ -287,10 +273,12 @@ def _redfish_reset(url, user, passwd, timeout, action, config_mgr):
 ```python
 @contextmanager
 def track_host_processing(service: 'InstanceHAService', hostname: str):
-    """Context manager for tracking host processing with automatic cleanup."""
+    """Context manager for tracking host processing state with automatic cleanup."""
+    HOSTS_PROCESSING.inc()
     try:
         yield
     finally:
+        HOSTS_PROCESSING.dec()
         with service.processing_lock:
             service.hosts_processing.pop(hostname, None)
             logging.debug('Cleaned up processing tracking for %s', hostname)
@@ -331,7 +319,7 @@ class UDPSocketManager:
 
 **Cache Access**:
 ```python
-# Pattern: read check → API call outside lock → write update → return local var
+# Pattern: read check -> API call outside lock -> write update -> return local var
 # Lock held only for dictionary operations, not during API calls
 
 # 1. Check cache with lock (fast read)
@@ -600,17 +588,10 @@ def _is_service_resume_candidate(svc) -> bool:
             DISABLED_REASON_EVACUATION_COMPLETE not in reason)
 
 def _is_service_stale(svc, target_date: datetime) -> bool:
-    """Check whether a service's updated_at timestamp is older than target_date.
-
-    Handles both naive and timezone-aware datetime objects by normalizing
-    both to naive UTC before comparison.
-    """
+    """Check whether a service's updated_at timestamp is older than target_date."""
     try:
         updated = svc.updated_at
-        if isinstance(updated, datetime):
-            updated_naive = updated.replace(tzinfo=None)
-        else:
-            updated_naive = datetime.fromisoformat(updated)
+        updated_naive = datetime.fromisoformat(str(updated).replace('Z', '+00:00')).replace(tzinfo=None)
         return updated_naive < target_date.replace(tzinfo=None)
     except (ValueError, TypeError, AttributeError):
         logging.warning("Service %s has invalid updated_at: %r, skipping (not treating as stale)",
@@ -648,11 +629,11 @@ def _categorize_services(services: List[Any], target_date: datetime) -> tuple:
   - Excludes resume candidates to avoid double-processing
 
 **State Transitions**:
-1. Service fails → `compute_nodes` → evacuated → `disabled_reason` = "instanceha evacuation: {timestamp}"
-2. Next poll → `disabled_reason` updated to "instanceha evacuation complete: {timestamp}"
+1. Service fails -> `compute_nodes` -> evacuated -> `disabled_reason` = "instanceha evacuation: {timestamp}"
+2. Next poll -> `disabled_reason` updated to "instanceha evacuation complete: {timestamp}"
    - Service now excluded from `resume` (has "complete" marker)
    - Service now included in `reenable` (has "complete" marker)
-3. Subsequent polls → `reenable` → force_down unset → service reports up → enabled
+3. Subsequent polls -> `reenable` -> force_down unset -> service reports up -> enabled
 4. Service returns to normal operation
 
 **Disabled Reason Values**:
@@ -670,7 +651,7 @@ The `disabled_reason` field tracks evacuation state:
 **Key Design Points**:
 - The `resume` check explicitly excludes "complete" and "FAILED" to prevent loops
 - The `reenable` exclusion also excludes "complete" to prevent excluding completed evacuations
-- Services transition from `resume` → `reenable` via the disabled_reason update
+- Services transition from `resume` -> `reenable` via the disabled_reason update
 - Failed evacuations remain disabled until manually resolved
 - Both checks use substring matching with explicit exclusions to prevent incorrect categorization
 
@@ -678,7 +659,7 @@ The `disabled_reason` field tracks evacuation state:
 
 ## Fencing Safety Model
 
-InstanceHA uses a two-tier safety model to prevent false-positive fencing. Each gate answers a distinct question — there is no redundancy between them.
+InstanceHA uses a two-tier safety model to prevent false-positive fencing. Each gate answers a distinct question -- there is no redundancy between them.
 
 ### Gate Chain
 
@@ -689,50 +670,89 @@ Poll cycle starts
   │
   ├─ Gate 1: K8s API reachable?
   │   Question: "Can we trust our own observations?"
-  │   If no (3 consecutive failures) → skip entire cycle
+  │   If no (3 consecutive failures) -> skip entire cycle
   │   Rationale: if InstanceHA's worker node is network-isolated,
-  │   Nova's service list may be stale — fencing would hit healthy hosts
+  │   Nova's service list may be stale -- fencing would hit healthy hosts
   │
-  ├─ Gate 2: Per-host heartbeat
-  │   Question: "Is this specific host actually down?"
-  │   If host sending heartbeats within HEARTBEAT_TIMEOUT → skip that host
-  │   Rationale: Nova reports host as down, but heartbeat proves the OS is alive —
-  │   only nova-compute crashed, not the host
+  │   ─── enters _process_stale_services ───
   │
-  ├─ Gate 3: Heartbeat cliff detection
+  ├─ Pre-gate: _filter_processing_hosts
+  │   Excludes hosts already being processed (in-flight fencing/evacuation)
+  │
+  ├─ Gate 2: Heartbeat cliff detection
   │   Question: "Did we lose visibility, or did hosts actually fail?"
-  │   If >HEARTBEAT_CLIFF_THRESHOLD% of heartbeats vanish at once → skip ALL fencing
+  │   If >=HEARTBEAT_CLIFF_THRESHOLD% of heartbeats vanish at once -> skip ALL fencing
+  │   Requires >= 3 previously active heartbeat hosts to evaluate
   │   Rationale: simultaneous mass heartbeat loss is more likely a listener-side
   │   network partition than N simultaneous host failures
+  │   Expiry: after HEARTBEAT_CLIFF_MAX_CYCLES consecutive cliff cycles, accept as genuine
   │
-  ├─ Gate 4: Kdump detection (optional, CHECK_KDUMP=true)
-  │   Question: "Is this host crashing and dumping memory?"
-  │   If kdump message received → fence immediately, skip power-on during recovery
+  ├─ Gate 3: Per-host heartbeat
+  │   Question: "Is this specific host actually down?"
+  │   If host sending heartbeats within HEARTBEAT_TIMEOUT -> skip that host
+  │   Rationale: Nova reports host as down, but heartbeat proves the OS is alive --
+  │   only nova-compute crashed, not the host
   │
-  ├─ Gate 5: Global threshold
-  │   Question: "Are too many hosts down to safely evacuate?"
-  │   If failed percentage > THRESHOLD → skip all fencing
+  ├─ Gate 4: All-services-stale circuit breaker
+  │   Question: "Is the data source itself broken?"
+  │   If every active service (>=3) still appears stale after heartbeat filtering -> skip ALL fencing
+  │   Rationale: all hosts down at once is almost certainly a Nova API or
+  │   infrastructure anomaly, not a genuine failure of every server.
+  │   Runs after heartbeat filtering so heartbeat data can disambiguate partial
+  │   failures (e.g., nova-compute crash) from Nova API issues
   │
-  └─ Gate 6: Per-aggregate threshold
-      Question: "Is this aggregate losing too many hosts?"
-      If failed count > instanceha:max_failures metadata → skip hosts in that aggregate
+  ├─ Gate 5: Evacuability filtering (pre-threshold)
+  │   Question: "Which of these down hosts would we actually evacuate?"
+  │   Removes hosts with no VMs, non-evacuable flavors/images, and non-evacuable aggregates
+  │   Nova API query errors on no-VM/flavor filters fail-open (host is kept)
+  │   Rationale: downstream gates operate on the actionable candidate set only
+  │
+  ├─ Gate 6: Global threshold
+  │   Question: "Are too many evacuable hosts down to safely proceed?"
+  │   If failed percentage > THRESHOLD -> skip all fencing (strict `>`, not `>=`)
+  │   Skipped when filtered compute_nodes is empty
+  │   Note: numerator is post-filter down hosts; denominator is all active evacuable hosts
+  │   to_resume hosts are not counted in the calculation, but a threshold breach blocks
+  │   all processing including to_resume
+  │
+  ├─ Gate 7: Per-aggregate threshold
+  │   Question: "Is this aggregate losing too many hosts?"
+  │   If failed count > instanceha:max_failures metadata -> skip hosts in that aggregate
+  │   to_resume hosts bypass this gate (only compute_nodes are filtered)
+  │
+  ├─ Gate 8: Per-cycle rate limit
+  │   Question: "Are we fencing too many hosts at once?"
+  │   If hosts to fence > MAX_HOSTS_PER_CYCLE -> fence the first N, defer the rest
+  │
+  ├─ Gate 9: Critical services check
+  │   Question: "Are the Nova services needed for evacuation running?"
+  │   If all nova-scheduler instances are down -> skip fencing and evacuation
+  │
+  └─ Gate 10: Kdump detection (optional, CHECK_KDUMP=true)
+      Question: "Is this host crashing and dumping memory?"
+      If kdump message received -> evacuate immediately (skip fencing, host already crashed),
+      skip power-on during recovery to allow memory dump to complete
 ```
 
-When `CHECK_HEARTBEAT=false`, gates 2 and 3 are not evaluated. A warning is logged at startup to alert operators that split-brain protection is limited to the K8s API check.
+When `CHECK_HEARTBEAT=false`, gates 2 and 3 are not evaluated and gate 4 (all-services-stale) operates on the unfiltered stale set. A warning is logged at startup to alert operators that split-brain protection is limited to the K8s API check.
 
 ### Fail-Open vs Fail-Closed Semantics
 
 | Gate | On error / no data | Rationale |
 |------|-------------------|-----------|
-| K8s API (startup) | Fail-open (allow fencing) | No data yet — blocking fencing on startup would silently prevent all evacuations until the health check thread runs |
-| K8s API (after 3 failures) | Fail-closed (block fencing) | Confirmed partition — fencing would hit healthy hosts |
-| Heartbeat (grace period) | Fail-open (allow fencing) | No heartbeat history in first `HEARTBEAT_TIMEOUT` seconds — cannot distinguish "no heartbeat" from "never received one" |
+| K8s API (startup) | Fail-open (allow fencing) | No data yet -- blocking fencing on startup would silently prevent all evacuations until the health check thread runs |
+| K8s API (after 3 failures) | Fail-closed (block fencing) | Confirmed partition -- fencing would hit healthy hosts |
+| All-services-stale | Fail-closed (block fencing) | Every active host appearing stale at once is almost certainly a data-source anomaly, not genuine mass failure |
+| Heartbeat (grace period) | Fail-open (allow fencing) | No heartbeat history in first `HEARTBEAT_TIMEOUT` seconds -- cannot distinguish "no heartbeat" from "never received one" |
 | Heartbeat (steady state) | Fail-open (allow fencing) | No heartbeat = host is down = proceed with fencing |
-| Cliff detection | Fail-closed (block fencing) | Mass heartbeat loss is treated as observer failure |
+| Cliff detection | Fail-closed (block fencing), expires after `HEARTBEAT_CLIFF_MAX_CYCLES` | Mass heartbeat loss is treated as observer failure; expiry prevents permanent paralysis |
+| Per-cycle rate limit | Defer excess (allow capped fencing) | Bounds blast radius; deferred hosts are picked up on the next cycle |
+| Critical services (query error) | Fail-open (allow fencing) | If the scheduler query fails, proceed rather than block -- transient API errors should not prevent evacuation |
+| Critical services (all schedulers down) | Fail-closed (block fencing) | Confirmed all schedulers down -- evacuation cannot proceed, fencing without evacuation would only cause downtime |
 
 ### Startup Race Window
 
-`k8s_api_reachable` initializes to `True` before the background health check thread confirms K8s API connectivity. If the K8s API is genuinely unreachable at startup, fencing could proceed for up to ~45 seconds (3 failures × 15s `K8S_API_CHECK_INTERVAL`) before the check blocks it.
+`k8s_api_reachable` initializes to `True` before the background health check thread confirms K8s API connectivity. If the K8s API is genuinely unreachable at startup, fencing could proceed for up to ~45 seconds (3 failures x 15s `K8S_API_CHECK_INTERVAL`) before the check blocks it.
 
 In practice this window is smaller: the health check thread starts during `_initialize_service()` and runs its first probe almost immediately, while the main loop still needs to complete `_establish_nova_connection()` and `_reconcile_orphaned_hosts()` before its first poll. The health check typically completes its first probe before the main loop is ready to fence.
 
@@ -746,7 +766,7 @@ Every poll cycle that reaches the fencing decision point emits a single summary 
 INFO Fencing decision: 3 stale, 1 heartbeat-alive, 2 to fence, cliff=False
 ```
 
-This line is emitted in all cases — including when all hosts are filtered out by heartbeat or cliff detection — so operators can diagnose fencing decisions from a single log grep.
+This line is emitted in all cases -- including when all hosts are filtered out by heartbeat or cliff detection -- so operators can diagnose fencing decisions from a single log grep.
 
 ### Relationship to MedIK8s
 
@@ -757,7 +777,7 @@ InstanceHA and MedIK8s (NHC/FAR/SNR) operate at different layers with no overlap
 | MedIK8s | OpenShift cluster | Kubernetes node failures, pod recovery, node remediation |
 | InstanceHA | EDPM data plane | Compute host fencing, VM evacuation |
 
-MedIK8s watches Kubernetes Node objects. EDPM compute nodes are **not** Kubernetes nodes — they are external bare-metal hosts managed outside the cluster. MedIK8s cannot detect or remediate EDPM compute node failures; InstanceHA handles those independently.
+MedIK8s watches Kubernetes Node objects. EDPM compute nodes are **not** Kubernetes nodes -- they are external bare-metal hosts managed outside the cluster. MedIK8s cannot detect or remediate EDPM compute node failures; InstanceHA handles those independently.
 
 MedIK8s is relevant for control plane recovery (e.g., if the node running RabbitMQ or the InstanceHA pod itself fails). InstanceHA is relevant for data plane recovery (compute host failures requiring VM evacuation).
 
@@ -765,23 +785,27 @@ MedIK8s is relevant for control plane recovery (e.g., if the node running Rabbit
 
 ## Critical Services Validation
 
-**Function**: `_check_critical_services(conn, services, compute_nodes)`
+**Function**: `_check_critical_services(conn)`
 
 **Returns**: `(bool, str)` - can_evacuate flag and error message
 
 ### Scheduler Check
 ```python
-schedulers = [s for s in services if s.binary == 'nova-scheduler']
+try:
+    schedulers = conn.services.list(binary="nova-scheduler")
+except Exception:
+    logging.warning("Could not query nova-scheduler services, proceeding with evacuation")
+    return True, ""
 if schedulers and not any(s.state == 'up' for s in schedulers):
     return False, "All nova-scheduler services are down"
 ```
 
-Checks if at least one `nova-scheduler` service has `state == 'up'`.
+Queries Nova directly for `nova-scheduler` services. On query failure, fails open (allows evacuation). Blocks only when all schedulers are confirmed down.
 
 ### Integration
 
 ```python
-can_evacuate, error_msg = _check_critical_services(conn, services, compute_nodes)
+can_evacuate, error_msg = _check_critical_services(conn)
 if not can_evacuate:
     logging.error('Cannot evacuate: %s. Skipping evacuation.', error_msg)
     _cleanup_filtered_hosts(service, marked_hostnames, set(), current_time)
@@ -912,6 +936,8 @@ def get_int(self, key: str, default: int = 0,
 
 ## Evacuation Mechanisms
 
+See [instanceha_guide.md -- Evacuation Strategies](instanceha_guide.md#evacuation-strategies) for configuration examples and operational guidance.
+
 ### 1. Traditional Evacuation
 
 **Pattern**: Fire-and-forget approach.
@@ -976,7 +1002,7 @@ def _server_evacuate_future(connection, server, target_host=None) -> bool:
 ```
 
 **Monitoring** (`_monitor_evacuation`):
-- Separate counters for migration errors (`EVACUATION_RETRIES`, default 5, configurable 1–20) and API errors (`MAX_API_RETRIES=10`)
+- Separate counters for migration errors (`EVACUATION_RETRIES`, default 5, configurable 1-20) and API errors (`MAX_API_RETRIES=10`)
 - API error counter resets on successful API call
 - On migration failure: resets server state to `error` and re-issues `_server_evacuate` (scheduler picks new target)
 - Hard timeout: `MAX_EVACUATION_TIMEOUT_SECONDS` (300s) via `time.monotonic()`
@@ -991,7 +1017,7 @@ def _server_evacuate_future(connection, server, target_host=None) -> bool:
 - API errors retried independently (budget of 10, not shared with migration errors)
 - Times out after 300 seconds
 - Skips redundant state restore when Nova already preserved the original state after evacuation
-- Restores original VM state after successful evacuation only when needed (`SHUTOFF` → stop, `ERROR` → reset_state)
+- Restores original VM state after successful evacuation only when needed (`SHUTOFF` -> stop, `ERROR` -> reset_state)
 - Unlocks the server in `finally` block (even on failure)
 
 ---
@@ -1007,7 +1033,7 @@ def _server_evacuate_future(connection, server, target_host=None) -> bool:
 **Flow**:
 ```python
 # 1. Read orchestration metadata from all evacuable servers
-# 2. Group servers by restart_group (ungrouped → individual phases)
+# 2. Group servers by restart_group (ungrouped -> individual phases)
 # 3. Sort groups by highest member priority (descending)
 # 4. Evacuate each phase sequentially
 # 5. Within each phase, use ThreadPoolExecutor (concurrent, like smart evacuation)
@@ -1076,6 +1102,8 @@ def is_server_evacuable(self, server, evac_flavors=None, evac_images=None):
 ---
 
 ## Fencing Agents
+
+See [instanceha_guide.md -- Fencing](instanceha_guide.md#fencing) for operator-facing configuration examples and supported agent options.
 
 ### Fencing Agent Dispatch Pattern
 
@@ -1181,6 +1209,8 @@ In addition, each event emission site also increments a corresponding Prometheus
 
 ### Event Catalog
 
+See [instanceha_guide.md -- Kubernetes Events](instanceha_guide.md#kubernetes-events) for the operator-facing event table with descriptions. The table below provides the developer-facing view with "Host" scope and trigger context:
+
 | Reason | Type | Host | When |
 |--------|------|------|------|
 | `HostDown` | Warning | compute host | Compute service detected as down or stale |
@@ -1199,7 +1229,10 @@ In addition, each event emission site also increments a corresponding Prometheus
 | `AggregateThresholdExceeded` | Warning | aggregate name | Failed hosts in aggregate exceed `instanceha:max_failures` metadata limit |
 | `HostReachable` | Warning | compute host | Host reported down by Nova but still reachable via heartbeat (CHECK_HEARTBEAT) |
 | `HostReenabled` | Normal | compute host | Host re-enabled after successful evacuation |
-| `HeartbeatCliff` | Warning | `cluster` | Sudden heartbeat loss detected — possible network partition, fencing skipped for this cycle |
+| `HeartbeatCliff` | Warning | `cluster` | Sudden heartbeat loss detected -- possible network partition, fencing skipped for this cycle |
+| `HeartbeatCliffExpired` | Warning | `cluster` | Cliff detection expired after N consecutive cycles -- proceeding with fencing |
+| `FencingRateLimited` | Warning | `cluster` | Per-cycle fencing cap (`MAX_HOSTS_PER_CYCLE`) hit, excess hosts deferred to next cycle |
+| `AllServicesStale` | Warning | `cluster` | All active compute services appear stale -- likely Nova API issue, fencing skipped |
 | `OrphanedHostRecovered` | Warning | compute host | Startup reconciliation recovered a fenced host left without evacuation marker |
 
 ### Event Structure
@@ -1286,16 +1319,16 @@ The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP 
 **Architecture**:
 - Background UDP listener thread (port 7410)
 - Magic number validation (0x1B302A40)
-- Reverse DNS lookup (IP → hostname)
+- Reverse DNS lookup (IP -> hostname)
 - Timestamp tracking with cleanup
 
 **Behavior**:
 1. **First poll**: When host is detected as down, start waiting for `KDUMP_TIMEOUT` seconds
-2. **Kdump message received**: Host is fenced → evacuate immediately (with `resume=True`)
+2. **Kdump message received**: Host is fenced -> evacuate immediately (with `resume=True`)
    - Host marked with `disabled_reason = "instanceha evacuation (kdump): {timestamp}"`
    - Power-off fencing is skipped (host already down/rebooting)
    - `_host_disable()` is still called (host not yet disabled from Nova's perspective)
-3. **Timeout expired**: No kdump detected → proceed with normal evacuation
+3. **Timeout expired**: No kdump detected -> proceed with normal evacuation
 4. **Evacuation complete**: Update `disabled_reason` to preserve kdump marker
    - `disabled_reason = "instanceha evacuation complete (kdump): {timestamp}"`
    - Excludes service from resume category (has "evacuation complete")
@@ -1319,7 +1352,7 @@ The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP 
 
 ### 2. Heartbeat Detection
 
-**Purpose**: Dual-channel failure detection — distinguish host-level failures from nova-compute crashes by listening for HMAC-authenticated heartbeat packets from compute nodes.
+**Purpose**: Dual-channel failure detection -- distinguish host-level failures from nova-compute crashes by listening for HMAC-authenticated heartbeat packets from compute nodes.
 
 **Architecture**:
 - Background UDP listener thread (port 7411, configurable)
@@ -1334,8 +1367,8 @@ The agent exposes Prometheus-format metrics at `:8080/metrics` on the same HTTP 
 2. The listener verifies each packet's HMAC-SHA256 signature and timestamp freshness (rejects packets older than 120s)
 3. InstanceHA records timestamps in `heartbeat_hosts_timestamp`
 4. When Nova reports a host as down, `_filter_reachable_hosts` checks:
-   - If heartbeat received within `HEARTBEAT_TIMEOUT` seconds → host OS is alive → skip fencing (only nova-compute crashed)
-   - If no heartbeat → host is genuinely down → proceed with fencing and evacuation
+   - If heartbeat received within `HEARTBEAT_TIMEOUT` seconds -> host OS is alive -> skip fencing (only nova-compute crashed)
+   - If no heartbeat -> host is genuinely down -> proceed with fencing and evacuation
 5. **Grace period**: During the first `HEARTBEAT_TIMEOUT` seconds after listener startup, all hosts bypass heartbeat filtering (no heartbeat history exists yet)
 
 **Packet Format (HBV2)**:
@@ -1349,8 +1382,8 @@ Last 32B:    HMAC-SHA256 digest (over bytes 0 through N-32)
 Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 
 **Compute-Side Deployment** (edpm-ansible `edpm_instanceha_monitoring` role):
-- `instanceha-heartbeat.py` — Python script using stdlib only (socket, struct, hmac)
-- `instanceha-heartbeat.timer` — systemd timer (OnBootSec=10s, OnUnitActiveSec=30s)
+- `instanceha-heartbeat.py` -- Python script using stdlib only (socket, struct, hmac)
+- `instanceha-heartbeat.timer` -- systemd timer (OnBootSec=10s, OnUnitActiveSec=30s)
 - Runs as `nobody:nobody` (no root required for UDP send)
 - HMAC key mounted from the `<instance-name>-heartbeat-hmac` secret via EDPM dataSource
 
@@ -1370,16 +1403,16 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 **Architecture**:
 - Background thread started by `start_k8s_health_check()`
 - Polls `GET /api/v1/namespaces/{namespace}` using the in-cluster service account token
-- Interval controlled by `K8S_API_CHECK_INTERVAL` (default 15s, range 5–120)
+- Interval controlled by `K8S_API_CHECK_INTERVAL` (default 15s, range 5-120)
 
 **Configuration**: `K8S_API_CHECK_INTERVAL: 15`
 
 **Behavior**:
-1. `k8s_api_reachable` initializes to `True` (fail-open) — see [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale
+1. `k8s_api_reachable` initializes to `True` (fail-open) -- see [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale
 2. The health check thread pings the K8s API every `K8S_API_CHECK_INTERVAL` seconds
-3. Any non-5xx response (status code < 500) is treated as reachable — the API is responding, even if RBAC denies the specific request
+3. Any non-5xx response (status code < 500) is treated as reachable -- the API is responding, even if RBAC denies the specific request
 4. After 3 consecutive failures, `k8s_api_reachable` is set to `False` and `ready` is set to `False`
-5. The main poll loop checks `k8s_api_reachable` before fencing — if `False`, the entire fencing cycle is skipped
+5. The main poll loop checks `k8s_api_reachable` before fencing -- if `False`, the entire fencing cycle is skipped
 6. When connectivity restores, `k8s_api_reachable` is set back to `True`; readiness is restored after the next successful Nova poll
 
 **Prometheus**: `instanceha_k8s_api_reachable` gauge (1=ok, 0=isolated)
@@ -1394,14 +1427,16 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 - Integrated into `_filter_reachable_hosts()`, runs during each poll cycle when `CHECK_HEARTBEAT` is enabled
 - Compares current active heartbeat count against the previous cycle's count stored in `heartbeat_previous_active_count`
 
-**Configuration**: `HEARTBEAT_CLIFF_THRESHOLD: 50` (default 50%, range 10–100)
+**Configuration**:
+- `HEARTBEAT_CLIFF_THRESHOLD: 50` (default 50%, range 10-100)
+- `HEARTBEAT_CLIFF_MAX_CYCLES: 3` (default 3, range 1-20)
 
 **Behavior**:
 1. At each poll cycle, count hosts with a fresh heartbeat (within `HEARTBEAT_TIMEOUT`)
-2. If the previous count was ≥ 3 and the drop percentage exceeds `HEARTBEAT_CLIFF_THRESHOLD`, skip fencing for this cycle
+2. If the previous count was >= 3 and the drop percentage exceeds `HEARTBEAT_CLIFF_THRESHOLD`, increment `heartbeat_consecutive_cliff_cycles` and skip fencing for this cycle
 3. Emit a `HeartbeatCliff` K8s event (Warning) and increment `instanceha_heartbeat_cliff_total`
-4. The baseline count is preserved during a cliff event, so the cliff re-triggers on subsequent cycles until heartbeats recover
-5. When no cliff is detected, update `heartbeat_previous_active_count` for the next cycle
+4. If the cliff persists for `HEARTBEAT_CLIFF_MAX_CYCLES` consecutive cycles, accept the current state as genuine: reset the baseline to the current count, reset the cycle counter, emit a `HeartbeatCliffExpired` K8s event (Warning), and proceed with fencing
+5. When no cliff is detected, update `heartbeat_previous_active_count` and reset the consecutive cliff counter for the next cycle
 
 ---
 
@@ -1442,11 +1477,11 @@ Minimum packet size: 45 bytes (4 magic + 8 timestamp + 1 hostname + 32 HMAC).
 Failed Host: compute-01 (in aggregate-A)
 Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 
-1. Match by aggregate → Enable reserved-01
+1. Match by aggregate -> Enable reserved-01
 2. If FORCE_RESERVED_HOST_EVACUATION=true:
-   → Evacuate all VMs from compute-01 to reserved-01
+   -> Evacuate all VMs from compute-01 to reserved-01
 3. If FORCE_RESERVED_HOST_EVACUATION=false:
-   → Evacuate VMs (scheduler chooses from all available hosts)
+   -> Evacuate VMs (scheduler chooses from all available hosts)
 ```
 
 ---
@@ -1473,25 +1508,37 @@ Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 
 **Purpose**: Prevent mass evacuations during datacenter-level failures.
 
+**Evaluation order**: The threshold check runs **after** evacuability filtering (`_prepare_evacuation_resources`). The numerator is the count of down hosts that survived filtering (have VMs, match flavor/image/aggregate tags). Hosts Nova reported as down but excluded by tagging are not counted.
+
 **Implementation**:
 ```python
-# Filter to active services only — disabled and force-downed hosts excluded from denominator
-active_services = [s for s in services if 'disabled' not in s.status and not s.forced_down]
-threshold_percent = (len(compute_nodes) / len(active_services)) * 100 if active_services else 0
+# Earlier in the cycle: heartbeat filtering, then evacuability filtering
+compute_nodes, reserved_hosts, images, flavors = _prepare_evacuation_resources(
+    conn, service, services, compute_nodes, aggregates=aggregates)
+
+# Threshold uses the filtered candidate list, not the original stale-service list
+if service.config.get_config_value('TAGGED_AGGREGATES'):
+    total_evacuable = _count_evacuable_hosts(conn, service, services, aggregates=aggregates)
+    threshold_percent = (len(compute_nodes) / total_evacuable * 100) if total_evacuable > 0 else 0
+else:
+    active_services = [s for s in services if 'disabled' not in s.status and not s.forced_down]
+    threshold_percent = (len(compute_nodes) / len(active_services)) * 100 if active_services else 0
 
 if threshold_percent > service.config.get_config_value('THRESHOLD'):
     logging.error('Impacted (%.1f%%) exceeds threshold', threshold_percent)
     return  # Do not evacuate
 ```
 
-Both the standard path and the `TAGGED_AGGREGATES` path (`_count_evacuable_hosts`) use the same active-only filtering.
+Both paths exclude disabled and forced-down hosts from the denominator. The `TAGGED_AGGREGATES` path further restricts the denominator to hosts in evacuable aggregates. The numerator counts only post-filter down hosts (empty hosts excluded); the denominator counts all active evacuable hosts including healthy ones. The check is skipped when filtered `compute_nodes` is empty. `to_resume` candidates are not counted in the threshold calculation and individually bypass per-aggregate filtering, but a global threshold breach blocks all processing including `to_resume`.
+
+**Implication**: A partial infrastructure failure (for example, one Nova cell offline) that affects mostly non-evacuable hosts may not trip the global threshold. Use per-aggregate `instanceha:max_failures`, the all-services-stale gate (full-cluster anomalies only), and external monitoring for cell-level protection. See [Threshold Is Evaluated After Evacuability Filtering](instanceha_guide.md#threshold-is-evaluated-after-evacuability-filtering) in the operator guide.
 
 ### Per-Aggregate Threshold
 
 In addition to the global percentage-based threshold, operators can set an absolute failure limit per aggregate via the `instanceha:max_failures` metadata key on Nova aggregates. When `TAGGED_AGGREGATES` is enabled, the agent checks each evacuable aggregate's metadata after the global threshold passes. If the number of failed hosts in an aggregate exceeds its `instanceha:max_failures` value, evacuation is blocked for all failed hosts in that aggregate.
 
 - **Activation**: Automatic when the metadata key is present (no config option needed)
-- **Multi-aggregate semantics**: Most-restrictive-wins — if a host belongs to multiple aggregates and any one exceeds its limit, the host is blocked
+- **Multi-aggregate semantics**: Most-restrictive-wins -- if a host belongs to multiple aggregates and any one exceeds its limit, the host is blocked
 - **K8s event**: `AggregateThresholdExceeded` (Warning) emitted per blocked aggregate
 - **Metric**: `instanceha_aggregate_threshold_exceeded_total{aggregate}` counter
 
@@ -1630,7 +1677,7 @@ clouds:
 
 ## Authentication
 
-InstanceHA supports two authentication methods for connecting to the Nova API:
+InstanceHA supports two authentication methods for connecting to the Nova API. See [instanceha_guide.md -- Authentication](instanceha_guide.md#authentication) for operator-facing setup instructions and [instanceha_application_credentials.md](instanceha_application_credentials.md) for credential rotation and scoping details.
 
 ### 1. Password Authentication (Default)
 
@@ -1730,7 +1777,7 @@ for svc in services:
         continue
     if 'disabled' in svc.status:
         continue
-    # Orphaned — fenced but not marked for evacuation
+    # Orphaned -- fenced but not marked for evacuation
     conn.services.disable_log_reason(svc.id, disable_reason)
     _emit_k8s_event(svc.host, 'OrphanedHostRecovered', ...)
 ```
@@ -1754,7 +1801,7 @@ for svc in services:
 Hosts recovered by startup reconciliation (or already marked with `"instanceha evacuation:"`) are processed with `resume=True`:
 - **Power-off fencing is skipped** (host was already fenced before the crash)
 - **Host disable is skipped** if the host is already `forced_down` and `disabled`
-- **Evacuation runs** (idempotent — already-evacuated VMs are no-ops)
+- **Evacuation runs** (idempotent -- already-evacuated VMs are no-ops)
 - **Power-on is performed** after evacuation completes, ensuring the host is brought back online
 
 This ensures orphaned hosts are not left powered off indefinitely after a pod crash.
@@ -1765,7 +1812,7 @@ Emits `OrphanedHostRecovered` (Warning) for each recovered host.
 
 ### Known Limitations
 
-**Lock reconciliation scope**: The VM unlock sweep at startup only checks servers on hosts that are `forced_down AND state='down'`. This covers the realistic crash scenario (pod dies mid-evacuation while the host is still fenced). However, if the pod crashes after evacuation succeeds and post-recovery clears `forced_down`, but before the `finally` block unlocks the VMs, the locked VMs on their new (healthy) hosts would not be found by the reconciliation. This window is extremely narrow — the `finally` block in `_server_evacuate_future` runs per-server immediately after each evacuation completes, so the crash would need to occur between the evacuation completing and the `finally` executing. In practice, a SIGKILL (OOM, node crash) during concurrent evacuation would leave VMs on hosts that are still `forced_down`, which the current reconciliation handles correctly.
+**Lock reconciliation scope**: The VM unlock sweep at startup only checks servers on hosts that are `forced_down AND state='down'`. This covers the realistic crash scenario (pod dies mid-evacuation while the host is still fenced). However, if the pod crashes after evacuation succeeds and post-recovery clears `forced_down`, but before the `finally` block unlocks the VMs, the locked VMs on their new (healthy) hosts would not be found by the reconciliation. This window is extremely narrow -- the `finally` block in `_server_evacuate_future` runs per-server immediately after each evacuation completes, so the crash would need to occur between the evacuation completing and the `finally` executing. In practice, a SIGKILL (OOM, node crash) during concurrent evacuation would leave VMs on hosts that are still `forced_down`, which the current reconciliation handles correctly.
 
 A broader scan (checking all servers with `locked_reason == LOCK_REASON_EVACUATION` regardless of host state) would close this theoretical gap but requires listing all servers in the cloud at startup, which may be expensive on large deployments.
 
@@ -1786,12 +1833,12 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 
 **Behavior**:
 - `shutdown_event` is a `threading.Event` checked in the main loop condition (`while not service.shutdown_event.is_set()`)
-- All `time.sleep()` calls replaced with `service.shutdown_event.wait(seconds)` — these return immediately when the event is set
+- All `time.sleep()` calls replaced with `service.shutdown_event.wait(seconds)` -- these return immediately when the event is set
 - In-flight evacuations complete before shutdown (no abrupt termination)
 - Logs `"Graceful shutdown complete"` on exit
 
 **Kubernetes Integration**:
-- The Deployment's `terminationGracePeriodSeconds` is set to 30 seconds
+- The Deployment's `terminationGracePeriodSeconds` is set to 45 seconds
 - The Deployment strategy is `Recreate` (not `RollingUpdate`) to avoid two instances running simultaneously
 
 ---
@@ -1868,13 +1915,11 @@ _SECRET_PATTERNS = {
 }
 
 def _safe_log_exception(msg: str, e: Exception, include_traceback: bool = False) -> None:
-    safe_msg = str(e)
-    for secret_word, pattern in _SECRET_PATTERNS.items():
-        if secret_word == 'json_password':
-            safe_msg = pattern.sub(r'\1: "***"', safe_msg)
-        else:
-            safe_msg = pattern.sub(f'{secret_word}=***', safe_msg)
+    """Log exception without exposing secrets in messages or tracebacks."""
+    safe_msg = _sanitize_message(str(e))
     logging.error("%s: %s", msg, safe_msg)
+    if include_traceback:
+        logging.debug("Exception traceback:", exc_info=True)
 ```
 
 Credential sanitization covers both `key=value` and JSON `"key": "value"` formats.
@@ -1892,7 +1937,7 @@ Heartbeat packets are authenticated with HMAC-SHA256 (HBV2 protocol) to prevent 
 - The receiver tries both `hmac-key` (current) and `hmac-key-previous` (rotation) keys
 - Only HMAC-authenticated packets are accepted; unsigned packets are silently dropped
 
-Key rotation is triggered via annotation (`instanceha.openstack.org/rotate-hmac-key`). The controller copies current→previous, generates a new key, and removes the annotation.
+Key rotation is triggered via annotation (`instanceha.openstack.org/rotate-hmac-key`). The controller copies current->previous, generates a new key, and removes the annotation.
 
 ---
 
@@ -2220,27 +2265,28 @@ spec:
 
 ## Small Cluster Tuning
 
-InstanceHA works on clusters of any size, but the default safety thresholds are tuned for medium-to-large deployments. On clusters with 3–5 compute nodes, the percentage-based safety gates can block evacuation during legitimate multi-node failures because a small absolute number of failures translates to a large percentage.
+InstanceHA works on clusters of any size, but the default safety thresholds are tuned for medium-to-large deployments. On clusters with 3-5 compute nodes, the percentage-based safety gates can block evacuation during legitimate multi-node failures because a small absolute number of failures translates to a large percentage. See also [instanceha_guide.md -- Tuning by cluster size](instanceha_guide.md#tuning-by-cluster-size) for operator-facing tuning recommendations across all cluster sizes.
 
 ### Affected Safety Gates
 
 | Gate | Default | 3-node impact | 4-node impact |
 |------|---------|---------------|---------------|
-| **THRESHOLD** (global, `>`) | 50% | 2 failures = 66.7% → **blocked** | 2 failures = 50% → allowed (check is `>`, not `>=`) |
-| **HEARTBEAT_CLIFF_THRESHOLD** (`>=`) | 50% | 2 heartbeat losses = 66.7% → **cliff triggered** | 2 losses = 50% → **cliff triggered** (check is `>=`) |
+| **THRESHOLD** (global, `>`) | 50% | 2 failures = 66.7% -> **blocked** | 2 failures = 50% -> allowed (check is `>`, not `>=`) |
+| **HEARTBEAT_CLIFF_THRESHOLD** (`>=`) | 50% | 2 heartbeat losses = 66.7% -> **cliff triggered** | 2 losses = 50% -> **cliff triggered** (check is `>=`) |
+| **MAX_HOSTS_PER_CYCLE** | 10 | Not affected (absolute cap) | Not affected (absolute cap) |
 | **Per-aggregate threshold** | N/A (absolute count) | Not affected (uses absolute `instanceha:max_failures`) | Not affected |
 
 Single-node failures are handled correctly at any cluster size.
 
 ### Recommended Configuration
 
-For clusters with 3–5 compute nodes where simultaneous multi-node failures are a realistic scenario (not just network partitions):
+For clusters with 3-5 compute nodes where simultaneous multi-node failures are a realistic scenario (not just network partitions):
 
 ```yaml
 config:
-  THRESHOLD: 100              # Disable global threshold — trust fencing to proceed
+  THRESHOLD: 100              # Disable global threshold -- trust fencing to proceed
   CHECK_HEARTBEAT: true       # Enable heartbeat detection to distinguish host vs nova-compute failures
-  HEARTBEAT_CLIFF_THRESHOLD: 100  # Disable cliff detection — trust individual heartbeat status
+  HEARTBEAT_CLIFF_THRESHOLD: 100  # Disable cliff detection -- trust individual heartbeat status
 ```
 
 Setting `THRESHOLD: 100` disables the global percentage check entirely. This is safe because:
@@ -2266,7 +2312,7 @@ The default `THRESHOLD: 50` and `HEARTBEAT_CLIFF_THRESHOLD: 50` are deliberately
 
 ## Configuration Options Reference
 
-This section describes each configuration option in the `_config_map`, including its purpose, validation rules, usage in the codebase, and testing coverage.
+This section describes each configuration option in the `_config_map`, including its purpose, validation rules, usage in the codebase, and testing coverage. See [instanceha_guide.md -- Configuration Reference](instanceha_guide.md#configuration-reference) for a compact operator-facing table with all options, defaults, and valid ranges.
 
 ### Core Service Options
 
@@ -2304,7 +2350,7 @@ config:
 **Description**: Service staleness threshold. A compute service is considered stale (and eligible for evacuation) if its `updated_at` timestamp is older than `current_time - DELTA` seconds.
 
 **Usage**:
-- Used in main poll loop to calculate `target_date = datetime.utcnow() - timedelta(seconds=DELTA)`
+- Used in main poll loop to calculate `target_date = datetime.now(timezone.utc) - timedelta(seconds=DELTA)`
 - Services with `updated_at < target_date` are categorized as stale compute nodes
 - Works in conjunction with Nova service heartbeat mechanism
 
@@ -2362,7 +2408,7 @@ config:
 - Calculation depends on `TAGGED_AGGREGATES` setting:
   - When `TAGGED_AGGREGATES=false`: `(failed_hosts / active_hosts) * 100`
   - When `TAGGED_AGGREGATES=true`: `(failed_hosts / active_evacuable_hosts) * 100`
-- If threshold exceeded, evacuation is skipped and error logged
+- If percentage is strictly greater than threshold, evacuation is skipped and error logged
 
 **Behavior**:
 - **Without aggregate filtering** (`TAGGED_AGGREGATES=false`):
@@ -2504,7 +2550,7 @@ config:
   - Polls every 5 seconds until completion or timeout (300s)
   - Separate error budgets: migration errors (max 5) and API errors (max 10)
   - Migration failures trigger automatic re-issue (reset state + new evacuate call)
-  - Restores original VM state after success (`SHUTOFF` → stop, `ERROR` → reset_state)
+  - Restores original VM state after success (`SHUTOFF` -> stop, `ERROR` -> reset_state)
   - Updates service `disabled_reason` on success/failure
   - Uses thread pool (`WORKERS`) for concurrent tracking
 
@@ -2581,14 +2627,14 @@ openstack server set --property instanceha:restart_priority=100 web-server
 
 #### SKIP_SERVERS_WITH_NAME
 **Type**: List (of strings)
-**Default**: `""` (empty string — no servers skipped)
+**Default**: `""` (empty string -- no servers skipped)
 **Range**: N/A
 
 **Description**: List of glob patterns to exclude from evacuation. Any server whose name matches one of these patterns (using `fnmatch` glob syntax) is skipped during evacuation.
 
 **Usage**:
 - Evaluated in `_get_evacuable_servers()` before evacuability filtering
-- Uses glob matching (`fnmatch.fnmatch(server.name, pattern)`) — supports `*` (any chars), `?` (single char), `[seq]` (character set)
+- Uses glob matching (`fnmatch.fnmatch(server.name, pattern)`) -- supports `*` (any chars), `?` (single char), `[seq]` (character set)
 - Skipped servers are logged with their IDs for auditability
 
 **Behavior**:
@@ -2614,7 +2660,7 @@ This would skip servers named `test-vm-1`, `dev-instance-02`, etc.
 #### EVACUATION_RETRIES
 **Type**: Integer
 **Default**: `5`
-**Range**: 1–20
+**Range**: 1-20
 
 **Description**: Maximum number of times to retry a failed per-instance evacuation before giving up.
 
@@ -2665,11 +2711,11 @@ config:
 **Workflow**:
 ```
 1. compute-01 fails (in aggregate-A)
-2. Find reserved hosts in aggregate-A → reserved-01
+2. Find reserved hosts in aggregate-A -> reserved-01
 3. Enable reserved-01
 4. Evacuate VMs from compute-01
-   - If FORCE_RESERVED_HOST_EVACUATION=true → evacuate to reserved-01
-   - If FORCE_RESERVED_HOST_EVACUATION=false → scheduler chooses destination
+   - If FORCE_RESERVED_HOST_EVACUATION=true -> evacuate to reserved-01
+   - If FORCE_RESERVED_HOST_EVACUATION=false -> scheduler chooses destination
 ```
 
 ---
@@ -2838,7 +2884,7 @@ openstack aggregate set --property ha-enabled=true production-hosts
 **Behavior**:
 - Affects re-enable filtering in `_process_reenabling()`
 - When `true`: Services with "evacuation complete" marker are skipped during re-enable processing
-- When `false`: Services progress through re-enable workflow (unset force-down → wait for up → enable)
+- When `false`: Services progress through re-enable workflow (unset force-down -> wait for up -> enable)
 
 **Testing**:
 - Configuration feature tests verify re-enable filtering
@@ -2868,8 +2914,8 @@ config:
 - When `false`: Wait for all migrations to reach "completed" state before unsetting `forced_down`
 
 **Behavior**:
-- Normal workflow: Check migrations → wait for completion → unset force-down → wait for up → enable
-- With `FORCE_ENABLE=true`: Skip migration check → unset force-down → wait for up → enable
+- Normal workflow: Check migrations -> wait for completion -> unset force-down -> wait for up -> enable
+- With `FORCE_ENABLE=true`: Skip migration check -> unset force-down -> wait for up -> enable
 - Kdump delay still respected (60s wait after last kdump message)
 
 **Testing**:
@@ -2905,8 +2951,8 @@ config:
 - **Enabled**:
   - Start UDP listener on port 7410 (or `UDP_PORT` env var)
   - When host detected as down, wait up to `KDUMP_TIMEOUT` seconds for kdump message
-  - If message received: fence host → evacuate with `resume=True` (skip power-off)
-  - If timeout: proceed with normal evacuation (power off → evacuate)
+  - If message received: fence host -> evacuate with `resume=True` (skip power-off)
+  - If timeout: proceed with normal evacuation (power off -> evacuate)
 
 - **Disabled**:
   - No UDP listener thread
@@ -2957,7 +3003,7 @@ fence_kdump_args -p 7410
 - After timeout, proceed with normal evacuation
 
 **Behavior**:
-- Host detected as down → record timestamp
+- Host detected as down -> record timestamp
 - Each poll cycle: check if `current_time - detection_time > KDUMP_TIMEOUT`
 - If kdump message received before timeout: immediate evacuation with kdump marker
 - If timeout expires: normal evacuation workflow
@@ -2985,7 +3031,7 @@ POLL=45, KDUMP_TIMEOUT=300
 - Cycle 3 (t=90s):  Still waiting (90 < 300)
 - ...
 - Cycle 7 (t=270s): Still waiting (270 < 300)
-- Cycle 8 (t=315s): Timeout expired (315 > 300) → evacuate
+- Cycle 8 (t=315s): Timeout expired (315 > 300) -> evacuate
 ```
 
 **Notes**: Multiple poll cycles can occur during timeout period.
@@ -2999,7 +3045,7 @@ POLL=45, KDUMP_TIMEOUT=300
 **Default**: `false`
 **Range**: N/A
 
-**Description**: Enable heartbeat-based dual-channel failure detection. When enabled, compute nodes send periodic UDP heartbeat packets. If Nova reports a host as down but heartbeats are still arriving, the host OS is alive and only nova-compute has crashed — fencing is skipped.
+**Description**: Enable heartbeat-based dual-channel failure detection. When enabled, compute nodes send periodic UDP heartbeat packets. If Nova reports a host as down but heartbeats are still arriving, the host OS is alive and only nova-compute has crashed -- fencing is skipped.
 
 **Usage**:
 - Controls whether heartbeat UDP listener thread is started (port 7411)
@@ -3069,16 +3115,61 @@ config:
 
 **Behavior**:
 - If drop percentage >= `HEARTBEAT_CLIFF_THRESHOLD`: skip all fencing this cycle, emit `HeartbeatCliff` K8s event (Warning)
-- Baseline count is preserved during a cliff event, so the cliff re-triggers on subsequent cycles until heartbeats recover
-- When no cliff is detected, update `heartbeat_previous_active_count` for the next cycle
+- If the cliff persists for `HEARTBEAT_CLIFF_MAX_CYCLES` consecutive cycles, the baseline resets and fencing proceeds
+- When no cliff is detected, update `heartbeat_previous_active_count` and reset the consecutive cliff counter
 
-**Small Cluster Considerations**: On a 3-node cluster with all nodes sending heartbeats, losing 2 nodes simultaneously causes a 66.7% drop — exceeding the default 50% threshold. This blocks fencing for that cycle. If simultaneous multi-node failures are expected (not partitions), raise this value (e.g., `100` to disable cliff detection entirely). See [Small Cluster Tuning](#small-cluster-tuning).
+**Small Cluster Considerations**: On a 3-node cluster with all nodes sending heartbeats, losing 2 nodes simultaneously causes a 66.7% drop -- exceeding the default 50% threshold. This blocks fencing for that cycle. If simultaneous multi-node failures are expected (not partitions), raise this value (e.g., `100` to disable cliff detection entirely). See [Small Cluster Tuning](#small-cluster-tuning).
 
 **Example**:
 ```yaml
 config:
   CHECK_HEARTBEAT: true
   HEARTBEAT_CLIFF_THRESHOLD: 100  # Disable cliff detection (trust individual heartbeat status)
+```
+
+---
+
+#### HEARTBEAT_CLIFF_MAX_CYCLES
+**Type**: Integer
+**Default**: `3`
+**Range**: `1-20`
+
+**Description**: Number of consecutive cliff detection cycles before the agent accepts the current heartbeat state as genuine and proceeds with fencing. Prevents a sustained infrastructure failure (e.g., rack switch outage that kills both heartbeats and hosts) from permanently suppressing fencing.
+
+**Usage**:
+- Evaluated in `_filter_reachable_hosts()` when a cliff is detected
+- Increments `heartbeat_consecutive_cliff_cycles` on each cliff cycle
+- When the counter reaches `HEARTBEAT_CLIFF_MAX_CYCLES`, resets the baseline and cycle counter, emits a `HeartbeatCliffExpired` K8s event (Warning), and allows fencing to proceed
+
+**Safety dependency**: When the cliff expires, the `MAX_HOSTS_PER_CYCLE` rate limiter is the primary defense against fencing too many hosts at once if the expiry was triggered by a network partition rather than a genuine mass failure. These two settings are mutually dependent -- raising `MAX_HOSTS_PER_CYCLE` to a large value while using a low `HEARTBEAT_CLIFF_MAX_CYCLES` weakens the safety net. As a guideline, ensure `HEARTBEAT_CLIFF_MAX_CYCLES * POLL` exceeds the longest expected network reconvergence event in your environment (BGP: ~3 min, ToR switch reboot: ~5 min).
+
+**Interaction with per-host heartbeat filtering**: After cliff expiry, individual hosts whose last heartbeat is still within `HEARTBEAT_TIMEOUT` are still individually skipped. Cliff expiry resets the cliff gate but does not bypass per-host heartbeat checks -- this is intentional defense-in-depth.
+
+**Example**:
+```yaml
+config:
+  CHECK_HEARTBEAT: true
+  HEARTBEAT_CLIFF_MAX_CYCLES: 5  # Wait 5 cycles before accepting cliff as genuine
+```
+
+---
+
+#### MAX_HOSTS_PER_CYCLE
+**Type**: Integer
+**Default**: `10`
+**Range**: `1-100`
+
+**Description**: Maximum number of hosts that can be fenced in a single poll cycle. If more hosts are detected as down, the first `MAX_HOSTS_PER_CYCLE` are fenced and the rest are deferred to the next cycle. This bounds the blast radius of a single poll cycle -- a Nova API anomaly (conductor crash, stale data, Keystone token issue) cannot trigger mass fencing beyond this cap.
+
+**Usage**:
+- Applied in `_process_stale_services()` after all other safety gates (threshold, per-aggregate, heartbeat) have run
+- Deferred hosts are not lost -- they are re-evaluated on the next poll cycle
+- A `FencingRateLimited` K8s event (Warning) is emitted when the cap is hit
+
+**Example**:
+```yaml
+config:
+  MAX_HOSTS_PER_CYCLE: 5  # Conservative: fence at most 5 hosts per cycle
 ```
 
 ---
@@ -3188,7 +3279,7 @@ export SSL_KEY_PATH=/path/to/client-key.pem
 **Behavior**:
 - **IPMI**: Direct timeout for command execution
 - **Redfish**:
-  - Request timeout: `FENCING_TIMEOUT` (clamped to 5–300 seconds per request)
+  - Request timeout: `FENCING_TIMEOUT` (clamped to 5-300 seconds per request)
   - Retries on timeout or transient errors (max 3 attempts)
   - Total operation time: up to `3 * FENCING_TIMEOUT`
 - **BMH**:
@@ -3217,7 +3308,7 @@ timeout 60 ipmitool -I lanplus -H 192.168.1.10 ... power off
 
 *Redfish*:
 ```python
-# 3 retries × 20 second timeout = 60 seconds max
+# 3 retries x 20 second timeout = 60 seconds max
 requests.post(url, timeout=20)  # Retry up to 3 times
 ```
 
@@ -3246,9 +3337,9 @@ requests.post(url, timeout=20)  # Retry up to 3 times
 **Behavior**:
 - Health hash updated approximately every `HASH_INTERVAL` seconds
 - Hash exposed via HTTP health check server on port 8080:
-  - `GET /` — **Liveness probe**: returns 200 with current hash if `hash_update_successful`, 500 otherwise
-  - `GET /healthz` — **Readiness probe**: returns 200 if `ready` flag is set (after first successful poll), 503 otherwise
-  - `GET /metrics` — **Prometheus metrics**: returns all registered metrics in Prometheus text format
+  - `GET /` -- **Liveness probe**: returns 200 with current hash if `hash_update_successful`, 500 otherwise
+  - `GET /healthz` -- **Readiness probe**: returns 200 if `ready` flag is set (after first successful poll), 503 otherwise
+  - `GET /metrics` -- **Prometheus metrics**: returns all registered metrics in Prometheus text format
 - `hash_update_successful` flag indicates service liveness
 - `ready` flag set to `True` after first successful poll cycle completes
 - Hash updated at most once per `HASH_INTERVAL` seconds
@@ -3297,8 +3388,8 @@ config:
   - `test_ipv6_udp.py` (IPv6 UDP listener tests)
 - **Documentation**:
   - This file (instanceha_architecture.md)
-  - [instanceha_guide.md](instanceha_guide.md) — Operator deployment and configuration guide
-  - [instanceha_prometheus.md](instanceha_prometheus.md) — Prometheus monitoring, alerting, and dashboards
+  - [instanceha_guide.md](instanceha_guide.md) -- Operator deployment and configuration guide
+  - [instanceha_prometheus.md](instanceha_prometheus.md) -- Prometheus monitoring, alerting, and dashboards
 - **OpenStack API**: https://docs.openstack.org/api-ref/compute/
 - **Redfish**: https://www.dmtf.org/standards/redfish
 - **Metal3**: https://metal3.io/

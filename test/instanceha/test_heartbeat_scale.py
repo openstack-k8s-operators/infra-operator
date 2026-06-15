@@ -22,7 +22,7 @@ from collections import defaultdict
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -35,9 +35,7 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
     """Test UDP listener can handle 1000 nodes sending heartbeats."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.heartbeat_hosts_timestamp.clear()
         self.service.udp_ip = '127.0.0.1'
         self.service.heartbeat_hmac_keys = [_TEST_HMAC_KEY]
@@ -70,7 +68,7 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         def patched_listener():
             def on_start():
                 with self.service.heartbeat_lock:
-                    self.service.heartbeat_listener_start_time = time.time()
+                    self.service.heartbeat_listener_start_time = time.monotonic()
                 listener_started.set()
 
             hmac_keys = self.service.heartbeat_hmac_keys
@@ -84,7 +82,7 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=hmac_keys),
                 log_level=logging.DEBUG,
@@ -114,8 +112,8 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
             t.join(timeout=10)
 
         # Wait for listener to process all packets
-        deadline = time.time() + 10
-        while time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
             with self.service.heartbeat_lock:
                 count = len(self.service.heartbeat_hosts_timestamp)
             if count >= NODE_COUNT:
@@ -150,7 +148,7 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         def patched_listener():
             def on_start():
                 with self.service.heartbeat_lock:
-                    self.service.heartbeat_listener_start_time = time.time()
+                    self.service.heartbeat_listener_start_time = time.monotonic()
                 listener_started.set()
 
             hmac_keys = self.service.heartbeat_hmac_keys
@@ -164,7 +162,7 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=hmac_keys),
                 log_level=logging.DEBUG,
@@ -186,8 +184,8 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         finally:
             sock.close()
 
-        deadline = time.time() + 10
-        while time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
             with self.service.heartbeat_lock:
                 count = len(self.service.heartbeat_hosts_timestamp)
             if count >= NODE_COUNT:
@@ -209,11 +207,9 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
     """Test _filter_reachable_hosts performance at scale."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.heartbeat_hosts_timestamp.clear()
-        self.service.heartbeat_listener_start_time = time.time() - 300
+        self.service.heartbeat_listener_start_time = time.monotonic() - 300
 
     def _make_compute_svc(self, hostname):
         svc = Mock()
@@ -223,13 +219,13 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
     def test_1000_node_filter_performance(self):
         """Filter 10 down hosts against 1000-entry timestamp map in < 100ms."""
         for i in range(NODE_COUNT):
-            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.time() - 10
+            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.monotonic() - 10
 
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(10)]
 
-        start = time.time()
+        start = time.monotonic()
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, down_hosts)
-        elapsed_ms = (time.time() - start) * 1000
+        elapsed_ms = (time.monotonic() - start) * 1000
 
         self.assertEqual(len(skipped), 10)
         self.assertEqual(len(unreachable), 0)
@@ -240,9 +236,9 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
         """Worst case: all 1000 hosts are down with no heartbeats."""
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(NODE_COUNT)]
 
-        start = time.time()
+        start = time.monotonic()
         unreachable, skipped, _ = instanceha._filter_reachable_hosts(self.service, down_hosts)
-        elapsed_ms = (time.time() - start) * 1000
+        elapsed_ms = (time.monotonic() - start) * 1000
 
         self.assertEqual(len(unreachable), NODE_COUNT)
         self.assertEqual(len(skipped), 0)
@@ -252,10 +248,10 @@ class TestHeartbeatFilterPerformance(unittest.TestCase):
     def test_filter_mixed_1000_hosts(self):
         """500 hosts with recent heartbeats, 500 without."""
         for i in range(500):
-            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.time() - 10
+            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.monotonic() - 10
 
         for i in range(500, NODE_COUNT):
-            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.time() - 200
+            self.service.heartbeat_hosts_timestamp[f'compute-{i:04d}'] = time.monotonic() - 200
 
         down_hosts = [self._make_compute_svc(f'compute-{i:04d}') for i in range(NODE_COUNT)]
 
@@ -269,13 +265,11 @@ class TestHeartbeatCleanupAtScale(unittest.TestCase):
 
     def test_cleanup_above_threshold(self):
         """Populate entries exceeding threshold (half stale), verify cleanup works correctly."""
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.heartbeat_hosts_timestamp.clear()
 
-        now = time.time()
-        half = instanceha.HEARTBEAT_CLEANUP_THRESHOLD
+        now = time.monotonic()
+        half = instanceha.UDP_CLEANUP_THRESHOLD
 
         for i in range(half + 1):
             service.heartbeat_hosts_timestamp[f'stale-{i:04d}'] = now - 700  # Older than 600s cleanup age
@@ -284,12 +278,12 @@ class TestHeartbeatCleanupAtScale(unittest.TestCase):
             service.heartbeat_hosts_timestamp[f'fresh-{i:04d}'] = now - 10
 
         total = len(service.heartbeat_hosts_timestamp)
-        self.assertGreater(total, instanceha.HEARTBEAT_CLEANUP_THRESHOLD)
+        self.assertGreater(total, instanceha.UDP_CLEANUP_THRESHOLD)
 
         # Simulate the cleanup logic from _udp_listener
         with service.heartbeat_lock:
-            if len(service.heartbeat_hosts_timestamp) > instanceha.HEARTBEAT_CLEANUP_THRESHOLD:
-                cutoff = time.time() - instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS
+            if len(service.heartbeat_hosts_timestamp) > instanceha.UDP_CLEANUP_THRESHOLD:
+                cutoff = time.monotonic() - instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS
                 to_remove = [k for k, v in service.heartbeat_hosts_timestamp.items() if v < cutoff]
                 for k in to_remove:
                     del service.heartbeat_hosts_timestamp[k]
@@ -300,22 +294,20 @@ class TestHeartbeatCleanupAtScale(unittest.TestCase):
 
     def test_no_cleanup_below_threshold(self):
         """Verify no cleanup happens when below the threshold."""
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.heartbeat_hosts_timestamp.clear()
 
-        now = time.time()
-        count = instanceha.HEARTBEAT_CLEANUP_THRESHOLD - 1
+        now = time.monotonic()
+        count = instanceha.UDP_CLEANUP_THRESHOLD - 1
         for i in range(count):
             service.heartbeat_hosts_timestamp[f'stale-{i:04d}'] = now - 700
 
-        self.assertTrue(len(service.heartbeat_hosts_timestamp) <= instanceha.HEARTBEAT_CLEANUP_THRESHOLD)
+        self.assertTrue(len(service.heartbeat_hosts_timestamp) <= instanceha.UDP_CLEANUP_THRESHOLD)
 
         # Cleanup should NOT trigger
         with service.heartbeat_lock:
-            if len(service.heartbeat_hosts_timestamp) > instanceha.HEARTBEAT_CLEANUP_THRESHOLD:
-                cutoff = time.time() - instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS
+            if len(service.heartbeat_hosts_timestamp) > instanceha.UDP_CLEANUP_THRESHOLD:
+                cutoff = time.monotonic() - instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS
                 to_remove = [k for k, v in service.heartbeat_hosts_timestamp.items() if v < cutoff]
                 for k in to_remove:
                     del service.heartbeat_hosts_timestamp[k]
@@ -329,11 +321,9 @@ class TestConcurrentReadWriteAtScale(unittest.TestCase):
 
     def test_concurrent_writers_and_filter_readers(self):
         """1000 writer threads + 10 reader threads calling _filter_reachable_hosts."""
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.heartbeat_hosts_timestamp.clear()
-        service.heartbeat_listener_start_time = time.time() - 300
+        service.heartbeat_listener_start_time = time.monotonic() - 300
 
         errors = []
 
@@ -341,7 +331,7 @@ class TestConcurrentReadWriteAtScale(unittest.TestCase):
             try:
                 hostname = f'compute-{thread_id:04d}'
                 with service.heartbeat_lock:
-                    service.heartbeat_hosts_timestamp[hostname] = time.time()
+                    service.heartbeat_hosts_timestamp[hostname] = time.monotonic()
             except Exception as e:
                 errors.append(f'writer-{thread_id}: {e}')
 
@@ -372,9 +362,7 @@ class TestConcurrentReadWriteAtScale(unittest.TestCase):
 
     def test_sustained_write_throughput(self):
         """Simulate sustained heartbeat rate: 1000 nodes * 10 heartbeats each."""
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         service.heartbeat_hosts_timestamp.clear()
 
         errors = []
@@ -384,17 +372,17 @@ class TestConcurrentReadWriteAtScale(unittest.TestCase):
                 for iteration in range(10):
                     hostname = f'compute-{thread_id:04d}'
                     with service.heartbeat_lock:
-                        service.heartbeat_hosts_timestamp[hostname] = time.time()
+                        service.heartbeat_hosts_timestamp[hostname] = time.monotonic()
             except Exception as e:
                 errors.append(f'writer-{thread_id}: {e}')
 
-        start = time.time()
+        start = time.monotonic()
         threads = [threading.Thread(target=writer, args=(i,)) for i in range(NODE_COUNT)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=30)
-        elapsed = time.time() - start
+        elapsed = time.monotonic() - start
 
         self.assertEqual(errors, [])
         self.assertEqual(len(service.heartbeat_hosts_timestamp), NODE_COUNT)

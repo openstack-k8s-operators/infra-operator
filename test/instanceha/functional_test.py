@@ -537,7 +537,7 @@ class TestBasicEvacuation(BaseTestCase):
         failed_service = [s for s in services if s.host == 'compute-0' and s.state == 'down'][0]
 
         # Test evacuation process - mock ALL the functions that interact with external systems
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova) as mock_get_conn:
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova) as mock_get_conn:
             with patch('instanceha._host_fence', return_value=True) as mock_fence:
                 with patch('instanceha._host_disable', return_value=True) as mock_disable:
                     with patch('instanceha._manage_reserved_hosts', return_value=instanceha.ReservedHostResult(success=True, hostname=None)) as mock_reserved:
@@ -833,7 +833,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
                         f"Expected 20 evacuable failed computes, got {len(evacuable_computes)}")
 
         # Step 8: Test reserved host management
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             with patch('instanceha._host_fence', return_value=True):
                 with patch('instanceha._host_disable', return_value=True):
                     with patch('instanceha._host_evacuate', return_value=True):
@@ -858,7 +858,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         # Step 10: Test full evacuation process with mocked external calls
         evacuation_results = []
 
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             with patch('instanceha._host_fence', return_value=True) as mock_fence:
                 with patch('instanceha._host_disable', return_value=True) as mock_disable:
                     with patch('instanceha._host_evacuate', return_value=True) as mock_evacuate:
@@ -975,7 +975,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         reserved_services = [s for s in services if 'reserved' in str(s.disabled_reason)]
 
         # Test that reserved host management can find matching aggregate
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             with patch('instanceha._enable_matching_reserved_host', return_value=instanceha.ReservedHostResult(success=True, hostname='reserved-agg1-01')) as mock_enable:
                 result = instanceha._manage_reserved_hosts(
                     self.env.mock_nova, failed_service, reserved_services, self.env.service
@@ -1024,7 +1024,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
 
         # Test that reserved host management can find matching zone
         # Patch get_config_value to return False for TAGGED_AGGREGATES to force zone-based matching
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             original_get_config = self.env.service.config.get_config_value
             def mock_get_config(key):
                 if key == 'TAGGED_AGGREGATES':
@@ -1090,7 +1090,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         self.assertEqual(len(reserved_services), 2, "Should have 2 reserved hosts")
 
         # Test without mocking _enable_matching_reserved_host
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             result = instanceha._enable_matching_reserved_host(
                 self.env.mock_nova, failed_service, reserved_services,
                 self.env.service, instanceha.MatchType.AGGREGATE
@@ -1139,7 +1139,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         reserved_services = [s for s in services if 'reserved' in str(s.disabled_reason)]
 
         # Test without mocking
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             result = instanceha._enable_matching_reserved_host(
                 self.env.mock_nova, failed_service, reserved_services,
                 self.env.service, instanceha.MatchType.AGGREGATE
@@ -1194,7 +1194,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         reserved_services = [s for s in services if 'reserved' in str(s.disabled_reason)]
 
         # Test the full flow: manage reserved hosts + evacuation
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             # Manage reserved hosts (should enable the reserved host and return its name)
             result = instanceha._manage_reserved_hosts(
                 self.env.mock_nova, failed_service, reserved_services, self.env.service
@@ -1275,7 +1275,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         failed_service = [s for s in services if s.host == failed_host][0]
         reserved_services = [s for s in services if 'reserved' in str(s.disabled_reason)]
 
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             # Manage reserved hosts
             result = instanceha._manage_reserved_hosts(
                 self.env.mock_nova, failed_service, reserved_services, self.env.service
@@ -1336,7 +1336,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         failed_service = [s for s in services if s.host == failed_host][0]
         reserved_services = []  # No reserved hosts
 
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             # Manage reserved hosts (should return success=True, target_host=None)
             result = instanceha._manage_reserved_hosts(
                 self.env.mock_nova, failed_service, reserved_services, self.env.service
@@ -1400,7 +1400,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         reserved_services = [s for s in services if 'reserved' in str(s.disabled_reason)]
 
         # Mock fencing and recovery since we're testing evacuation specifically
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             with patch('instanceha._host_fence', return_value=True):
                 with patch('instanceha._post_evacuation_recovery', return_value=True):
                     # Spy on evacuate to verify forced targeting
@@ -1478,7 +1478,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
         migration_mock.status = 'completed'
         migration_mock.dest_host = reserved_host
 
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             # Setup migration list to return completed migration
             self.env.mock_nova.migrations.list = Mock(return_value=[migration_mock])
 
@@ -1579,7 +1579,7 @@ class TestLargeScaleEvacuableAggregates(BaseTestCase):
             # THRESHOLD PROTECTION ACTIVATED: {failure_percentage}% > {threshold}%
 
             # Verify no evacuation functions would be called
-            with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+            with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
                 with patch('instanceha._host_fence', return_value=True) as mock_fence:
                     with patch('instanceha._host_disable', return_value=True) as mock_disable:
                         with patch('instanceha._host_evacuate', return_value=True) as mock_evacuate:
@@ -1703,7 +1703,7 @@ class TestResumeEvacuation(BaseTestCase):
                         f"Expected 10 VMs to resume evacuation (2 hosts × 5 VMs), got {total_vms_to_resume}")
 
         # Step 5: Test the resume evacuation process by calling the real process_service
-        with patch('instanceha._get_nova_connection', return_value=self.env.mock_nova):
+        with patch('instanceha._establish_nova_connection', return_value=self.env.mock_nova):
             with patch('instanceha._host_fence', return_value=True) as mock_fence:
                 with patch('instanceha._host_disable', return_value=True) as mock_disable:
                     with patch('instanceha._host_evacuate', return_value=True) as mock_evacuate:
@@ -2419,7 +2419,7 @@ class TestFencingRaceCondition(BaseTestCase):
         filtered_hosts_before = [svc.host for svc in compute_nodes]
 
         # Call _process_stale_services (this should filter out the host being processed)
-        with patch('instanceha._get_nova_connection', return_value=mock_conn), \
+        with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True) as mock_process:
             instanceha._process_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),
@@ -2449,7 +2449,7 @@ class TestFencingRaceCondition(BaseTestCase):
         failed_service = Mock()
         failed_service.host = 'compute-0.example.com'
 
-        with patch('instanceha._get_nova_connection', return_value=Mock()), \
+        with patch('instanceha._establish_nova_connection', return_value=Mock()), \
              patch('instanceha._execute_step', return_value=True):
 
             # Call process_service
@@ -2485,7 +2485,7 @@ class TestFencingRaceCondition(BaseTestCase):
         mock_conn = Mock()
 
         # Call _process_stale_services which should trigger cleanup
-        with patch('instanceha._get_nova_connection', return_value=mock_conn), \
+        with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True):
             instanceha._process_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),
@@ -2520,9 +2520,10 @@ class TestFencingRaceCondition(BaseTestCase):
         # Mock connection
         from unittest.mock import Mock, patch
         mock_conn = Mock()
+        mock_conn.services.list.return_value = []
 
         # Call _process_stale_services
-        with patch('instanceha._get_nova_connection', return_value=mock_conn), \
+        with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True) as mock_process:
             instanceha._process_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),

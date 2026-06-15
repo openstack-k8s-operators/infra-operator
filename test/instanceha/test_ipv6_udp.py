@@ -21,7 +21,7 @@ from collections import defaultdict
 
 logging.getLogger().setLevel(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 logging.getLogger().setLevel(logging.CRITICAL)
@@ -87,9 +87,7 @@ class TestHeartbeatIPv6(unittest.TestCase):
     """Test heartbeat UDP listener receives packets over IPv6."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.heartbeat_hosts_timestamp.clear()
         self.service.heartbeat_listener_stop_event = threading.Event()
         self.service.udp_ip = '::1'
@@ -124,7 +122,7 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
@@ -166,7 +164,7 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
@@ -209,7 +207,7 @@ class TestHeartbeatIPv6(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
@@ -241,9 +239,7 @@ class TestKdumpIPv6(unittest.TestCase):
     """Test kdump UDP listener receives packets over IPv6."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 30
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.kdump_hosts_timestamp.clear()
         self.service.kdump_listener_stop_event = threading.Event()
         self.service.udp_ip = '::1'
@@ -280,7 +276,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
                 stop_event=self.service.kdump_listener_stop_event,
-                cleanup_threshold=instanceha.KDUMP_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.KDUMP_CLEANUP_AGE_SECONDS,
                 resolve_hostname=self._mock_resolve,
                 on_start=listener_started.set,
@@ -325,7 +321,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
                 stop_event=self.service.kdump_listener_stop_event,
-                cleanup_threshold=instanceha.KDUMP_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.KDUMP_CLEANUP_AGE_SECONDS,
                 resolve_hostname=counting_resolve,
                 on_start=listener_started.set,
@@ -366,7 +362,7 @@ class TestKdumpIPv6(unittest.TestCase):
                 lock=self.service.kdump_lock,
                 timestamps=self.service.kdump_hosts_timestamp,
                 stop_event=self.service.kdump_listener_stop_event,
-                cleanup_threshold=instanceha.KDUMP_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.KDUMP_CLEANUP_AGE_SECONDS,
                 resolve_hostname=self._mock_resolve,
                 on_start=listener_started.set,
@@ -397,9 +393,7 @@ class TestDualStackListener(unittest.TestCase):
     """Test that :: wildcard accepts both IPv4 and IPv6 packets."""
 
     def setUp(self):
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 120
-        self.service = instanceha.InstanceHAService(mock_config)
+        self.service = instanceha.InstanceHAService(make_mock_config())
         self.service.heartbeat_hosts_timestamp.clear()
         self.service.heartbeat_listener_stop_event = threading.Event()
         self.service.udp_ip = ''
@@ -430,7 +424,7 @@ class TestDualStackListener(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,
@@ -476,7 +470,7 @@ class TestDualStackListener(unittest.TestCase):
                 lock=self.service.heartbeat_lock,
                 timestamps=self.service.heartbeat_hosts_timestamp,
                 stop_event=self.service.heartbeat_listener_stop_event,
-                cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+                cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
                 cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
                 resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=self.service.heartbeat_hmac_keys),
                 log_level=logging.DEBUG,

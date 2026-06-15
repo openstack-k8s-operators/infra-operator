@@ -1,5 +1,7 @@
 # InstanceHA Application Credential Authentication
 
+> **Related docs**: [instanceha_guide.md -- Authentication](instanceha_guide.md#authentication) (quick setup) | [instanceha_architecture.md -- Authentication](instanceha_architecture.md#authentication) (internal design)
+
 By default InstanceHA authenticates to OpenStack using username/password
 credentials from `clouds.yaml` and `secure.yaml`. As an alternative you can
 use a **Keystone Application Credential**, which provides scoped, time-limited
@@ -10,10 +12,10 @@ access that can be rotated independently of the service user password.
 - A Keystone user with sufficient privileges to query and evacuate VMs
   (typically the `admin` role on the relevant project).
 - The `keystone-operator` deployed with `KeystoneApplicationCredential` CR support.
-- The `clouds.yaml` ConfigMap must still be present — InstanceHA reads
+- The `clouds.yaml` ConfigMap must still be present -- InstanceHA reads
   `auth_url` and `region_name` from it even when using Application Credentials.
 
-## Step 1 — Create a KeystoneApplicationCredential CR
+## Step 1 -- Create a KeystoneApplicationCredential CR
 
 Create a `KeystoneApplicationCredential` custom resource. The keystone-operator
 will create the credential in Keystone and store the resulting ID and secret in
@@ -86,7 +88,7 @@ oc get keystoneapplicationcredential ac-instanceha -o jsonpath='{.status.conditi
 oc get secret ac-instanceha-secret -o jsonpath='{.data}' | jq
 ```
 
-## Step 2 — Configure the InstanceHa CR
+## Step 2 -- Configure the InstanceHa CR
 
 Set `spec.auth.applicationCredentialSecret` to the name of the Secret created
 above:
@@ -117,7 +119,7 @@ The InstanceHA Python process detects `AC_ENABLED`, reads `AC_ID` and
 `v3applicationcredential` keystoneauth plugin. If the credential files are
 missing or empty it falls back to password authentication.
 
-## Step 3 — Verify
+## Step 3 -- Verify
 
 Check that the pod has the AC volume mounted:
 
@@ -165,7 +167,7 @@ InstanceHA needs to:
 | List/show images (Glance)         | `GET /v2/images`                       | `admin`      |
 
 If you omit `accessRules` from the `KeystoneApplicationCredential` spec, the
-credential inherits all permissions of its parent user — simpler but less
+credential inherits all permissions of its parent user -- simpler but less
 restrictive.
 
 ## Credential rotation

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 
@@ -118,6 +118,7 @@ class TestDisabledConfig(unittest.TestCase):
 
         services = [mock_failed_service, Mock(status='enabled', forced_down=False), Mock(status='enabled', forced_down=False)]
         compute_nodes = [mock_failed_service]
+        mock_conn.services.list.return_value = []
 
         with patch('instanceha._filter_processing_hosts', return_value=(compute_nodes, [], set(['test-host']), 0)):
             with patch('instanceha._prepare_evacuation_resources', return_value=(compute_nodes, [], [], [])):
@@ -141,10 +142,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_true_bypasses_migration_check(self):
         """Test that FORCE_ENABLE=True bypasses migration completion check."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(FORCE_ENABLE=True))
 
         mock_svc = Mock()
         mock_svc.host = 'test-host.example.com'
@@ -165,10 +163,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_false_waits_for_migrations(self):
         """Test that FORCE_ENABLE=False waits for migration completion."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': False}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         mock_svc = Mock()
         mock_svc.host = 'test-host.example.com'
@@ -189,10 +184,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_still_respects_kdump_delay(self):
         """Test that FORCE_ENABLE=True still respects kdump re-enable delay."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(FORCE_ENABLE=True))
         service.kdump_hosts_timestamp['test-host'] = __import__('time').time() - 30  # 30s ago (< 60s)
 
         mock_svc = Mock()
@@ -209,10 +201,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_with_completed_migrations(self):
         """Test that FORCE_ENABLE=True works normally when migrations are complete."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(FORCE_ENABLE=True))
 
         mock_svc = Mock()
         mock_svc.host = 'test-host.example.com'
@@ -232,10 +221,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_handles_forced_down_correctly(self):
         """Test that FORCE_ENABLE correctly handles forced_down hosts in two stages."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(FORCE_ENABLE=True))
 
         # Service is forced_down and disabled, but state is still down
         mock_svc = Mock()
@@ -253,10 +239,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_respects_service_state_down(self):
         """Test that FORCE_ENABLE still checks service state before enabling."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(FORCE_ENABLE=True))
 
         # Service is disabled but still down (not ready for enable)
         mock_svc = Mock()
@@ -274,10 +257,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_force_enable_with_error_migrations(self):
         """Test that FORCE_ENABLE ignores error state migrations."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': False}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         mock_svc = Mock()
         mock_svc.host = 'test-host.example.com'
@@ -302,10 +282,7 @@ class TestForceEnableConfig(unittest.TestCase):
     def test_migration_query_parameters(self):
         """Test that migration query uses correct parameters."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False, 'FORCE_ENABLE': False}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         mock_svc = Mock()
         mock_svc.host = 'test-host.example.com'
@@ -336,10 +313,7 @@ class TestLeaveDisabledConfig(unittest.TestCase):
     def test_leave_disabled_true_filters_instanceha_services(self):
         """Test that LEAVE_DISABLED=True filters instanceha-evacuated services from re-enable."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': True}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(LEAVE_DISABLED=True))
 
         # Service evacuated by instanceha
         instanceha_svc = Mock()
@@ -369,10 +343,7 @@ class TestLeaveDisabledConfig(unittest.TestCase):
     def test_leave_disabled_false_enables_all_services(self):
         """Test that LEAVE_DISABLED=False enables all services including instanceha-evacuated."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'LEAVE_DISABLED': False}.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Service evacuated by instanceha
         instanceha_svc = Mock()
@@ -399,9 +370,7 @@ class TestTaggedAggregatesConfig(unittest.TestCase):
         mock_conn = Mock()
 
         # Create real InstanceHAService instance for proper _is_resource_evacuable behavior
-        mock_config = Mock()
-        mock_config.get_config_value = Mock(side_effect=lambda key: {'EVACUABLE_TAG': 'evacuable'}.get(key, 'evacuable'))
-        mock_service = instanceha.InstanceHAService(mock_config)
+        mock_service = instanceha.InstanceHAService(make_mock_config())
 
         # Create aggregates - one evacuable, one not
         evacuable_agg = Mock()
@@ -481,14 +450,7 @@ class TestDelayConfig(unittest.TestCase):
         """Test that DELAY=0 does not delay evacuation."""
         import time
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'DELAY': 0,
-            'SMART_EVACUATION': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # Create a mock server to evacuate
         mock_server = Mock()
@@ -511,14 +473,7 @@ class TestDelayConfig(unittest.TestCase):
     def test_delay_non_zero_delays_evacuation(self):
         """Test that DELAY>0 delays evacuation by specified seconds."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'DELAY': 5,  # 5 second delay
-            'SMART_EVACUATION': False
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(DELAY=5))
 
         # Create a mock server to evacuate
         mock_server = Mock()
@@ -539,14 +494,7 @@ class TestDelayConfig(unittest.TestCase):
     def test_delay_with_smart_evacuation(self):
         """Test that DELAY works with SMART_EVACUATION enabled."""
         mock_conn = Mock()
-        mock_config = Mock()
-        config_values = {
-            'DELAY': 3,
-            'SMART_EVACUATION': True
-        }
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(DELAY=3, SMART_EVACUATION=True))
 
         # Create a mock server to evacuate
         mock_server = Mock()
@@ -566,18 +514,12 @@ class TestDelayConfig(unittest.TestCase):
 
     def test_delay_boundary_values(self):
         """Test DELAY boundary values (min=0, max=300)."""
-        mock_config = Mock()
-
         # Test minimum value
-        config_values = {'DELAY': 0}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 0))
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(DELAY=0))
         self.assertEqual(service.config.get_config_value('DELAY'), 0)
 
         # Test maximum value
-        config_values = {'DELAY': 300}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 0))
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(DELAY=300))
         self.assertEqual(service.config.get_config_value('DELAY'), 300)
 
 
@@ -586,11 +528,7 @@ class TestHashIntervalConfig(unittest.TestCase):
 
     def test_hash_interval_default_value(self):
         """Test that HASH_INTERVAL defaults to 60 seconds."""
-        mock_config = Mock()
-        # Simulate default behavior
-        mock_config.get_config_value = Mock(return_value=60)
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         hash_interval = service.config.get_config_value('HASH_INTERVAL')
 
         self.assertEqual(hash_interval, 60)
@@ -598,11 +536,7 @@ class TestHashIntervalConfig(unittest.TestCase):
     def test_hash_interval_prevents_frequent_updates(self):
         """Test that HASH_INTERVAL prevents hash updates too frequently."""
         import time
-        mock_config = Mock()
-        config_values = {'HASH_INTERVAL': 60}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 60))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # First hash update should succeed
         service.update_health_hash()
@@ -618,11 +552,7 @@ class TestHashIntervalConfig(unittest.TestCase):
 
     def test_hash_interval_allows_update_after_interval(self):
         """Test that hash updates after HASH_INTERVAL has elapsed."""
-        mock_config = Mock()
-        config_values = {'HASH_INTERVAL': 1}  # 1 second for testing
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 1))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(HASH_INTERVAL=1))
 
         # First hash update
         service.update_health_hash()
@@ -643,11 +573,7 @@ class TestHashIntervalConfig(unittest.TestCase):
 
     def test_hash_interval_custom_override(self):
         """Test that update_health_hash can override HASH_INTERVAL."""
-        mock_config = Mock()
-        config_values = {'HASH_INTERVAL': 60}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 60))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
 
         # First update with default interval (60s)
         service.update_health_hash()
@@ -664,27 +590,17 @@ class TestHashIntervalConfig(unittest.TestCase):
 
     def test_hash_interval_boundary_values(self):
         """Test HASH_INTERVAL boundary values (min=30, max=300)."""
-        mock_config = Mock()
-
         # Test minimum value
-        config_values = {'HASH_INTERVAL': 30}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(HASH_INTERVAL=30))
         self.assertEqual(service.config.get_config_value('HASH_INTERVAL'), 30)
 
         # Test maximum value
-        config_values = {'HASH_INTERVAL': 300}
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 30))
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(HASH_INTERVAL=300))
         self.assertEqual(service.config.get_config_value('HASH_INTERVAL'), 300)
 
     def test_hash_update_always_succeeds(self):
         """Test that hash update always succeeds (SHA-256 of timestamp is always unique)."""
-        mock_config = Mock()
-        config_values = {'HASH_INTERVAL': 0}  # Always allow updates
-        mock_config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, 0))
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config(HASH_INTERVAL=0))
 
         # First update
         service.update_health_hash()
@@ -704,40 +620,47 @@ class TestCriticalServicesCheck(unittest.TestCase):
     def test_all_schedulers_down(self):
         """Test that check fails when all schedulers are down."""
         mock_conn = Mock()
-        services = [
+        mock_conn.services.list.return_value = [
             Mock(binary='nova-scheduler', state='down', host='controller-1'),
             Mock(binary='nova-scheduler', state='down', host='controller-2'),
-            Mock(binary='nova-compute', state='down', host='compute-1')
         ]
-        compute_nodes = [services[2]]
 
-        can_evacuate, error_msg = instanceha._check_critical_services(services)
+        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn)
 
+        mock_conn.services.list.assert_called_once_with(binary="nova-scheduler")
         self.assertFalse(can_evacuate)
         self.assertIn('nova-scheduler', error_msg)
 
     def test_at_least_one_scheduler_up(self):
         """Test that check passes when at least one scheduler is up."""
-        services = [
+        mock_conn = Mock()
+        mock_conn.services.list.return_value = [
             Mock(binary='nova-scheduler', state='down', host='controller-1'),
             Mock(binary='nova-scheduler', state='up', host='controller-2'),
-            Mock(binary='nova-compute', state='down', host='compute-1')
         ]
 
-        can_evacuate, error_msg = instanceha._check_critical_services(services)
+        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn)
 
         self.assertTrue(can_evacuate)
         self.assertEqual(error_msg, "")
 
     def test_no_schedulers_defined(self):
         """Test when no schedulers are in services list."""
-        services = [
-            Mock(binary='nova-compute', state='down', host='compute-1')
-        ]
+        mock_conn = Mock()
+        mock_conn.services.list.return_value = []
 
-        can_evacuate, error_msg = instanceha._check_critical_services(services)
+        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn)
 
-        # Should allow evacuation if no schedulers are in the list
+        self.assertTrue(can_evacuate)
+        self.assertEqual(error_msg, "")
+
+    def test_query_failure_allows_evacuation(self):
+        """Test that Nova API failure is fail-open (allow evacuation)."""
+        mock_conn = Mock()
+        mock_conn.services.list.side_effect = Exception("connection refused")
+
+        can_evacuate, error_msg = instanceha._check_critical_services(mock_conn)
+
         self.assertTrue(can_evacuate)
         self.assertEqual(error_msg, "")
 

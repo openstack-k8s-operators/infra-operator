@@ -677,7 +677,7 @@ class TestIPMIFencing(unittest.TestCase):
         mock_run.assert_called_once()
 
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
+    @patch('instanceha._interruptible_sleep')
     def test_ipmi_retry_on_timeout(self, mock_sleep, mock_run):
         """Test IPMI retries on TimeoutExpired."""
         # Mock timeout then success
@@ -705,7 +705,7 @@ class TestIPMIFencing(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 2)  # Sleep between retries
 
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
+    @patch('instanceha._interruptible_sleep')
     def test_ipmi_retry_exhausted_timeout(self, mock_sleep, mock_run):
         """Test IPMI fails after max retries on TimeoutExpired."""
         # Mock always timing out
@@ -729,7 +729,7 @@ class TestIPMIFencing(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 2)
 
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
+    @patch('instanceha._interruptible_sleep')
     def test_ipmi_retry_on_called_process_error(self, mock_sleep, mock_run):
         """Test IPMI retries on CalledProcessError."""
         # Mock error then success
@@ -757,7 +757,7 @@ class TestIPMIFencing(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 2)
 
     @patch('instanceha.subprocess.run')
-    @patch('instanceha.time.sleep')
+    @patch('instanceha._interruptible_sleep')
     def test_ipmi_retry_exhausted_process_error(self, mock_sleep, mock_run):
         """Test IPMI fails after max retries on CalledProcessError."""
         # Mock always failing
@@ -1072,7 +1072,7 @@ class TestFencingRaceCondition(unittest.TestCase):
         failed_service = type('MockService', (), {'host': 'test-host.example.com'})()
 
         # Mock all dependencies to ensure success
-        with unittest.mock.patch('instanceha._get_nova_connection') as mock_conn, \
+        with unittest.mock.patch('instanceha._establish_nova_connection') as mock_conn, \
              unittest.mock.patch('instanceha._execute_step', return_value=True):
 
             # Call process_service
@@ -1091,7 +1091,7 @@ class TestFencingRaceCondition(unittest.TestCase):
         failed_service = type('MockService', (), {'host': 'test-host.example.com'})()
 
         # Mock dependencies to cause failure
-        with unittest.mock.patch('instanceha._get_nova_connection', return_value=None):
+        with unittest.mock.patch('instanceha._establish_nova_connection', return_value=None):
 
             # Call process_service (should fail due to no connection)
             result = instanceha.process_service(failed_service, [], False, self.service)
@@ -1125,6 +1125,7 @@ class TestFencingRaceCondition(unittest.TestCase):
 
         # Mock connection and services
         mock_conn = Mock()
+        mock_conn.services.list.return_value = []
         mock_services = [Mock(status='enabled', forced_down=False) for _ in range(10)]
 
         # Simulate filtering: hosts get filtered out (no servers)
@@ -1173,6 +1174,7 @@ class TestFencingRaceCondition(unittest.TestCase):
 
         # Mock services to simulate filtering that results in empty list
         mock_conn = Mock()
+        mock_conn.services.list.return_value = []
         mock_services = [Mock(status='enabled', forced_down=False) for _ in range(10)]
 
         # Simulate: host is marked, but then filtered out (e.g., no servers)

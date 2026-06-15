@@ -30,7 +30,7 @@ from io import StringIO
 # Suppress configuration warnings during testing
 logging.getLogger().setLevel(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 # Re-suppress logging after import (instanceha sets its own level)
@@ -50,10 +50,7 @@ class TestKdumpFunctionality(unittest.TestCase):
         self.mock_service.config.get_udp_port.return_value = 7410
 
         # Create a mock service for kdump testing with proper config
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 10  # KDUMP_TIMEOUT
-        mock_config.get_workers.return_value = 4
-        self.mock_service_instance = instanceha.InstanceHAService(mock_config)
+        self.mock_service_instance = instanceha.InstanceHAService(make_mock_config(KDUMP_TIMEOUT=10))
         self.mock_service_instance.kdump_hosts_timestamp.clear()
 
     def tearDown(self):
@@ -83,7 +80,7 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service1.host = 'compute-01.example.com'
 
         # Set recent kdump timestamp
-        self.mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.time() - 5
+        self.mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.monotonic() - 5
 
         to_evacuate, kdump_fenced = instanceha._check_kdump([mock_service1], self.mock_service_instance)
         self.assertEqual(len(to_evacuate), 0)  # Host should NOT be in to_evacuate (kdump-fenced separately)
@@ -123,13 +120,13 @@ class TestKdumpFunctionality(unittest.TestCase):
     def test_kdump_timestamp_cleanup(self):
         """Test automatic cleanup of old kdump timestamps."""
         # Add old timestamps
-        old_time = time.time() - 400  # Older than 300s cleanup threshold
+        old_time = time.monotonic() - 400  # Older than 300s cleanup threshold
         self.mock_service_instance.kdump_hosts_timestamp['old-host'] = old_time
-        self.mock_service_instance.kdump_hosts_timestamp['recent-host'] = time.time()
+        self.mock_service_instance.kdump_hosts_timestamp['recent-host'] = time.monotonic()
 
         # Simulate cleanup logic
         if len(self.mock_service_instance.kdump_hosts_timestamp) > 0:  # Simplified condition for test
-            cutoff = time.time() - 300
+            cutoff = time.monotonic() - 300
             old_keys = [k for k, v in self.mock_service_instance.kdump_hosts_timestamp.items() if v < cutoff]
             for k in old_keys:
                 del self.mock_service_instance.kdump_hosts_timestamp[k]
@@ -147,11 +144,11 @@ class TestKdumpFunctionality(unittest.TestCase):
         services = [mock_service1, mock_service2]
 
         # Create a service instance for this test
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config = self.mock_service.config
 
         # First host has kdump message, second does not
-        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.time() - 5
+        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.monotonic() - 5
 
         to_evacuate, kdump_fenced = instanceha._check_kdump(services, mock_service_instance)
 
@@ -169,11 +166,11 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service.host = 'compute-01.example.com'
 
         # Create a service instance for this test
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config = self.mock_service.config
 
         # Set checking timestamp beyond timeout (default 30s) - simulates waiting period expired
-        mock_service_instance.kdump_hosts_checking['compute-01'] = time.time() - 35
+        mock_service_instance.kdump_hosts_checking['compute-01'] = time.monotonic() - 35
 
         to_evacuate, kdump_fenced = instanceha._check_kdump([mock_service], mock_service_instance)
         self.assertEqual(len(to_evacuate), 1)  # Host should be evacuated (timeout expired, no kdump)
@@ -191,7 +188,7 @@ class TestKdumpFunctionality(unittest.TestCase):
 
         # Mark host as kdump fenced — power-on should be skipped
         # because the host is still dumping memory
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config.get_config_value.return_value = False
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 
@@ -210,7 +207,7 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service_obj.id = 'service-123'
         mock_service_obj.status = 'disabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config.get_config_value.return_value = False
 
         with patch('instanceha._host_fence', return_value=True) as mock_fence:
@@ -222,16 +219,16 @@ class TestKdumpFunctionality(unittest.TestCase):
 
     def test_kdump_fenced_hosts_cleanup_on_recovery(self):
         """Test that kdump_hosts_checking is cleaned up after recovery for kdump-fenced hosts."""
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config.get_config_value.return_value = False
 
         # Two kdump-fenced hosts; only compute-01 will be recovered
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
         mock_service_instance.kdump_fenced_hosts.add('compute-02')
-        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.time()
-        mock_service_instance.kdump_hosts_timestamp['compute-02'] = time.time()
-        mock_service_instance.kdump_hosts_checking['compute-01'] = time.time()
-        mock_service_instance.kdump_hosts_checking['compute-02'] = time.time()
+        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.monotonic()
+        mock_service_instance.kdump_hosts_timestamp['compute-02'] = time.monotonic()
+        mock_service_instance.kdump_hosts_checking['compute-01'] = time.monotonic()
+        mock_service_instance.kdump_hosts_checking['compute-02'] = time.monotonic()
 
         mock_conn = Mock()
         mock_service_obj = Mock()
@@ -253,7 +250,7 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service.id = 'service-123'
         mock_service.host = 'compute-01.example.com'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 
         result = instanceha._host_disable(mock_conn, mock_service, mock_service_instance)
@@ -267,14 +264,9 @@ class TestKdumpFunctionality(unittest.TestCase):
     def test_kdump_reenable_delay_recent_message(self):
         """Test that re-enablement is delayed when kdump messages are recent."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value.side_effect = lambda key: {
-            'LEAVE_DISABLED': False, 'FORCE_ENABLE': False,
-        }.get(key, Mock())
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         # 30s ago — under the 60s kdump cooldown threshold
-        service.kdump_hosts_timestamp['compute-01'] = time.time() - 30
+        service.kdump_hosts_timestamp['compute-01'] = time.monotonic() - 30
 
         mock_svc = Mock()
         mock_svc.host = 'compute-01.example.com'
@@ -293,14 +285,9 @@ class TestKdumpFunctionality(unittest.TestCase):
     def test_kdump_reenable_allowed_after_delay(self):
         """Test that re-enablement proceeds after 60s delay from last kdump message."""
         mock_conn = Mock()
-        mock_config = Mock()
-        mock_config.get_config_value.side_effect = lambda key: {
-            'LEAVE_DISABLED': False, 'FORCE_ENABLE': False,
-        }.get(key, Mock())
-
-        service = instanceha.InstanceHAService(mock_config)
+        service = instanceha.InstanceHAService(make_mock_config())
         # 65s ago — past the 60s kdump cooldown threshold
-        service.kdump_hosts_timestamp['compute-01'] = time.time() - 65
+        service.kdump_hosts_timestamp['compute-01'] = time.monotonic() - 65
 
         mock_svc = Mock()
         mock_svc.host = 'compute-01.example.com'
@@ -324,9 +311,9 @@ class TestKdumpFunctionality(unittest.TestCase):
         mock_service.host = 'compute-01.example.com'
         mock_service.disabled_reason = 'instanceha evacuation (kdump): 2025-01-01'
 
-        service_instance = instanceha.InstanceHAService(Mock())
+        service_instance = instanceha.InstanceHAService(make_mock_config())
         service_instance.kdump_fenced_hosts.add('compute-01')
-        service_instance.kdump_hosts_timestamp['compute-01'] = time.time()
+        service_instance.kdump_hosts_timestamp['compute-01'] = time.monotonic()
 
         result = instanceha._host_enable(mock_conn, mock_service, reenable=True, service=service_instance)
 
@@ -401,13 +388,10 @@ class TestKdumpIntegration(unittest.TestCase):
         services = [mock_service1, mock_service2]
 
         # Create a service instance for this test
-        mock_config = Mock()
-        mock_config.get_config_value.return_value = 10  # KDUMP_TIMEOUT
-        mock_config.get_workers.return_value = 4
-        mock_service_instance = instanceha.InstanceHAService(mock_config)
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config(KDUMP_TIMEOUT=10))
 
         # Simulate one host kdumping, one not
-        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.time() - 5
+        mock_service_instance.kdump_hosts_timestamp['compute-01'] = time.monotonic() - 5
 
         to_evacuate, kdump_fenced = instanceha._check_kdump(services, mock_service_instance)
 
@@ -421,11 +405,11 @@ class TestKdumpIntegration(unittest.TestCase):
         """Test thread safety of kdump operations."""
         # Simulate concurrent access to kdump_hosts_timestamp
         # Create a service instance for this test
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
 
         def update_timestamp(host_id):
             for i in range(10):
-                mock_service_instance.kdump_hosts_timestamp[f'host-{host_id}-{i}'] = time.time()
+                mock_service_instance.kdump_hosts_timestamp[f'host-{host_id}-{i}'] = time.monotonic()
 
         threads = []
         for i in range(3):
@@ -442,21 +426,21 @@ class TestKdumpIntegration(unittest.TestCase):
     def test_kdump_memory_management(self):
         """Test memory management and cleanup."""
         # Create a service instance for this test
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
 
         # Add many old entries
-        old_time = time.time() - 400
+        old_time = time.monotonic() - 400
         for i in range(150):
             mock_service_instance.kdump_hosts_timestamp[f'old-host-{i}'] = old_time
 
         # Add some recent entries
-        recent_time = time.time()
+        recent_time = time.monotonic()
         for i in range(10):
             mock_service_instance.kdump_hosts_timestamp[f'recent-host-{i}'] = recent_time
 
         # Simulate cleanup when > 100 entries
         if len(mock_service_instance.kdump_hosts_timestamp) > 100:
-            cutoff = time.time() - 300
+            cutoff = time.monotonic() - 300
             old_keys = [k for k, v in mock_service_instance.kdump_hosts_timestamp.items() if v < cutoff]
             for k in old_keys:
                 del mock_service_instance.kdump_hosts_timestamp[k]
@@ -473,10 +457,10 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.forced_down = False
         failed_service.status = 'enabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 
-        with unittest.mock.patch('instanceha._get_nova_connection') as mock_conn_func, \
+        with unittest.mock.patch('instanceha._establish_nova_connection') as mock_conn_func, \
              unittest.mock.patch('instanceha._host_fence') as mock_fence, \
              unittest.mock.patch('instanceha._host_disable') as mock_disable, \
              unittest.mock.patch('instanceha._manage_reserved_hosts', return_value=instanceha.ReservedHostResult(success=True, hostname=None)), \
@@ -506,9 +490,9 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.forced_down = True
         failed_service.status = 'disabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
 
-        with unittest.mock.patch('instanceha._get_nova_connection') as mock_conn_func, \
+        with unittest.mock.patch('instanceha._establish_nova_connection') as mock_conn_func, \
              unittest.mock.patch('instanceha._host_fence') as mock_fence, \
              unittest.mock.patch('instanceha._host_disable') as mock_disable, \
              unittest.mock.patch('instanceha._manage_reserved_hosts', return_value=instanceha.ReservedHostResult(success=True, hostname=None)), \
@@ -537,9 +521,9 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.forced_down = False
         failed_service.status = 'enabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
 
-        with unittest.mock.patch('instanceha._get_nova_connection') as mock_conn_func, \
+        with unittest.mock.patch('instanceha._establish_nova_connection') as mock_conn_func, \
              unittest.mock.patch('instanceha._host_fence') as mock_fence, \
              unittest.mock.patch('instanceha._host_disable') as mock_disable, \
              unittest.mock.patch('instanceha._manage_reserved_hosts', return_value=instanceha.ReservedHostResult(success=True, hostname=None)), \
@@ -570,9 +554,9 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.forced_down = True
         failed_service.status = 'enabled'  # Edge case: forced_down but not disabled
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
 
-        with unittest.mock.patch('instanceha._get_nova_connection') as mock_conn_func, \
+        with unittest.mock.patch('instanceha._establish_nova_connection') as mock_conn_func, \
              unittest.mock.patch('instanceha._host_disable') as mock_disable, \
              unittest.mock.patch('instanceha._manage_reserved_hosts', return_value=instanceha.ReservedHostResult(success=True, hostname=None)), \
              unittest.mock.patch('instanceha._host_evacuate', return_value=True), \
@@ -598,7 +582,7 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.id = 'service-123'
         failed_service.status = 'enabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config.get_config_value.return_value = False
 
         # Service status='enabled' simulates a stale cached object — the host was
@@ -625,7 +609,7 @@ class TestKdumpIntegration(unittest.TestCase):
         failed_service.id = 'service-123'
         failed_service.status = 'disabled'
 
-        mock_service_instance = instanceha.InstanceHAService(Mock())
+        mock_service_instance = instanceha.InstanceHAService(make_mock_config())
         mock_service_instance.config.get_config_value.return_value = False
         mock_service_instance.kdump_fenced_hosts.add('compute-01')
 

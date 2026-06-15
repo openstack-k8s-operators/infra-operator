@@ -1,8 +1,10 @@
 # InstanceHA Prometheus Monitoring Guide
 
+> **Related docs**: [instanceha_guide.md -- Prometheus Metrics](instanceha_guide.md#prometheus-metrics) (summary and auto-scraping) | [instanceha_architecture.md](instanceha_architecture.md) (internal design)
+
 ## Overview
 
-InstanceHA exposes Prometheus metrics at `:8080/metrics` on the workload pod, covering the full evacuation lifecycle: host failure detection, fencing, evacuation, recovery, and poll loop health. These metrics complement the Kubernetes Events emitted on the InstanceHa CR — events provide human-readable audit records, while metrics provide numeric time-series data suitable for dashboards, alerting, and capacity planning.
+InstanceHA exposes Prometheus metrics at `:8080/metrics` on the workload pod, covering the full evacuation lifecycle: host failure detection, fencing, evacuation, recovery, and poll loop health. These metrics complement the Kubernetes Events emitted on the InstanceHa CR -- events provide human-readable audit records, while metrics provide numeric time-series data suitable for dashboards, alerting, and capacity planning.
 
 The metrics are served by the `prometheus_client` Python library on the same HTTP server used for liveness and readiness probes. No sidecar or additional container is needed.
 
@@ -43,7 +45,7 @@ spec:
     secretName: my-custom-metrics-cert
 ```
 
-When the telemetry-operator is deployed, its `ScrapeConfig` automatically switches to `scheme: HTTPS` with the appropriate TLS configuration when `PrometheusTLS` is enabled — no manual changes are needed.
+When the telemetry-operator is deployed, its `ScrapeConfig` automatically switches to `scheme: HTTPS` with the appropriate TLS configuration when `PrometheusTLS` is enabled -- no manual changes are needed.
 
 ---
 
@@ -103,7 +105,7 @@ After applying the PodMonitor, verify that Prometheus has discovered the target:
 oc get podmonitor -n openstack instanceha-metrics
 
 # In the Prometheus UI (or via API), check the target is UP:
-# Targets page: Status → Targets → search for "instanceha"
+# Targets page: Status -> Targets -> search for "instanceha"
 
 # On OpenShift with user workload monitoring, query the user-workload Prometheus
 # (not the cluster Prometheus in openshift-monitoring):
@@ -148,15 +150,17 @@ Counters increase monotonically and reset to zero on pod restart.
 | `instanceha_evacuation_total` | `host`, `result` | Host-level evacuation operations. `result`: `started`, `succeeded`, `failed` |
 | `instanceha_instance_evacuation_total` | `host`, `result` | Per-instance evacuation operations (smart/orchestrated mode). `result`: `started`, `succeeded`, `failed` |
 | `instanceha_host_down_total` | `host` | Host-down detections (each poll cycle where a host is seen as down) |
-| `instanceha_host_reachable_total` | `host` | Hosts reported down by Nova but still reachable via heartbeat — fencing skipped |
+| `instanceha_host_reachable_total` | `host` | Hosts reported down by Nova but still reachable via heartbeat -- fencing skipped |
 | `instanceha_host_reenabled_total` | `host` | Hosts re-enabled after successful evacuation |
-| `instanceha_threshold_exceeded_total` | — | Evacuations skipped because the percentage of failed hosts exceeded the global threshold |
+| `instanceha_threshold_exceeded_total` | -- | Evacuations skipped because the percentage of failed hosts exceeded the global threshold |
 | `instanceha_aggregate_threshold_exceeded_total` | `aggregate` | Evacuations blocked for an aggregate due to per-aggregate `instanceha:max_failures` metadata threshold |
 | `instanceha_recovery_completed_total` | `host` | Full recovery workflows completed (fence + evacuate + recovery) |
 | `instanceha_processing_failed_total` | `host` | Unhandled exceptions during service processing |
-| `instanceha_orphaned_host_recovered_total` | — | Orphaned fenced hosts recovered during startup reconciliation |
+| `instanceha_orphaned_host_recovered_total` | -- | Orphaned fenced hosts recovered during startup reconciliation |
 | `instanceha_heartbeat_rejected_total` | `reason` | Heartbeat packets rejected. `reason`: `hmac_failed`, `timestamp_invalid` |
-| `instanceha_heartbeat_cliff_total` | — | Fencing skipped due to sudden heartbeat loss (possible network partition) |
+| `instanceha_heartbeat_cliff_total` | -- | Fencing skipped due to sudden heartbeat loss (possible network partition) |
+| `instanceha_fencing_rate_limited_total` | -- | Times fencing was capped by `MAX_HOSTS_PER_CYCLE` rate limit |
+| `instanceha_all_services_stale_total` | -- | Times fencing was skipped because all active services appeared stale |
 | `instanceha_poll_cycles_total` | `result` | Poll cycles executed. `result`: `success`, `error` |
 
 ### Gauges
@@ -174,6 +178,7 @@ Gauges represent current values that can go up or down.
 | Metric | Labels | Buckets (seconds) | Description |
 |--------|--------|-------------------|-------------|
 | `instanceha_instance_evacuation_duration_seconds` | `host` | 10, 30, 60, 120, 180, 300, 600 | Time from evacuation request to completion for individual instances |
+| `instanceha_poll_duration_seconds` | -- | 1, 5, 10, 30, 60, 120, 300 | Duration of each poll cycle |
 
 ---
 
@@ -254,7 +259,7 @@ spec:
               Evacuation has been blocked for hosts in this aggregate.
 
         # --- Critical: InstanceHA is down ---
-        # No successful poll cycles for 5 minutes — the agent is not functioning.
+        # No successful poll cycles for 5 minutes -- the agent is not functioning.
         - alert: InstanceHADown
           expr: rate(instanceha_poll_cycles_total{result="success"}[5m]) == 0
           for: 5m
@@ -296,14 +301,14 @@ spec:
               or insufficient capacity on target hosts.
 
         # --- Warning: K8s API unreachable (partition) ---
-        # The agent cannot reach the K8s API — fencing is blocked.
+        # The agent cannot reach the K8s API -- fencing is blocked.
         - alert: InstanceHAK8sPartition
           expr: instanceha_k8s_api_reachable == 0
           for: 1m
           labels:
             severity: warning
           annotations:
-            summary: "InstanceHA K8s API unreachable — possible network partition"
+            summary: "InstanceHA K8s API unreachable -- possible network partition"
             description: >-
               The InstanceHA pod cannot reach the Kubernetes API.
               Fencing is blocked to prevent split-brain evacuations.
@@ -317,7 +322,7 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: "Heartbeat cliff detected — possible network partition"
+            summary: "Heartbeat cliff detected -- possible network partition"
             description: >-
               InstanceHA detected a sudden drop in heartbeat hosts,
               suggesting the pod's network is partitioned rather than
@@ -348,7 +353,7 @@ oc apply -f instanceha-prometheusrule.yaml
 oc get prometheusrule -n openstack instanceha-alerts
 
 # Verify rules appear in Prometheus
-# Prometheus UI: Status → Rules → search for "instanceha"
+# Prometheus UI: Status -> Rules -> search for "instanceha"
 
 # Lint the rules file locally (optional)
 promtool check rules instanceha-prometheusrule.yaml
@@ -441,10 +446,13 @@ Expected output:
 # TYPE instanceha_orphaned_host_recovered_total counter
 # TYPE instanceha_heartbeat_rejected_total counter
 # TYPE instanceha_heartbeat_cliff_total counter
+# TYPE instanceha_fencing_rate_limited_total counter
+# TYPE instanceha_all_services_stale_total counter
 # TYPE instanceha_poll_consecutive_failures gauge
 # TYPE instanceha_hosts_processing gauge
 # TYPE instanceha_k8s_api_reachable gauge
 # TYPE instanceha_poll_cycles_total counter
+# TYPE instanceha_poll_duration_seconds histogram
 ```
 
 ### Test With Noop Fencing
@@ -513,7 +521,7 @@ To create this dashboard in Grafana:
 1. Create a new dashboard and add panels using the queries above.
 2. Set the data source to your Prometheus instance.
 3. Use `$namespace` as a template variable (filter: `label_values(instanceha_poll_cycles_total, namespace)`) to support multi-namespace deployments.
-4. Set the default time range to **Last 6 hours** — InstanceHA events are infrequent in healthy environments.
+4. Set the default time range to **Last 6 hours** -- InstanceHA events are infrequent in healthy environments.
 
 ---
 
@@ -545,7 +553,7 @@ time() - instanceha_poll_cycles_total{result="success"} @ end()
 
 ## Integration with telemetry-operator
 
-When the [telemetry-operator](https://github.com/openstack-k8s-operators/telemetry-operator) is deployed, it provisions a **separate Prometheus instance** via the Cluster Observability Operator (COO). This Prometheus is independent from OpenShift's built-in user workload monitoring — the two stacks coexist without conflict, but metrics live in different places:
+When the [telemetry-operator](https://github.com/openstack-k8s-operators/telemetry-operator) is deployed, it provisions a **separate Prometheus instance** via the Cluster Observability Operator (COO). This Prometheus is independent from OpenShift's built-in user workload monitoring -- the two stacks coexist without conflict, but metrics live in different places:
 
 | Stack | Prometheus instance | Query endpoint |
 |-------|-------------------|----------------|
@@ -554,7 +562,7 @@ When the [telemetry-operator](https://github.com/openstack-k8s-operators/telemet
 
 ### Automatic Discovery (default)
 
-The telemetry-operator **automatically discovers and scrapes InstanceHA metrics** — no manual configuration is required. The infra-operator creates a Kubernetes Service (`<instance-name>-metrics`) with the labels `metrics: enabled` and `service: instanceha`. The telemetry-operator's `MetricStorage` controller watches for Services with these labels and automatically generates a `ScrapeConfig` CR named `telemetry-instanceha` targeting port 8080.
+The telemetry-operator **automatically discovers and scrapes InstanceHA metrics** -- no manual configuration is required. The infra-operator creates a Kubernetes Service (`<instance-name>-metrics`) with the labels `metrics: enabled` and `service: instanceha`. The telemetry-operator's `MetricStorage` controller watches for Services with these labels and automatically generates a `ScrapeConfig` CR named `telemetry-instanceha` targeting port 8080.
 
 This works the same way as the OVN metrics integration. When a `MetricStorage` CR exists in the namespace:
 
@@ -588,14 +596,14 @@ spec:
 ### Which Approach to Use
 
 - **OpenShift user workload monitoring only** (no telemetry-operator): Use the PodMonitor approach from [Enabling Scraping](#enabling-scraping). This is simpler and uses automatic pod discovery.
-- **telemetry-operator deployed** (default): InstanceHA metrics are automatically scraped by the COO Prometheus alongside other OpenStack metrics (Ceilometer, RabbitMQ, node-exporter, OVN). No manual configuration needed. You can also deploy the PodMonitor simultaneously — it targets the OpenShift user workload Prometheus and does not conflict with the COO scrapeconfig.
+- **telemetry-operator deployed** (default): InstanceHA metrics are automatically scraped by the COO Prometheus alongside other OpenStack metrics (Ceilometer, RabbitMQ, node-exporter, OVN). No manual configuration needed. You can also deploy the PodMonitor simultaneously -- it targets the OpenShift user workload Prometheus and does not conflict with the COO scrapeconfig.
 - **Querying across both**: OpenShift's `thanos-querier` route aggregates the cluster and user workload Prometheus instances. The COO Prometheus is separate and must be queried directly at `metric-storage-prometheus.openstack.svc:9090`.
 
 ---
 
 ## References
 
-- [InstanceHA Operator Guide](instanceha_guide.md) — Full deployment and configuration reference
-- [InstanceHA Architecture](instanceha_architecture.md) — Internal architecture and event catalog
+- [InstanceHA Operator Guide](instanceha_guide.md) -- Full deployment and configuration reference
+- [InstanceHA Architecture](instanceha_architecture.md) -- Internal architecture and event catalog
 - [Prometheus Operator Documentation](https://prometheus-operator.dev/docs/getting-started/introduction/)
 - [PromQL Basics](https://prometheus.io/docs/prometheus/latest/querying/basics/)

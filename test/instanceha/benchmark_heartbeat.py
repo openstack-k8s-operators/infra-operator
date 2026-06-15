@@ -33,7 +33,7 @@ from unittest.mock import Mock
 import logging
 logging.disable(logging.CRITICAL)
 
-import conftest  # noqa: F401
+from conftest import make_mock_config  # noqa: F401
 import instanceha
 
 logging.disable(logging.CRITICAL)
@@ -53,9 +53,7 @@ def _find_free_port():
 
 
 def _make_service(heartbeat_timeout=120):
-    mock_config = Mock()
-    mock_config.get_config_value.return_value = heartbeat_timeout
-    service = instanceha.InstanceHAService(mock_config)
+    service = instanceha.InstanceHAService(make_mock_config(HEARTBEAT_TIMEOUT=heartbeat_timeout))
     service.heartbeat_hosts_timestamp.clear()
     service.udp_ip = '127.0.0.1'
     service.heartbeat_hmac_keys = [_TEST_HMAC_KEY]
@@ -105,7 +103,7 @@ def _start_listener(service, port):
             lock=service.heartbeat_lock,
             timestamps=service.heartbeat_hosts_timestamp,
             stop_event=service.heartbeat_listener_stop_event,
-            cleanup_threshold=instanceha.HEARTBEAT_CLEANUP_THRESHOLD,
+            cleanup_threshold=instanceha.UDP_CLEANUP_THRESHOLD,
             cleanup_age_seconds=instanceha.HEARTBEAT_CLEANUP_AGE_SECONDS,
             resolve_hostname=lambda data, addr, label: instanceha._resolve_hostname_packet(data, addr, label, hmac_keys=hmac_keys),
             on_start=on_start,
