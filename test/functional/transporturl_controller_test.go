@@ -1208,11 +1208,27 @@ var _ = Describe("TransportURL controller", func() {
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 
-			tuSpec := map[string]any{
-				"rabbitmqClusterName": rabbitmqName.Name,
-				"username":            "phase-user-a",
+			// Create TransportURL with a Nova ownerReference (EDPM service)
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      turlName.Name,
+					Namespace: turlName.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "nova.openstack.org/v1beta1",
+							Kind:       "Nova",
+							Name:       "nova",
+							UID:        "fake-nova-uid",
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "phase-user-a",
+				},
 			}
-			DeferCleanup(th.DeleteInstance, CreateTransportURL(turlName, tuSpec))
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
 
 			CreateNodeSet(nodesetName)
 			DeferCleanup(DeleteNodeSet, nodesetName)
@@ -1330,6 +1346,248 @@ var _ = Describe("TransportURL controller", func() {
 				rabbitmqv1.TransportURLReadyCondition,
 				corev1.ConditionTrue,
 			)
+		})
+	})
+
+	When("credential rotation for controlplane-only owner (non-EDPM)", func() {
+		var rabbitmqName types.NamespacedName
+		var turlName types.NamespacedName
+		var nodesetName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-cp-only",
+				Namespace: namespace,
+			}
+			turlName = types.NamespacedName{
+				Name:      "turl-cp-only",
+				Namespace: namespace,
+			}
+			nodesetName = types.NamespacedName{
+				Name:      "compute-cp-only",
+				Namespace: namespace,
+			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Create TransportURL with a non-EDPM ownerReference (simulating Cinder)
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      turlName.Name,
+					Namespace: turlName.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "cinder.openstack.org/v1beta1",
+							Kind:       "Cinder",
+							Name:       "cinder",
+							UID:        "fake-cinder-uid",
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "cp-only-user-a",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+
+			CreateNodeSet(nodesetName)
+			DeferCleanup(DeleteNodeSet, nodesetName)
+		})
+
+		It("should release old user immediately without waiting for NodeSet sync", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			userACRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "cp-only-user-a"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userACRName, "/")
+
+			transportURLSecretName := types.NamespacedName{
+				Name:      "rabbitmq-transport-url-" + turlName.Name,
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("cp-only-user-a"))
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, transportURLSecretName, s)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			initialHash := GetSecretHash(transportURLSecretName)
+			SetNodeSetSecretHashes(nodesetName, map[string]string{
+				transportURLSecretName.Name: initialHash,
+			})
+
+			// --- Trigger credential rotation ---
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				tr.Spec.Username = "cp-only-user-b"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			userBCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "cp-only-user-b"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userBCRName, "/")
+
+			// Old user should be released immediately — owner is Cinder
+			// (not in EDPMOwnerKinds), so no NodeSet sync needed
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userACRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"Old user should be deleted immediately for non-EDPM owner")
+			}, timeout, interval).Should(Succeed())
+
+			// Verify cleanup
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("annotation overrides owner-based EDPM detection", func() {
+		var rabbitmqName types.NamespacedName
+		var turlName types.NamespacedName
+		var nodesetName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-anno-override",
+				Namespace: namespace,
+			}
+			turlName = types.NamespacedName{
+				Name:      "turl-anno-override",
+				Namespace: namespace,
+			}
+			nodesetName = types.NamespacedName{
+				Name:      "compute-anno-override",
+				Namespace: namespace,
+			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Nova-owned TransportURL with edpm-service=false annotation override
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      turlName.Name,
+					Namespace: turlName.Namespace,
+					Annotations: map[string]string{
+						rabbitmqv1.EDPMServiceAnnotation: "false",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "nova.openstack.org/v1beta1",
+							Kind:       "Nova",
+							Name:       "nova",
+							UID:        "fake-nova-uid-2",
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "anno-user-a",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+
+			CreateNodeSet(nodesetName)
+			DeferCleanup(DeleteNodeSet, nodesetName)
+		})
+
+		It("should release immediately when annotation says false despite Nova owner", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			userACRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "anno-user-a"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userACRName, "/")
+
+			transportURLSecretName := types.NamespacedName{
+				Name:      "rabbitmq-transport-url-" + turlName.Name,
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("anno-user-a"))
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, transportURLSecretName, s)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			initialHash := GetSecretHash(transportURLSecretName)
+			SetNodeSetSecretHashes(nodesetName, map[string]string{
+				transportURLSecretName.Name: initialHash,
+			})
+
+			// Trigger credential rotation
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				tr.Spec.Username = "anno-user-b"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			userBCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "anno-user-b"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userBCRName, "/")
+
+			// Annotation override: despite Nova owner, edpm-service=false
+			// should cause immediate release
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				err := k8sClient.Get(ctx, userACRName, user)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue(),
+					"Annotation override should bypass owner-based EDPM detection")
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 

@@ -49,6 +49,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// PendingReleaseCheckInterval is the requeue interval while waiting for a
+// pending user release.
+const PendingReleaseCheckInterval = 1 * time.Minute
+
 // GetClient -
 func (r *TransportURLReconciler) GetClient() client.Client {
 	return r.Client
@@ -560,7 +564,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		if !released {
 			Log.Info("Pending user release waiting for deployment",
 				"pendingUser", instance.Status.PreviousRabbitmqUserRef)
-			return ctrl.Result{RequeueAfter: ConnectionCheckInterval}, nil
+			return ctrl.Result{RequeueAfter: PendingReleaseCheckInterval}, nil
 		}
 	}
 
@@ -887,6 +891,25 @@ func (r *TransportURLReconciler) deleteOrphanedCR(ctx context.Context, obj clien
 func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
 	Log := r.GetLogger(ctx)
 	pendingRef := instance.Status.PreviousRabbitmqUserRef
+
+	// Determine whether this TransportURL serves an EDPM-deployed service.
+	// Explicit annotation wins; otherwise infer from the ownerReference Kind.
+	edpmService := false
+	if v, ok := instance.Annotations[rabbitmqv1.EDPMServiceAnnotation]; ok {
+		edpmService = v == "true"
+	} else {
+		for _, ref := range instance.OwnerReferences {
+			if rabbitmqv1.IsEDPMOwnerKind(ref.Kind) {
+				edpmService = true
+				break
+			}
+		}
+	}
+	if !edpmService {
+		Log.Info("Non-EDPM service, releasing old user immediately",
+			"pendingUser", pendingRef)
+		return r.releasePendingUser(ctx, instance)
+	}
 
 	// No NodeSets with secretHashes -> no computes affected, release immediately
 	haveNS, err := edpm.HaveNodeSets(ctx, r.Client, instance.Namespace)
