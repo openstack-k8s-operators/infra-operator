@@ -55,10 +55,6 @@ const userFinalizer = "rabbitmquser.openstack.org/finalizer"
 // credentialSecretNameField is the field index for the credential secret
 const credentialSecretNameField = ".spec.secret"
 
-// ConnectionCheckInterval is the polling interval for pending user release checks
-// in the TransportURL controller, used as a fallback alongside the NodeSet watch.
-const ConnectionCheckInterval = 5 * time.Minute
-
 // generatePassword generates a random password
 func generatePassword(length int) (string, error) {
 	bytes := make([]byte, length)
