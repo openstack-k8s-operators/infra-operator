@@ -26,6 +26,7 @@ import (
 
 	//revive:disable-next-line:dot-imports
 	. "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1465,6 +1466,177 @@ var _ = Describe("TransportURL controller", func() {
 			Eventually(func(g Gomega) {
 				tr := th.GetTransportURL(turlName)
 				g.Expect(tr.Status.PreviousRabbitmqUserRef).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("credential rotation waits for owner readiness before releasing old user", func() {
+		var rabbitmqName types.NamespacedName
+		var turlName types.NamespacedName
+		var ownerName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-owner-ready",
+				Namespace: namespace,
+			}
+			turlName = types.NamespacedName{
+				Name:      "turl-owner-ready",
+				Namespace: namespace,
+			}
+			ownerName = types.NamespacedName{
+				Name:      "owner-deploy",
+				Namespace: namespace,
+			}
+
+			SetupMockRabbitMQAPI()
+			DeferCleanup(StopMockRabbitMQAPI)
+
+			CreateRabbitMQCluster(rabbitmqName, GetDefaultRabbitMQClusterSpec(false))
+			DeferCleanup(DeleteRabbitMQCluster, rabbitmqName)
+
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			// Use a Deployment as the owner: its CRD is built into K8s,
+			// has status.conditions + observedGeneration, and no
+			// Deployment controller runs in envtest.
+			ownerDeploy := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ownerName.Name,
+					Namespace: ownerName.Namespace,
+				},
+				Spec: appsv1.DeploymentSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "owner-test"},
+					},
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": "owner-test"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "noop",
+								Image: "busybox",
+							}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ownerDeploy)).Should(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, ownerDeploy)
+			})
+
+			tu := &rabbitmqv1.TransportURL{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      turlName.Name,
+					Namespace: turlName.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Name:       ownerDeploy.Name,
+							UID:        ownerDeploy.UID,
+							Controller: func() *bool { b := true; return &b }(),
+						},
+					},
+				},
+				Spec: rabbitmqv1.TransportURLSpec{
+					RabbitmqClusterName: rabbitmqName.Name,
+					Username:            "owner-ready-user-a",
+				},
+			}
+			Expect(k8sClient.Create(ctx, tu)).Should(Succeed())
+			DeferCleanup(th.DeleteInstance, tu)
+		})
+
+		It("should hold old user until owner becomes ready, then release", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			userACRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "owner-ready-user-a"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userACRName, "/")
+
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("owner-ready-user-a"))
+			}, timeout, interval).Should(Succeed())
+
+			// --- Trigger credential rotation ---
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				tr.Spec.Username = "owner-ready-user-b"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			userBCRName := types.NamespacedName{
+				Name:      rabbitmqv1.CanonicalUserName(rabbitmqName.Name, "/", "owner-ready-user-b"),
+				Namespace: namespace,
+			}
+			Eventually(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userBCRName, user)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQUserReady(userBCRName, "/")
+
+			// TransportURL should be ready with the new user
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.RabbitmqUsername).To(Equal("owner-ready-user-b"))
+			}, timeout, interval).Should(Succeed())
+
+			// Old user must NOT be released while owner is not ready
+			Consistently(func(g Gomega) {
+				user := &rabbitmqv1.RabbitMQUser{}
+				g.Expect(k8sClient.Get(ctx, userACRName, user)).Should(Succeed(),
+					"Old user must be kept while owner is not ready")
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).ToNot(BeEmpty(),
+					"PreviousRabbitmqUserRef should remain set while owner is not ready")
+			}, 5*time.Second, interval).Should(Succeed())
+
+			// Simulate owner becoming ready: set Ready condition and
+			// observedGeneration matching the current generation.
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, ownerName, dep)).Should(Succeed())
+				dep.Status.ObservedGeneration = dep.Generation
+				dep.Status.Conditions = []appsv1.DeploymentCondition{
+					{
+						Type:   "Ready",
+						Status: corev1.ConditionTrue,
+					},
+				}
+				g.Expect(k8sClient.Status().Update(ctx, dep)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Touch the TransportURL to trigger an immediate reconcile
+			// (the controller uses RequeueAfter so it won't notice the
+			// owner status change until the next requeue).
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				if tr.Labels == nil {
+					tr.Labels = map[string]string{}
+				}
+				tr.Labels["trigger-reconcile"] = "true"
+				g.Expect(k8sClient.Update(ctx, tr)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Now old user should be released
+			Eventually(func(g Gomega) {
+				tr := th.GetTransportURL(turlName)
+				g.Expect(tr.Status.PreviousRabbitmqUserRef).To(BeEmpty(),
+					"PreviousRabbitmqUserRef should be cleared after owner becomes ready")
 			}, timeout, interval).Should(Succeed())
 		})
 	})

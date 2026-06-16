@@ -71,8 +71,9 @@ func (r *TransportURLReconciler) GetScheme() *runtime.Scheme {
 // TransportURLReconciler reconciles a TransportURL object
 type TransportURLReconciler struct {
 	client.Client
-	Kclient kubernetes.Interface
-	Scheme  *runtime.Scheme
+	Kclient   kubernetes.Interface
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 }
 
 // GetLogger returns a logger object with a prefix of "controller.name" and additional controller context fields
@@ -728,6 +729,8 @@ var allWatchFields = []string{
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *TransportURLReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
+
 	// index caSecretName
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &rabbitmqv1.TransportURL{}, rabbitmqClusterNameField, func(rawObj client.Object) []string {
 		// Extract the secret name from the spec, if one is provided
@@ -876,8 +879,15 @@ func (r *TransportURLReconciler) deleteOrphanedCR(ctx context.Context, obj clien
 	return nil
 }
 
-// tryReleasePendingUser checks whether it is safe to release the pending old user
-// from a credential rotation. Uses a two-phase state machine:
+// tryReleasePendingUser checks whether it is safe to release the pending old
+// user from a credential rotation.
+//
+// The owner service must be ready (ReadyCondition=True, observedGeneration
+// matches generation) before we delete the old user, ensuring the owner has
+// consumed the new credentials and restarted its pods.
+//
+// For EDPM services, a two-phase NodeSet state machine is used on top of the
+// owner readiness check:
 //
 // Phase 1 (NodeSetSynced=""): wait for AreSecretHashesInSync to return false,
 // indicating service operators have regenerated config secrets with new
@@ -891,6 +901,16 @@ func (r *TransportURLReconciler) deleteOrphanedCR(ctx context.Context, obj clien
 func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
 	Log := r.GetLogger(ctx)
 	pendingRef := instance.Status.PreviousRabbitmqUserRef
+
+	ownerReady, err := object.IsOwnerReady(ctx, r.APIReader, Log, instance)
+	if err != nil {
+		return false, err
+	}
+	if !ownerReady {
+		Log.Info("Waiting for owner to be ready before releasing old user",
+			"pendingUser", pendingRef)
+		return false, nil
+	}
 
 	// Determine whether this TransportURL serves an EDPM-deployed service.
 	// Explicit annotation wins; otherwise infer from the ownerReference Kind.
@@ -906,7 +926,7 @@ func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, inst
 		}
 	}
 	if !edpmService {
-		Log.Info("Non-EDPM service, releasing old user immediately",
+		Log.Info("Non-EDPM service owner is ready, releasing old user",
 			"pendingUser", pendingRef)
 		return r.releasePendingUser(ctx, instance)
 	}
