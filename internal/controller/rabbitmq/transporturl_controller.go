@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,7 +87,6 @@ func (r *TransportURLReconciler) GetLogger(ctx context.Context) logr.Logger {
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqusers,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqvhosts,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=cinder.openstack.org;glance.openstack.org;heat.openstack.org;horizon.openstack.org;ironic.openstack.org;keystone.openstack.org;manila.openstack.org;neutron.openstack.org;nova.openstack.org;octavia.openstack.org;ovn.openstack.org;placement.openstack.org;swift.openstack.org;telemetry.openstack.org;designate.openstack.org;barbican.openstack.org;watcher.openstack.org,resources=*,verbs=get;list
 //+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete;
 //+kubebuilder:rbac:groups=dataplane.openstack.org,resources=openstackdataplanenodesets,verbs=get;list;watch
 
@@ -517,29 +517,77 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		}
 	}
 
-	// Create a new secret with the transport URL for this CR
-	secret := r.createTransportURLSecret(instance, finalUsername, finalPassword, hosts, string(port), vhostName, tlsEnabled, quorum)
-	_, op, err := oko_secret.CreateOrPatchSecret(ctx, helper, instance, secret)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.TransportURLReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			rabbitmqv1.TransportURLReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
+	// Create or update the transport URL secret.
+	// During credential rotation, create a new immutable secret so consumers
+	// can safely switch via the finalizer protocol. Otherwise patch the
+	// existing mutable secret.
+	if instance.Status.PreviousRabbitmqUserRef != "" && instance.Status.PreviousSecretName == "" {
+		// First reconcile after rotation detection: create new immutable secret
+		newSecret, hash, err := r.createImmutableTransportSecret(ctx, instance, finalUsername, finalPassword, hosts, string(port), vhostName, tlsEnabled, quorum)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.TransportURLReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.TransportURLReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		instance.Status.PreviousSecretName = instance.Status.SecretName
+		instance.Status.SecretName = newSecret.Name
+		instance.Status.SecretHash = hash
+		Log.Info("Created immutable transport secret for rotation",
+			"secret", newSecret.Name,
+			"previousSecret", instance.Status.PreviousSecretName)
+	} else if instance.Status.PreviousSecretName == "" {
+		// Normal path: create/patch mutable secret
+		secret := r.createTransportURLSecret(instance, finalUsername, finalPassword, hosts, string(port), vhostName, tlsEnabled, quorum)
+
+		// After credential rotation, SecretName points to an immutable secret
+		// with a content-hash suffix. If the transport URL data hasn't changed,
+		// keep the mutable secret up-to-date but don't flip SecretName back to
+		// the base name — consumers would interpret that as a second rotation.
+		skipSecretNameFlip := false
+		if instance.Status.SecretName != "" && instance.Status.SecretName != secret.Name {
+			newHash, err := oko_secret.Hash(secret)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to hash transport secret: %w", err)
+			}
+			if instance.Status.SecretHash == newHash {
+				skipSecretNameFlip = true
+			}
+		}
+
+		hash, op, err := oko_secret.CreateOrPatchSecret(ctx, helper, instance, secret)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.TransportURLReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				rabbitmqv1.TransportURLReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
+		if op != controllerutil.OperationResultNone {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				rabbitmqv1.TransportURLReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				rabbitmqv1.TransportURLReadyInitMessage))
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
+		if !skipSecretNameFlip {
+			if instance.Status.SecretName != "" && instance.Status.SecretName != secret.Name {
+				instance.Status.PreviousSecretName = instance.Status.SecretName
+			}
+			instance.Status.SecretName = secret.Name
+			instance.Status.SecretHash = hash
+		}
 	}
-	if op != controllerutil.OperationResultNone {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			rabbitmqv1.TransportURLReadyCondition,
-			condition.RequestedReason,
-			condition.SeverityInfo,
-			rabbitmqv1.TransportURLReadyInitMessage))
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
-	}
+	// else: rotation in progress, immutable secret already created — keep
+	// current status values and proceed to tryReleasePendingUser.
 
 	// Update the CR status with actual values used
-	instance.Status.SecretName = secret.Name
 	instance.Status.RabbitmqClusterName = instance.Spec.RabbitmqClusterName
 	instance.Status.RabbitmqUsername = finalUsername
 	instance.Status.RabbitmqVhost = vhostName
@@ -562,10 +610,34 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 			return ctrl.Result{}, err
 		}
 		if !released {
-			Log.Info("Pending user release waiting for deployment",
-				"pendingUser", instance.Status.PreviousRabbitmqUserRef)
+			Log.Info("Credential rotation in progress, old user retained until full NodeSet deployment completes",
+				"oldUser", instance.Status.PreviousRabbitmqUserRef,
+				"newUser", instance.Status.RabbitmqUserRef)
 			return ctrl.Result{RequeueAfter: PendingReleaseCheckInterval}, nil
 		}
+	}
+
+	// Clean up orphaned previous transport secrets that are no longer part of
+	// an active rotation (e.g., immutable secrets left behind after switching
+	// back to the standard mutable secret).
+	if instance.Status.PreviousSecretName != "" && instance.Status.PreviousRabbitmqUserRef == "" {
+		oldSecret := &corev1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      instance.Status.PreviousSecretName,
+			Namespace: instance.Namespace,
+		}, oldSecret)
+		if err != nil && !k8s_errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		if err == nil && rabbitmqv1.HasTransportConsumerFinalizer(oldSecret) {
+			Log.Info("Waiting for consumer to release previous transport secret",
+				"secret", instance.Status.PreviousSecretName)
+			return ctrl.Result{RequeueAfter: PendingReleaseCheckInterval}, nil
+		}
+		if err := r.cleanupOldTransportSecret(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
+		instance.Status.PreviousSecretName = ""
 	}
 
 	// Only TransportURLs with names >61 chars need a periodic requeue because
@@ -627,6 +699,85 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	}
 }
 
+// createImmutableTransportSecret creates a new immutable secret for credential
+// rotation. The secret name includes a content hash suffix so it is unique per
+// credential set. A protection finalizer is added atomically to prevent
+// premature deletion while the TransportURL still references it.
+func (r *TransportURLReconciler) createImmutableTransportSecret(
+	ctx context.Context,
+	instance *rabbitmqv1.TransportURL,
+	username string,
+	password string,
+	hosts []string,
+	port string,
+	vhost string,
+	tlsEnabled bool,
+	quorum bool,
+) (*corev1.Secret, string, error) {
+	template := r.createTransportURLSecret(instance, username, password, hosts, port, vhost, tlsEnabled, quorum)
+
+	contentHash, err := oko_secret.Hash(template)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to hash transport secret data: %w", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       fmt.Sprintf("rabbitmq-transport-url-%s-%s", instance.Name, contentHash[:8]),
+			Namespace:  instance.Namespace,
+			Finalizers: []string{rabbitmqv1.TransportSecretProtectionFinalizer},
+		},
+		Data:      template.Data,
+		Immutable: ptr.To(true),
+	}
+	if err := controllerutil.SetControllerReference(instance, secret, r.Scheme); err != nil {
+		return nil, "", fmt.Errorf("failed to set controller reference on transport secret: %w", err)
+	}
+
+	if err := r.Create(ctx, secret); err != nil {
+		if !k8s_errors.IsAlreadyExists(err) {
+			return nil, "", fmt.Errorf("failed to create immutable transport secret %s: %w", secret.Name, err)
+		}
+	}
+
+	return secret, contentHash, nil
+}
+
+// cleanupOldTransportSecret removes the protection finalizer from the previous
+// transport secret and deletes it. No-op if PreviousSecretName is empty or
+// the secret no longer exists.
+func (r *TransportURLReconciler) cleanupOldTransportSecret(ctx context.Context, instance *rabbitmqv1.TransportURL) error {
+	secretName := instance.Status.PreviousSecretName
+	if secretName == "" {
+		return nil
+	}
+	Log := r.GetLogger(ctx)
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: instance.Namespace}, secret); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get old transport secret %s: %w", secretName, err)
+	}
+
+	if controllerutil.RemoveFinalizer(secret, rabbitmqv1.TransportSecretProtectionFinalizer) {
+		if err := r.Update(ctx, secret); err != nil {
+			if k8s_errors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to remove protection finalizer from %s: %w", secretName, err)
+		}
+	}
+
+	Log.Info("Deleting old transport secret", "secret", secretName)
+	if err := r.Delete(ctx, secret); err != nil && !k8s_errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete old transport secret %s: %w", secretName, err)
+	}
+
+	return nil
+}
+
 // fields to index to reconcile when change
 const (
 	rabbitmqClusterNameField = ".spec.rabbitmqClusterName"
@@ -644,7 +795,11 @@ func (r *TransportURLReconciler) reconcileDelete(ctx context.Context, instance *
 		if err := r.releaseUserFinalizer(ctx, instance.Status.PreviousRabbitmqUserRef, instance.Namespace, perConsumerFinalizer); err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.cleanupOldTransportSecret(ctx, instance); err != nil {
+			return ctrl.Result{}, err
+		}
 		instance.Status.PreviousRabbitmqUserRef = ""
+		instance.Status.PreviousSecretName = ""
 		instance.Status.NodeSetSynced = ""
 	}
 
@@ -876,75 +1031,57 @@ func (r *TransportURLReconciler) deleteOrphanedCR(ctx context.Context, obj clien
 	return nil
 }
 
-// tryReleasePendingUser checks whether it is safe to release the pending old user
-// from a credential rotation. Uses a two-phase state machine:
+// tryReleasePendingUser checks whether it is safe to release the pending old
+// user from a credential rotation.
 //
-// Phase 1 (NodeSetSynced=""): wait for AreSecretHashesInSync to return false,
-// indicating service operators have regenerated config secrets with new
-// credentials (creating a hash mismatch against NodeSet secretHashes).
-//
-// Phase 2 (NodeSetSynced="false"): wait for AreSecretHashesInSync to return
-// true, indicating a NodeSet deployment has completed with the new config
-// secrets.
+// The flow is unified for all services:
+//  1. Wait for the consumer finalizer on the old transport secret to be
+//     removed, indicating the consuming service has completed its rollout
+//     with the new credentials.
+//  2. If NodeSets exist, check AreSecretHashesInSync. If hashes are out of
+//     sync, the regenerated config secret is tracked by the dataplane and a
+//     deployment is needed before the old user can be released. If hashes
+//     are in sync, the secret is either not tracked by the dataplane or the
+//     deployment has already completed.
 //
 // Returns (true, nil) if the user was released.
 func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
 	Log := r.GetLogger(ctx)
 	pendingRef := instance.Status.PreviousRabbitmqUserRef
 
-	// Determine whether this TransportURL serves an EDPM-deployed service.
-	// Explicit annotation wins; otherwise infer from the ownerReference Kind.
-	edpmService := false
-	if v, ok := instance.Annotations[rabbitmqv1.EDPMServiceAnnotation]; ok {
-		edpmService = v == "true"
-	} else {
-		for _, ref := range instance.OwnerReferences {
-			if rabbitmqv1.IsEDPMOwnerKind(ref.Kind) {
-				edpmService = true
-				break
-			}
+	if instance.Status.PreviousSecretName != "" {
+		oldSecret := &corev1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      instance.Status.PreviousSecretName,
+			Namespace: instance.Namespace,
+		}, oldSecret)
+		if err != nil && !k8s_errors.IsNotFound(err) {
+			return false, err
+		}
+		if err == nil && rabbitmqv1.HasTransportConsumerFinalizer(oldSecret) {
+			Log.Info("Waiting for consumer to release old transport secret",
+				"secret", instance.Status.PreviousSecretName,
+				"pendingUser", pendingRef)
+			return false, nil
 		}
 	}
-	if !edpmService {
-		Log.Info("Non-EDPM service, releasing old user immediately",
-			"pendingUser", pendingRef)
-		return r.releasePendingUser(ctx, instance)
-	}
 
-	// No NodeSets with secretHashes -> no computes affected, release immediately
 	haveNS, err := edpm.HaveNodeSets(ctx, r.Client, instance.Namespace)
 	if err != nil {
 		Log.Error(err, "Failed to check for nodesets")
 		return false, nil
 	}
-	if !haveNS {
-		return r.releasePendingUser(ctx, instance)
-	}
-
-	inSync, info, err := edpm.AreSecretHashesInSync(ctx, r.Client, instance.Namespace)
-	if err != nil {
-		Log.Error(err, "Failed to check nodeset sync status for pending release")
-		return false, nil
-	}
-
-	if instance.Status.NodeSetSynced != "false" {
-		// Phase 1: waiting for config secrets to go out of sync
-		if !inSync {
-			instance.Status.NodeSetSynced = "false"
-			Log.Info("Config regeneration detected, waiting for deployment to complete",
-				"pendingUser", pendingRef, "info", info)
-		} else {
-			Log.Info("Waiting for service operators to regenerate config",
-				"pendingUser", pendingRef)
+	if haveNS {
+		inSync, info, err := edpm.AreSecretHashesInSync(ctx, r.Client, instance.Namespace)
+		if err != nil {
+			Log.Error(err, "Failed to check nodeset sync status for pending release")
+			return false, nil
 		}
-		return false, nil
-	}
-
-	// Phase 2: waiting for deployment to complete
-	if !inSync {
-		Log.Info("Deployment in progress, waiting for completion",
-			"pendingUser", pendingRef, "info", info)
-		return false, nil
+		if !inSync {
+			Log.Info("Waiting for dataplane deployment to complete",
+				"pendingUser", pendingRef, "info", info)
+			return false, nil
+		}
 	}
 
 	return r.releasePendingUser(ctx, instance)
@@ -996,9 +1133,9 @@ func (r *TransportURLReconciler) releaseUserFinalizer(ctx context.Context, userR
 	return nil
 }
 
-// releasePendingUser removes the consumer finalizer from the pending user and
-// marks it as orphaned if no consumer finalizers remain.
-// Clears the pending release fields from status.
+// releasePendingUser removes the consumer finalizer from the pending user,
+// marks it as orphaned if no consumer finalizers remain, and cleans up the
+// old transport secret. Clears the pending release fields from status.
 func (r *TransportURLReconciler) releasePendingUser(ctx context.Context, instance *rabbitmqv1.TransportURL) (bool, error) {
 	Log := r.GetLogger(ctx)
 	pendingRef := instance.Status.PreviousRabbitmqUserRef
@@ -1010,7 +1147,12 @@ func (r *TransportURLReconciler) releasePendingUser(ctx context.Context, instanc
 		return false, err
 	}
 
+	if err := r.cleanupOldTransportSecret(ctx, instance); err != nil {
+		return false, err
+	}
+
 	instance.Status.PreviousRabbitmqUserRef = ""
+	instance.Status.PreviousSecretName = ""
 	instance.Status.NodeSetSynced = ""
 	return true, nil
 }
