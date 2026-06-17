@@ -62,27 +62,16 @@ const (
 	// completion, so the user controller can safely auto-delete the CR on sight.
 	RabbitMQUserOrphanedLabel = "rabbitmq.openstack.org/orphaned"
 
-	// EDPMServiceAnnotation overrides the automatic owner-based EDPM detection
-	// for a TransportURL. When set to "true", the controller always uses the
-	// two-phase NodeSet sync check. When "false", it releases the old user
-	// immediately. When unset, the controller infers EDPM status from the
-	// ownerReference Kind (Nova and NeutronAPI are EDPM; everything else is not).
-	EDPMServiceAnnotation = "rabbitmq.openstack.org/edpm-service"
+	// TransportSecretProtectionFinalizer prevents a transport URL secret from
+	// being deleted while it is referenced by a TransportURL (current or previous).
+	// Added atomically at secret creation; removed during cleanup.
+	TransportSecretProtectionFinalizer = "openstack.org/transport-secret-protection"
+
+	// TransportSecretConsumerSuffix is the suffix appended to the operator name
+	// to form the consumer finalizer on transport URL secrets.
+	// Example: "openstack.org/keystone-transport-consumer"
+	TransportSecretConsumerSuffix = "-transport-consumer"
 )
-
-// edpmOwnerKinds lists the owner CR Kinds whose TransportURLs serve
-// EDPM-deployed agents and therefore require NodeSet hash-sync gating
-// during credential rotation.
-var edpmOwnerKinds = map[string]bool{
-	"Nova":       true,
-	"NeutronAPI": true,
-}
-
-// IsEDPMOwnerKind reports whether the given owner Kind serves
-// EDPM-deployed agents that require NodeSet hash-sync gating.
-func IsEDPMOwnerKind(kind string) bool {
-	return edpmOwnerKinds[kind]
-}
 
 // TransportURLFinalizerFor returns the per-consumer finalizer for a TransportURL.
 // If the name fits within Kubernetes' 63-char name segment limit, it is used directly
