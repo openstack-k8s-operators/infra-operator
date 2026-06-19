@@ -95,3 +95,37 @@ func HasTransportConsumerFinalizer(secret *corev1.Secret) bool {
 func HasSpecificTransportConsumerFinalizer(secret *corev1.Secret, consumerFinalizer string) bool {
 	return controllerutil.ContainsFinalizer(secret, consumerFinalizer)
 }
+
+// FinalizeTransportSecretRotation handles the rotation guard for a single
+// transport URL secret. It detects whether rotation is in progress and:
+//   - If no rotation: returns currentSecretName (caller stores in status)
+//   - If rotation detected and guardReady is true: removes the consumer
+//     finalizer from the old secret and returns currentSecretName
+//   - If rotation detected and guardReady is false: returns
+//     statusSecretName unchanged (finalizer held, rotation pending)
+func FinalizeTransportSecretRotation(
+	ctx context.Context,
+	h *helper.Helper,
+	namespace string,
+	statusSecretName string,
+	currentSecretName string,
+	consumerFinalizer string,
+	guardReady bool,
+) (string, error) {
+	isRotation := statusSecretName != "" &&
+		statusSecretName != currentSecretName
+	if !isRotation {
+		return currentSecretName, nil
+	}
+
+	if !guardReady {
+		return statusSecretName, nil
+	}
+
+	if err := RemoveTransportSecretConsumerFinalizer(
+		ctx, h, namespace, statusSecretName, consumerFinalizer,
+	); err != nil {
+		return statusSecretName, err
+	}
+	return currentSecretName, nil
+}
