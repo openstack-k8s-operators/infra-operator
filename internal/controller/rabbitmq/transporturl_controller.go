@@ -630,7 +630,7 @@ func (r *TransportURLReconciler) reconcileNormal(ctx context.Context, instance *
 		if err != nil && !k8s_errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		if err == nil && rabbitmqv1.HasTransportConsumerFinalizer(oldSecret) {
+		if err == nil && hasTransportConsumerFinalizer(oldSecret) {
 			Log.Info("Waiting for consumer to release previous transport secret",
 				"secret", instance.Status.PreviousSecretName)
 			return ctrl.Result{RequeueAfter: PendingReleaseCheckInterval}, nil
@@ -1059,7 +1059,7 @@ func (r *TransportURLReconciler) tryReleasePendingUser(ctx context.Context, inst
 		if err != nil && !k8s_errors.IsNotFound(err) {
 			return false, err
 		}
-		if err == nil && rabbitmqv1.HasTransportConsumerFinalizer(oldSecret) {
+		if err == nil && hasTransportConsumerFinalizer(oldSecret) {
 			Log.Info("Waiting for consumer to release old transport secret",
 				"secret", instance.Status.PreviousSecretName,
 				"pendingUser", pendingRef)
@@ -1308,6 +1308,16 @@ func (r *TransportURLReconciler) deleteLegacyOwnedResources(ctx context.Context,
 	}
 
 	return nil
+}
+
+func hasTransportConsumerFinalizer(secret *corev1.Secret) bool {
+	for _, f := range secret.Finalizers {
+		if strings.HasSuffix(f, rabbitmqv1.TransportSecretConsumerSuffix) &&
+			strings.HasPrefix(f, "openstack.org/") {
+			return true
+		}
+	}
+	return false
 }
 
 // GetRabbitmqCluster - get RabbitMq object in namespace
