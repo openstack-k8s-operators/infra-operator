@@ -137,6 +137,20 @@ func buildOperatorDefaults(r *rabbitmqv1.RabbitMq, IPv6Enabled bool, configVersi
 		)
 	}
 
+	// Enable Continuous Membership Reconciliation (CMR) for multi-node clusters
+	// on RabbitMQ 4.x. CMR automatically grows quorum queues onto nodes that are
+	// missing from the membership, replacing the need for manual
+	// `rabbitmq-queues grow` calls after upgrades or rolling restarts.
+	// trigger_interval (10s) fires when a node joins, covering rolling restarts.
+	// interval (60min default) is a background safety net.
+	if IsVersion4OrLater(configVersion) && getReplicaCount(r) > 1 {
+		config = append(config,
+			"quorum_queue.continuous_membership_reconciliation.enabled            = true",
+			fmt.Sprintf("quorum_queue.continuous_membership_reconciliation.target_group_size = %d", getReplicaCount(r)),
+			"quorum_queue.continuous_membership_reconciliation.auto_remove        = false",
+		)
+	}
+
 	// Prometheus and management bind address
 	config = append(config, "prometheus.tcp.ip                          = ::")
 	config = append(config, "management.tcp.ip                          = ::")
