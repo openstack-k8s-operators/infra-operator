@@ -18,6 +18,7 @@ License: Apache 2.0
 import asyncio
 import argparse
 import logging
+import signal
 import struct
 import sys
 import ssl
@@ -909,14 +910,21 @@ async def main():
     # Start periodic stats
     stats_task = asyncio.create_task(periodic_stats(proxy, args.stats_interval))
 
+    # Handle SIGTERM (sent by kubelet) the same as SIGINT so the proxy
+    # shuts down gracefully instead of hanging until the
+    # terminationGracePeriodSeconds expires.
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, server.close)
+
     try:
         async with server:
             await server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down...")
     finally:
         stats_task.cancel()
         proxy.print_stats()
+        logger.info("Proxy stopped")
 
 
 if __name__ == '__main__':
