@@ -140,6 +140,16 @@ func (spec *RabbitMqSpecCore) Default(isNew bool) {
 		spec.QueueType = &queueType
 	}
 
+	// Migrate terminationGracePeriodSeconds from old default (604800) to new (60).
+	// The old value was inherited from rabbitmq-cluster-operator and causes pods
+	// to get stuck in Terminating state for up to a week.
+	oldGracePeriod := int64(604800)
+	newGracePeriod := int64(60)
+	if spec.TerminationGracePeriodSeconds != nil && *spec.TerminationGracePeriodSeconds == oldGracePeriod {
+		spec.TerminationGracePeriodSeconds = &newGracePeriod
+		rabbitmqlog.Info("Migrating terminationGracePeriodSeconds from old default 604800 to 60")
+	}
+
 	// Force Mirrored → Quorum when upgrading to RabbitMQ 4.x+.
 	// Mirrored queues are not supported in 4.x, so the migration is mandatory.
 	if spec.QueueType != nil && *spec.QueueType == QueueTypeMirrored &&
