@@ -1,8 +1,10 @@
 # infra-operator
-// TODO(user): Add simple overview of use/purpose
+
+A Kubernetes operator for managing OpenStack infrastructure components.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+The infra-operator manages essential infrastructure services for OpenStack deployments running on Kubernetes. It provides custom resource definitions (CRDs) and controllers for RabbitMQ messaging infrastructure, caching services (Memcached and Redis), network components (DNSMasq, IP management, BGP configuration), instance high availability, and topology management. Built using the Kubernetes operator pattern, it continuously reconciles the desired state of infrastructure resources to maintain a stable OpenStack environment.
 
 ## Getting Started
 You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
@@ -48,7 +50,7 @@ make undeploy
 This project aims to follow the Kubernetes [Operator pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
 
 It uses [Controllers](https://kubernetes.io/docs/concepts/architecture/controller/)
-which provides a reconcile function responsible for synchronizing resources untile the desired state is reached on the cluster
+which provides a reconcile function responsible for synchronizing resources until the desired state is reached on the cluster
 
 ### Test It Out
 1. Install the CRDs into the cluster:
