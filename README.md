@@ -4,7 +4,7 @@ A Kubernetes operator for managing OpenStack infrastructure components.
 
 ## Description
 
-The infra-operator manages essential infrastructure services for OpenStack deployments running on Kubernetes. It provides custom resource definitions (CRDs) and controllers for RabbitMQ messaging infrastructure, caching services (Memcached and Redis), network components (DNSMasq, IP management, BGP configuration), instance high availability, and topology management. Built using the Kubernetes operator pattern, it continuously reconciles the desired state of infrastructure resources to maintain a stable OpenStack environment.
+The infra-operator manages essential infrastructure services for OpenStack deployments running on Kubernetes. It provides custom resource definitions (CRDs) and controllers for RabbitMQ messaging infrastructure, caching services (Memcached and Redis), network components (DNSMasq, IP management, BGP configuration), instance high availability, and topology management. Built using the Kubernetes operator pattern, it continuously reconciles the desired state of infrastructure resources.
 
 ## Getting Started
 You’ll need a Kubernetes cluster to run against. You can use [KIND](https://sigs.k8s.io/kind) to get a local cluster for testing, or run against a remote cluster.
