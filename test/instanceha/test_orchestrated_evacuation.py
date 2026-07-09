@@ -206,7 +206,10 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         config = MagicMock()
         config.get_config_value.side_effect = lambda key: {
             'WORKERS': workers,
+            'EVACUATION_MAX_THREADS': 32,
             'EVACUATION_RETRIES': evacuation_retries,
+            'EVACUATION_STAGGER': 0,
+            'EVACUATION_TIMEOUT': 300,
             'ORCHESTRATED_RESTART': orchestrated,
         }.get(key, None)
         return config
@@ -329,7 +332,8 @@ class TestOrchestratedEvacuate(unittest.TestCase):
                                           target_host='reserved-01')
         mock_future.assert_called_once_with(conn, server, 'reserved-01',
                                                    max_retries=5,
-                                                   shutdown_event=service.shutdown_event)
+                                                   shutdown_event=service.shutdown_event,
+                                                   evacuation_timeout=300)
 
     @patch('instanceha._update_service_disable_reason')
     @patch('instanceha._server_evacuate_future')
@@ -343,6 +347,125 @@ class TestOrchestratedEvacuate(unittest.TestCase):
         result = instanceha._concurrent_evacuate(conn, [], service, 'host1', 'svc-1')
         self.assertTrue(result)
         mock_future.assert_not_called()
+
+
+# ============================================================================
+# EVACUATION_STAGGER tests
+# ============================================================================
+
+class TestEvacuationStagger(unittest.TestCase):
+    """Tests for non-zero EVACUATION_STAGGER behavior."""
+
+    def _make_config(self, stagger=0, workers=4, orchestrated=False):
+        config = MagicMock()
+        config.get_config_value.side_effect = lambda key: {
+            'WORKERS': workers,
+            'EVACUATION_MAX_THREADS': 32,
+            'EVACUATION_RETRIES': 5,
+            'EVACUATION_STAGGER': stagger,
+            'EVACUATION_TIMEOUT': 300,
+            'ORCHESTRATED_RESTART': orchestrated,
+        }.get(key, None)
+        return config
+
+    def _make_service(self, stagger=0, orchestrated=False):
+        service = MagicMock()
+        service.config = self._make_config(stagger=stagger, orchestrated=orchestrated)
+        return service
+
+    @patch('instanceha._update_service_disable_reason')
+    @patch('instanceha._server_evacuate_future')
+    def test_stagger_passed_to_run_concurrent(self, mock_future, mock_update):
+        """_concurrent_evacuate passes stagger to _run_concurrent."""
+        mock_future.return_value = True
+        servers = [_make_server(f's-{i}') for i in range(4)]
+        conn = MagicMock()
+        service = self._make_service(stagger=5)
+
+        with patch('instanceha._run_concurrent', return_value=True) as mock_run:
+            instanceha._concurrent_evacuate(conn, servers, service, 'host1', 'svc-1')
+            self.assertEqual(mock_run.call_args.kwargs['stagger'], 5)
+
+    @patch('instanceha._update_service_disable_reason')
+    @patch('instanceha._server_evacuate_future')
+    def test_stagger_timeout_includes_max_stagger(self, mock_future, mock_update):
+        """_run_concurrent timeout must include the stagger budget."""
+        mock_future.return_value = True
+        servers = [_make_server(f's-{i}') for i in range(4)]
+        conn = MagicMock()
+        service = self._make_service(stagger=10)
+
+        with patch('instanceha._run_concurrent', return_value=True) as mock_run:
+            instanceha._concurrent_evacuate(conn, servers, service, 'host1', 'svc-1')
+            timeout_arg = mock_run.call_args.kwargs.get('timeout',
+                          mock_run.call_args[1].get('timeout'))
+            # timeout = evacuation_timeout(300) + max_stagger(3*10=30) + 60 = 390
+            self.assertEqual(timeout_arg, 390)
+
+    @patch('instanceha._update_service_disable_reason')
+    @patch('instanceha._server_evacuate_future')
+    def test_stagger_zero_timeout_unchanged(self, mock_future, mock_update):
+        """With stagger=0, timeout is evacuation_timeout + 60 (no stagger budget)."""
+        mock_future.return_value = True
+        servers = [_make_server(f's-{i}') for i in range(4)]
+        conn = MagicMock()
+        service = self._make_service(stagger=0)
+
+        with patch('instanceha._run_concurrent', return_value=True) as mock_run:
+            instanceha._concurrent_evacuate(conn, servers, service, 'host1', 'svc-1')
+            timeout_arg = mock_run.call_args.kwargs.get('timeout',
+                          mock_run.call_args[1].get('timeout'))
+            self.assertEqual(timeout_arg, 360)
+
+    @patch('instanceha._update_service_disable_reason')
+    @patch('instanceha._server_evacuate_future')
+    @patch('instanceha._build_evacuation_groups')
+    def test_stagger_per_phase_in_orchestrated_mode(self, mock_groups, mock_future, mock_update):
+        """Each orchestrated phase passes stagger to _run_concurrent independently."""
+        mock_future.return_value = True
+        phase1 = [_make_server(f'db-{i}') for i in range(3)]
+        phase2 = [_make_server(f'app-{i}') for i in range(2)]
+        mock_groups.return_value = [phase1, phase2]
+        conn = MagicMock()
+        service = self._make_service(stagger=5, orchestrated=True)
+
+        with patch('instanceha._run_concurrent', return_value=True) as mock_run:
+            instanceha._concurrent_evacuate(conn, phase1 + phase2, service, 'host1', 'svc-1')
+            # Both phases should pass stagger=5
+            self.assertEqual(mock_run.call_count, 2)
+            for c in mock_run.call_args_list:
+                self.assertEqual(c.kwargs['stagger'], 5)
+
+    @patch('instanceha._interruptible_sleep')
+    def test_run_concurrent_staggers_submissions(self, mock_sleep):
+        """_run_concurrent with stagger > 0 sleeps between submissions."""
+        result = instanceha._run_concurrent(
+            lambda x: True, ['a', 'b', 'c'], 3, lambda x: x, stagger=5)
+        self.assertTrue(result)
+        # 2 sleeps: between a->b and b->c (not before a)
+        self.assertEqual(mock_sleep.call_count, 2)
+        for c in mock_sleep.call_args_list:
+            self.assertEqual(c, call(None, 5))
+
+    @patch('instanceha._interruptible_sleep')
+    def test_run_concurrent_no_stagger_no_sleep(self, mock_sleep):
+        """_run_concurrent with stagger=0 does not sleep between submissions."""
+        result = instanceha._run_concurrent(
+            lambda x: True, ['a', 'b', 'c'], 3, lambda x: x, stagger=0)
+        self.assertTrue(result)
+        mock_sleep.assert_not_called()
+
+    def test_run_concurrent_stagger_aborts_on_shutdown(self):
+        """_run_concurrent stops submitting when shutdown fires during stagger."""
+        import threading
+        shutdown = threading.Event()
+        shutdown.set()
+
+        result = instanceha._run_concurrent(
+            lambda x: True, ['a', 'b', 'c'], 3, lambda x: x,
+            stagger=5, shutdown_event=shutdown)
+        # First item submitted (no sleep), then shutdown detected before second
+        self.assertTrue(result)
 
 
 # ============================================================================
