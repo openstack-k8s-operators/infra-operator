@@ -61,6 +61,28 @@ class MockOpenStackEnvironment:
         self.services.append(service)
         return service
 
+    def add_incomplete_compute_service(self, host, state=None, status='UNKNOWN'):
+        """Add a compute service missing forced_down/disabled_reason attrs.
+
+        Simulates services returned by Nova that are not fully registered
+        (e.g. ID=None, Status=UNKNOWN, State=None). The real novaclient
+        raises AttributeError for attributes absent from the API response.
+        """
+
+        class IncompleteService:
+            pass
+
+        service = IncompleteService()
+        service.host = host
+        service.state = state
+        service.status = status
+        service.updated_at = None
+        service.id = None
+        service.binary = "nova-compute"
+
+        self.services.append(service)
+        return service
+
     def add_server(self, host, server_id, flavor_id=None, image_id=None, status='ACTIVE'):
         """Add a server to a specific host."""
         if host not in self.servers:
@@ -793,6 +815,125 @@ class TestPerformanceAndScaling(unittest.TestCase):
             self.assertLess(processing_time, 10.0)
 
 
+class TestIncompleteServiceHandling(unittest.TestCase):
+    """Test graceful handling of incomplete Nova service objects.
+
+    Nova can return compute services with UNKNOWN status, None state, and
+    missing attributes (forced_down, disabled_reason) when services are not
+    fully registered. The code must not crash on these.
+    """
+
+    def setUp(self):
+        self.mock_env = MockOpenStackEnvironment()
+        self.mock_config = make_mock_config(
+            TAGGED_IMAGES=False, TAGGED_FLAVORS=False,
+            TAGGED_AGGREGATES=False, RESERVED_HOSTS=False,
+            POLL=30,
+        )
+
+    def test_categorize_services_with_incomplete_service(self):
+        """Incomplete services should be silently skipped by categorization."""
+        target_date = datetime.now() - timedelta(seconds=60)
+
+        self.mock_env.add_incomplete_compute_service('compute-unknown-1')
+        self.mock_env.add_incomplete_compute_service('compute-unknown-2', state=None, status='UNKNOWN')
+        normal = self.mock_env.add_compute_service('compute-ok', state='up', status='enabled')
+
+        compute_nodes, to_resume, to_reenable = instanceha._categorize_services(
+            self.mock_env.services, target_date
+        )
+
+        compute_nodes = list(compute_nodes)
+        to_resume = list(to_resume)
+        to_reenable = list(to_reenable)
+
+        self.assertEqual(compute_nodes, [])
+        self.assertEqual(to_resume, [])
+        self.assertEqual(to_reenable, [])
+
+    def test_categorize_services_mixed_incomplete_and_normal(self):
+        """Incomplete services mixed with real ones must not break categorization."""
+        target_date = datetime.now() - timedelta(seconds=60)
+
+        self.mock_env.add_incomplete_compute_service('compute-unknown')
+        down_svc = self.mock_env.add_compute_service('compute-down', state='down', status='enabled')
+        self.mock_env.add_compute_service('compute-ok', state='up', status='enabled')
+
+        compute_nodes, to_resume, to_reenable = instanceha._categorize_services(
+            self.mock_env.services, target_date
+        )
+
+        compute_nodes = list(compute_nodes)
+        self.assertIn(down_svc, compute_nodes)
+        self.assertEqual(len(compute_nodes), 1)
+
+    def test_is_service_resume_candidate_incomplete_service(self):
+        """_is_service_resume_candidate should return False for incomplete services."""
+        svc = self.mock_env.add_incomplete_compute_service('compute-unknown')
+        self.assertFalse(instanceha._is_service_resume_candidate(svc))
+
+    def test_reconcile_orphaned_hosts_with_incomplete_services(self):
+        """_reconcile_orphaned_hosts must not crash on incomplete services."""
+        self.mock_env.add_incomplete_compute_service('compute-unknown-1')
+        self.mock_env.add_incomplete_compute_service('compute-unknown-2')
+
+        nova_client = self.mock_env.create_nova_client_mock()
+
+        instanceha._reconcile_orphaned_hosts(nova_client)
+
+        nova_client.services.disable_log_reason.assert_not_called()
+
+    def test_reconcile_orphaned_hosts_mixed_services(self):
+        """Reconciliation should process real orphans while skipping incomplete services."""
+        self.mock_env.add_incomplete_compute_service('compute-unknown')
+        orphan = self.mock_env.add_compute_service(
+            'compute-orphan', state='down', status='enabled', forced_down=True
+        )
+
+        nova_client = self.mock_env.create_nova_client_mock()
+
+        with patch('instanceha._emit_k8s_event'), \
+             patch('instanceha.ORPHANED_HOST_RECOVERED_TOTAL'):
+            instanceha._reconcile_orphaned_hosts(nova_client)
+
+        nova_client.services.disable_log_reason.assert_called_once()
+        call_args = nova_client.services.disable_log_reason.call_args
+        self.assertEqual(call_args[0][0], orphan.id)
+
+    def test_count_evacuable_hosts_with_incomplete_services(self):
+        """_count_evacuable_hosts should ignore incomplete services."""
+        self.mock_env.add_incomplete_compute_service('compute-unknown')
+        self.mock_env.add_compute_service('compute-ok-1', state='up', status='enabled')
+        self.mock_env.add_compute_service('compute-ok-2', state='up', status='enabled')
+
+        service = instanceha.InstanceHAService(self.mock_config, Mock())
+        nova_client = self.mock_env.create_nova_client_mock()
+
+        with patch('instanceha._get_evacuable_hosts_from_aggregates', return_value=None):
+            count = instanceha._count_evacuable_hosts(nova_client, service, self.mock_env.services)
+        self.assertEqual(count, 3)
+
+    def test_process_stale_services_with_incomplete_services(self):
+        """_process_stale_services should not crash when incomplete services are in the list."""
+        self.mock_env.add_incomplete_compute_service('compute-unknown')
+        self.mock_env.add_compute_service('compute-ok', state='up', status='enabled')
+
+        nova_client = self.mock_env.create_nova_client_mock()
+        service = instanceha.InstanceHAService(self.mock_config, nova_client)
+
+        target_date = datetime.now() - timedelta(seconds=60)
+        compute_nodes, to_resume, to_reenable = instanceha._categorize_services(
+            self.mock_env.services, target_date
+        )
+
+        with patch('instanceha.process_service') as mock_process:
+            instanceha._process_stale_services(
+                nova_client, service, self.mock_env.services,
+                compute_nodes, to_resume
+            )
+            mock_process.assert_not_called()
+
+
 class TestErrorHandlingAndRecovery(unittest.TestCase):
     """Test error handling and recovery scenarios."""
 
@@ -880,6 +1021,7 @@ if __name__ == '__main__':
         TestEvacuationWorkflow,
         TestReenablingWorkflow,
         TestPerformanceAndScaling,
+        TestIncompleteServiceHandling,
         TestErrorHandlingAndRecovery,
     ]
 

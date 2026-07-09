@@ -110,7 +110,7 @@ _config_map: Dict[str, ConfigItem] = {
     'DELTA': ConfigItem('int', 30, 10, 300),
     'POLL': ConfigItem('int', 45, 15, 600),
     'THRESHOLD': ConfigItem('int', 50, 0, 100),
-    'WORKERS': ConfigItem('int', 4, 1, 50),
+    'WORKERS': ConfigItem('int', 4, 1, 100),
     'DELAY': ConfigItem('int', 0, 0, 300),
     'LOGLEVEL': ConfigItem('str', 'INFO'),
     'SMART_EVACUATION': ConfigItem('bool', False),
@@ -131,10 +131,12 @@ _config_map: Dict[str, ConfigItem] = {
     'HASH_INTERVAL': ConfigItem('int', 60, 30, 300),
     'ORCHESTRATED_RESTART': ConfigItem('bool', False),
     'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
+    'EVACUATION_MAX_THREADS': ConfigItem('int', MAX_TOTAL_EVACUATION_THREADS, 1, 512),  # MAX_TOTAL_EVACUATION_THREADS = 32
     'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),  # DEFAULT_EVACUATION_RETRIES = 5
+    'EVACUATION_STAGGER': ConfigItem('int', 0, 0, 60),
     'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
     'HEARTBEAT_CLIFF_MAX_CYCLES': ConfigItem('int', 3, 1, 20),
-    'MAX_HOSTS_PER_CYCLE': ConfigItem('int', 10, 1, 100),
+    'MAX_HOSTS_PER_CYCLE': ConfigItem('int', 10, 1, 200),
     'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
 }
 ```
@@ -696,7 +698,7 @@ Poll cycle starts
   ├─ Gate 4: All-services-stale circuit breaker
   │   Question: "Is the data source itself broken?"
   │   If every active service (>=3) still appears stale after heartbeat filtering -> skip ALL fencing
-  │   Rationale: all hosts down at once is almost certainly a Nova API or
+  │   Rationale: all hosts down at once indicates a Nova API or
   │   infrastructure anomaly, not a genuine failure of every server.
   │   Runs after heartbeat filtering so heartbeat data can disambiguate partial
   │   failures (e.g., nova-compute crash) from Nova API issues
@@ -742,7 +744,7 @@ When `CHECK_HEARTBEAT=false`, gates 2 and 3 are not evaluated and gate 4 (all-se
 |------|-------------------|-----------|
 | K8s API (startup) | Fail-open (allow fencing) | No data yet -- blocking fencing on startup would silently prevent all evacuations until the health check thread runs |
 | K8s API (after 3 failures) | Fail-closed (block fencing) | Confirmed partition -- fencing would hit healthy hosts |
-| All-services-stale | Fail-closed (block fencing) | Every active host appearing stale at once is almost certainly a data-source anomaly, not genuine mass failure |
+| All-services-stale | Fail-closed (block fencing) | Every active host appearing stale at once indicates a data-source anomaly, not genuine mass failure |
 | Heartbeat (grace period) | Fail-open (allow fencing) | No heartbeat history in first `HEARTBEAT_TIMEOUT` seconds -- cannot distinguish "no heartbeat" from "never received one" |
 | Heartbeat (steady state) | Fail-open (allow fencing) | No heartbeat = host is down = proceed with fencing |
 | Cliff detection | Fail-closed (block fencing), expires after `HEARTBEAT_CLIFF_MAX_CYCLES` | Mass heartbeat loss is treated as observer failure; expiry prevents permanent paralysis |
@@ -1005,7 +1007,7 @@ def _server_evacuate_future(connection, server, target_host=None) -> bool:
 - Separate counters for migration errors (`EVACUATION_RETRIES`, default 5, configurable 1-20) and API errors (`MAX_API_RETRIES=10`)
 - API error counter resets on successful API call
 - On migration failure: resets server state to `error` and re-issues `_server_evacuate` (scheduler picks new target)
-- Hard timeout: `MAX_EVACUATION_TIMEOUT_SECONDS` (300s) via `time.monotonic()`
+- Hard timeout: `EVACUATION_TIMEOUT` (default 300s, configurable 60-3600) via `time.monotonic()`
 - Per-instance K8s events emitted: `InstanceEvacuationStarted`, `InstanceEvacuationSucceeded`, `InstanceEvacuationFailed`
 
 **Behavior**:
@@ -1015,7 +1017,7 @@ def _server_evacuate_future(connection, server, target_host=None) -> bool:
 - Target host retry: if evacuation to a specific host fails with 409/500, retries without target (scheduler picks)
 - Migration failures trigger automatic re-issue (reset state + new evacuate call)
 - API errors retried independently (budget of 10, not shared with migration errors)
-- Times out after 300 seconds
+- Times out after `EVACUATION_TIMEOUT` seconds (default 300, configurable)
 - Skips redundant state restore when Nova already preserved the original state after evacuation
 - Restores original VM state after successful evacuation only when needed (`SHUTOFF` -> stop, `ERROR` -> reset_state)
 - Unlocks the server in `finally` block (even on failure)
@@ -2303,7 +2305,7 @@ config:
 
 ### Why the Defaults Are Conservative
 
-The default `THRESHOLD: 50` and `HEARTBEAT_CLIFF_THRESHOLD: 50` are deliberately conservative because:
+The default `THRESHOLD: 50` and `HEARTBEAT_CLIFF_THRESHOLD: 50` are conservative because:
 - False positives (unnecessary fencing) are more dangerous than false negatives (delayed evacuation)
 - On larger clusters, losing >50% of nodes simultaneously almost always indicates a network partition, not real failures
 - Small clusters are the exception, not the rule, in production OpenStack deployments
@@ -2444,16 +2446,16 @@ config:
 #### WORKERS
 **Type**: Integer
 **Default**: `4`
-**Range**: `1-50`
+**Range**: `1-100`
 
 **Description**: Thread pool size for concurrent processing. Controls parallelism at two levels: host-level processing and per-host server evacuation.
 
 **Usage**:
 - **Host-level**: `_process_stale_services` uses `_run_concurrent` with `WORKERS` threads to process multiple failed hosts in parallel via `process_service`. This applies to all evacuation modes (traditional, smart, and orchestrated).
-- **Per-host (smart/orchestrated only)**: Within each host's evacuation, `_smart_evacuate` and `_orchestrated_evacuate` use `_run_concurrent` to evacuate multiple VMs concurrently. The per-host thread count is calculated as `MAX_TOTAL_EVACUATION_THREADS (32) // WORKERS` to cap the total system-wide thread count.
+- **Per-host (smart/orchestrated only)**: Within each host's evacuation, `_smart_evacuate` and `_orchestrated_evacuate` use `_run_concurrent` to evacuate multiple VMs concurrently. The per-host thread count is calculated as `EVACUATION_MAX_THREADS // WORKERS` to cap the total system-wide thread count.
 
 **Testing**:
-- Unit tests verify range validation (1-50)
+- Unit tests verify range validation (1-100)
 - Functional tests use custom values (6, 8) to test concurrent evacuations
 - Performance tests measure evacuation throughput with different worker counts
 - Test files: `test_instanceha.py:191`, functional tests
@@ -2464,7 +2466,7 @@ config:
   WORKERS: 8  # Process 8 hosts concurrently; each host gets up to 4 per-host threads (32/8)
 ```
 
-**Notes**: Applies to all evacuation modes at the host level. For smart/orchestrated mode, also controls per-host server concurrency (capped by `MAX_TOTAL_EVACUATION_THREADS=32`).
+**Notes**: Applies to all evacuation modes at the host level. For smart/orchestrated mode, also controls per-host server concurrency (capped by `EVACUATION_MAX_THREADS`, default 32).
 
 ---
 
@@ -2576,6 +2578,7 @@ config:
 **Notes**:
 - Smart mode increases API load (polling) and memory usage (thread pool)
 - Traditional mode does not track completion or verify success after submission
+- When `EVACUATION_STAGGER` > 0, each VM's evacuation start is delayed by `index * stagger` seconds within a phase, reducing control plane pressure during mass evacuation
 
 ---
 
@@ -2657,6 +2660,35 @@ This would skip servers named `test-vm-1`, `dev-instance-02`, etc.
 
 ---
 
+#### EVACUATION_MAX_THREADS
+**Type**: Integer
+**Default**: `32`
+**Range**: 1-512
+
+**Description**: Total evacuation thread budget shared across all concurrent host evacuations. The per-host evacuation concurrency is derived as `inner_workers = EVACUATION_MAX_THREADS / WORKERS`. Increase this to allow more concurrent per-host evacuations (faster recovery when a single host with many VMs fails); decrease to reduce control plane pressure.
+
+**Usage**:
+- Used in `_concurrent_evacuate()` to compute `inner_workers`: `max(1, EVACUATION_MAX_THREADS // WORKERS)`
+- Only affects smart evacuation (`SMART_EVACUATION=true`) and orchestrated evacuation (`ORCHESTRATED_RESTART=true`)
+- Traditional (fire-and-forget) evacuation is single-threaded and not affected
+
+**Per-host concurrency examples**:
+
+| WORKERS | EVACUATION_MAX_THREADS | inner_workers (per host) |
+|---------|----------------------|--------------------------|
+| 4       | 32 (default)          | 8                        |
+| 10      | 32 (default)          | 3                        |
+| 10      | 100                   | 10                       |
+| 4       | 64                    | 16                       |
+
+**Example**:
+```yaml
+config:
+  EVACUATION_MAX_THREADS: 100  # With WORKERS=10, gives 10 concurrent evacuations per host
+```
+
+---
+
 #### EVACUATION_RETRIES
 **Type**: Integer
 **Default**: `5`
@@ -2667,12 +2699,56 @@ This would skip servers named `test-vm-1`, `dev-instance-02`, etc.
 **Usage**:
 - Used in `_monitor_evacuation()` to cap migration-error retries
 - On each failure the server state is reset to `error` and evacuation is re-issued
-- Does not affect API-error retries (`MAX_API_RETRIES`) or the overall evacuation timeout (`MAX_EVACUATION_TIMEOUT_SECONDS`)
+- Does not affect API-error retries (`MAX_API_RETRIES`) or the overall evacuation timeout (`EVACUATION_TIMEOUT`)
 
 **Example**:
 ```yaml
 config:
   EVACUATION_RETRIES: 10
+```
+
+---
+
+#### EVACUATION_TIMEOUT
+**Type**: Integer (seconds)
+**Default**: `300`
+**Range**: 60-3600
+
+**Description**: Maximum wall-clock time (in seconds) to monitor a single instance evacuation before giving up. Increase this for environments with large VMs or slow storage backends where evacuations routinely exceed 5 minutes.
+
+**Usage**:
+- Used in `_monitor_evacuation()` as the hard per-instance timeout
+- The Nova migrations query window is automatically derived from this value to ensure in-progress migrations remain visible
+- Also governs the thread-pool future timeout (adds 60s padding) and host-processing staleness tracking
+
+**Example**:
+```yaml
+config:
+  EVACUATION_TIMEOUT: 900
+```
+
+---
+
+#### EVACUATION_STAGGER
+**Type**: Integer (seconds)
+**Default**: `0`
+**Range**: 0-60
+
+**Description**: Seconds of delay between each VM's evacuation start within a concurrent evacuation phase. VM 0 starts immediately, VM 1 waits `1 * stagger` seconds, VM 2 waits `2 * stagger` seconds, and so on. Default 0 starts all VMs immediately (existing behavior).
+
+**Usage**:
+- Applied in `_run_concurrent()`: submissions to the thread pool are staggered with `_interruptible_sleep` between each `executor.submit()` call, respecting shutdown signals
+- Applies per-phase: in orchestrated mode, each phase's VMs are staggered independently starting from 0
+- Does not affect the overall `EVACUATION_TIMEOUT` — the timeout starts when the VM's evacuation begins, not when it is queued
+
+**Motivation**: When many VMs are evacuated concurrently from a single failed host, the burst of parallel API calls (Nova evacuate, Cinder volume attach/detach, Neutron port binding) can saturate the control plane, causing timeouts and failed evacuations. Staggering the submissions spreads the load over time.
+
+**Example**:
+```yaml
+config:
+  SMART_EVACUATION: true
+  WORKERS: 8
+  EVACUATION_STAGGER: 2   # 2s between each VM -- 30 VMs spread over 60s
 ```
 
 ---
@@ -2685,7 +2761,7 @@ config:
 **Description**: Enable automatic management of reserved compute hosts.
 
 **Usage**:
-- Controls whether `_manage_reserved_hosts()` is called during evacuation
+- Controls whether `_manage_reserved_hosts()` is called during recovery (before evacuation)
 - Works with `FORCE_RESERVED_HOST_EVACUATION` to determine evacuation target
 
 **Behavior**:
@@ -2828,7 +2904,7 @@ openstack flavor set --property ha-enabled=true m1.small
 **Default**: `true`
 **Range**: N/A
 
-**Description**: Enable aggregate-based evacuability filtering. When enabled, only servers on hosts in aggregates with the evacuable tag are evacuated.
+**Description**: Enable aggregate-based host filtering. When enabled, only hosts in aggregates with the evacuable tag are processed for fencing and evacuation.
 
 **Usage**:
 - Controls whether aggregate tags are checked in `is_aggregate_evacuable()`
@@ -2836,7 +2912,7 @@ openstack flavor set --property ha-enabled=true m1.small
 
 **Behavior**:
 - When `true`:
-  - Only evacuate servers if host is in an aggregate with `{EVACUABLE_TAG}: true` metadata
+  - Only process hosts in aggregates with `{EVACUABLE_TAG}: true` metadata
   - Reserved hosts matched by shared aggregate
   - `THRESHOLD` percentage calculated against active evacuable hosts only
 - When `false`:
@@ -3157,7 +3233,7 @@ config:
 #### MAX_HOSTS_PER_CYCLE
 **Type**: Integer
 **Default**: `10`
-**Range**: `1-100`
+**Range**: `1-200`
 
 **Description**: Maximum number of hosts that can be fenced in a single poll cycle. If more hosts are detected as down, the first `MAX_HOSTS_PER_CYCLE` are fenced and the rest are deferred to the next cycle. This bounds the blast radius of a single poll cycle -- a Nova API anomaly (conductor crash, stale data, Keystone token issue) cannot trigger mass fencing beyond this cap.
 
@@ -3181,18 +3257,18 @@ config:
 **Default**: `false`
 **Range**: N/A
 
-**Description**: Disable evacuation processing.
+**Description**: Disable fencing and evacuation processing.
 
 **Usage**:
 - Checked at the beginning of evacuation processing
-- When `true`: Log "Service disabled" and skip all evacuation logic
+- When `true`: Log "Service disabled" and skip fencing and evacuation
 - When `false`: Normal operation
 
 **Behavior**:
 - Service runs and polls Nova API
 - Service categorization occurs
 - No fencing, disabling, or evacuation actions executed
-- Health checks continue to update
+- Health checks and host re-enabling continue to run
 
 **Testing**:
 - Configuration feature tests verify evacuation skipping
@@ -3220,11 +3296,11 @@ config:
 **Default**: `true`
 **Range**: N/A
 
-**Description**: Enable SSL/TLS certificate verification for HTTPS requests.
+**Description**: Enable SSL/TLS certificate verification for Redfish fencing HTTPS requests.
 
 **Usage**:
-- Controls `verify` parameter in `requests` library calls
-- Affects Redfish fencing and Kubernetes API (BMH) connections
+- Controls `verify` parameter in `requests` library calls via `get_requests_ssl_config()`
+- Affects Redfish fencing connections only (K8s API uses the service account CA cert independently)
 **Behavior**:
 - **Enabled** (`true`):
   - Use `get_requests_ssl_config()` to determine SSL configuration

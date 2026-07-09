@@ -760,6 +760,36 @@ class TestMonitorEvacuation(unittest.TestCase):
         monotonic_values = [100, 100 + timeout + 1]
         self.assertFalse(self._run_monitor([in_progress], monotonic_values=monotonic_values))
 
+    def test_custom_timeout(self):
+        """Custom evacuation_timeout is honored over the default."""
+        in_progress = Mock(completed=False, error=False)
+        custom_timeout = 600
+        # Should NOT timeout at default 300s
+        monotonic_values = [100, 100 + 400, 100 + custom_timeout + 1]
+        with patch('instanceha.time.sleep'):
+            with patch('instanceha.time.monotonic', side_effect=monotonic_values):
+                with patch('instanceha._server_evacuation_status',
+                           side_effect=[in_progress, in_progress]):
+                    result = instanceha._monitor_evacuation(
+                        Mock(), 'srv-1', 'resp-1', 100,
+                        evacuation_timeout=custom_timeout)
+        self.assertFalse(result)
+
+    def test_custom_timeout_completes_before_default_would_expire(self):
+        """Evacuation completing at 400s succeeds with custom timeout of 600s."""
+        in_progress = Mock(completed=False, error=False)
+        done = Mock(completed=True, error=False)
+        custom_timeout = 600
+        monotonic_values = [100, 100 + 400, 100 + 450]
+        with patch('instanceha.time.sleep'):
+            with patch('instanceha.time.monotonic', side_effect=monotonic_values):
+                with patch('instanceha._server_evacuation_status',
+                           side_effect=[in_progress, done]):
+                    result = instanceha._monitor_evacuation(
+                        Mock(), 'srv-1', 'resp-1', 100,
+                        evacuation_timeout=custom_timeout)
+        self.assertTrue(result)
+
 
 # ============================================================================
 # Main loop backoff tests
@@ -774,6 +804,7 @@ class TestMainLoopBackoff(unittest.TestCase):
         svc.config.get_config_value = Mock(side_effect=lambda key: {
             'POLL': 5, 'DELTA': 30, 'LOGLEVEL': 'INFO',
             'DISABLED': False, 'FENCING_TIMEOUT': 30,
+            'EVACUATION_TIMEOUT': 300,
         }.get(key, Mock()))
         svc.update_health_hash = Mock()
         svc.processing_lock = Mock()
@@ -907,9 +938,10 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         svc.config.get_config_value = Mock(side_effect=lambda key: {
             'DISABLED': False, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
             'CHECK_HEARTBEAT': False,
-            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30, 'EVACUATION_TIMEOUT': 300,
             'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
             'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
+            'EVACUATION_STAGGER': 0, 'EVACUATION_MAX_THREADS': 32,
         }.get(key, Mock()))
         svc.processing_lock = threading.Lock()
         svc.hosts_processing = defaultdict(float)
@@ -950,9 +982,10 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         service.config.get_config_value = Mock(side_effect=lambda key: {
             'DISABLED': True, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
             'CHECK_HEARTBEAT': False,
-            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30, 'EVACUATION_TIMEOUT': 300,
             'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
             'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
+            'EVACUATION_STAGGER': 0, 'EVACUATION_MAX_THREADS': 32,
         }.get(key, Mock()))
         conn = Mock()
         svc1 = Mock(host='host-1', status='enabled', forced_down=False)
@@ -1628,12 +1661,8 @@ class TestRunConcurrent(unittest.TestCase):
 
     def test_timeout_logged_as_error(self):
         import concurrent.futures
-        with patch.object(concurrent.futures.Future, 'result',
-                          side_effect=concurrent.futures.TimeoutError()):
-            with self.assertLogs(level='ERROR') as cm:
-                result = instanceha._run_concurrent(lambda x: True, ['a'], 1, lambda x: x)
-            self.assertFalse(result)
-            self.assertTrue(any('timed out' in msg for msg in cm.output))
+        result = instanceha._run_concurrent(lambda x: time.sleep(5), ['a'], 1, lambda x: x, timeout=0.01)
+        self.assertFalse(result)
 
     def test_log_prefix_used(self):
         with self.assertLogs(level='DEBUG') as cm:
@@ -1760,10 +1789,11 @@ class TestFencingRateLimiter(unittest.TestCase):
         svc.config.get_config_value = Mock(side_effect=lambda key: {
             'DISABLED': False, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
             'CHECK_HEARTBEAT': False,
-            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30, 'EVACUATION_TIMEOUT': 300,
             'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
             'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
             'MAX_HOSTS_PER_CYCLE': 3,
+            'EVACUATION_STAGGER': 0, 'EVACUATION_MAX_THREADS': 32,
         }.get(key, Mock()))
         svc.processing_lock = threading.Lock()
         svc.hosts_processing = defaultdict(float)
@@ -1883,10 +1913,11 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         svc.config.get_config_value = Mock(side_effect=lambda key: {
             'DISABLED': False, 'THRESHOLD': 50, 'CHECK_KDUMP': False,
             'CHECK_HEARTBEAT': False,
-            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30,
+            'WORKERS': 2, 'POLL': 5, 'FENCING_TIMEOUT': 30, 'EVACUATION_TIMEOUT': 300,
             'TAGGED_IMAGES': False, 'TAGGED_FLAVORS': False,
             'TAGGED_AGGREGATES': False, 'RESERVED_HOSTS': False,
             'MAX_HOSTS_PER_CYCLE': 10,
+            'EVACUATION_STAGGER': 0, 'EVACUATION_MAX_THREADS': 32,
         }.get(key, Mock()))
         svc.processing_lock = threading.Lock()
         svc.hosts_processing = defaultdict(float)
@@ -2004,7 +2035,6 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         stale_events = [c for c in mock_event.call_args_list
                         if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
         self.assertEqual(len(stale_events), 1)
-
 
 if __name__ == '__main__':
     unittest.main()

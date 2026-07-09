@@ -919,7 +919,7 @@ class TestEvacuationFunctions(unittest.TestCase):
             context_manager.__exit__ = Mock(return_value=None)
             mock_executor_class.return_value = context_manager
 
-            def mock_as_completed_side_effect(future_to_server):
+            def mock_as_completed_side_effect(future_to_server, **kwargs):
                 return iter(future_to_server.keys())
 
             with patch('instanceha.concurrent.futures.as_completed', side_effect=mock_as_completed_side_effect):
@@ -980,7 +980,7 @@ class TestEvacuationFunctions(unittest.TestCase):
 
             # Mock as_completed - it needs to receive the future_to_server dict
             # and return an iterable of futures from that dict
-            def mock_as_completed_side_effect(future_to_server):
+            def mock_as_completed_side_effect(future_to_server, **kwargs):
                 # Return the futures from the dict
                 return iter(future_to_server.keys())
 
@@ -1042,7 +1042,7 @@ class TestEvacuationFunctions(unittest.TestCase):
             context_manager.__exit__ = Mock(return_value=None)
             mock_executor_class.return_value = context_manager
 
-            def mock_as_completed_side_effect(future_to_server):
+            def mock_as_completed_side_effect(future_to_server, **kwargs):
                 return iter(future_to_server.keys())
 
             with patch('instanceha.concurrent.futures.as_completed', side_effect=mock_as_completed_side_effect):
@@ -1071,7 +1071,12 @@ class TestEvacuationFunctions(unittest.TestCase):
         mock_service.config.get_config_value.side_effect = lambda key: {
             'SMART_EVACUATION': True,
             'WORKERS': 4,
-            'DELAY': 0
+            'DELAY': 0,
+            'EVACUATION_MAX_THREADS': 32,
+            'EVACUATION_STAGGER': 0,
+            'EVACUATION_TIMEOUT': 300,
+            'EVACUATION_RETRIES': 5,
+            'ORCHESTRATED_RESTART': False,
         }.get(key, 0)
         mock_service.is_server_evacuable.return_value = True
 
@@ -1114,6 +1119,52 @@ class TestEvacuationFunctions(unittest.TestCase):
             # Inner pool workers = max(1, MAX_TOTAL_EVACUATION_THREADS // WORKERS) = max(1, 32 // 4) = 8
             mock_executor_class.assert_called_once_with(max_workers=8)
             self.assertTrue(result, "Smart evacuation should succeed")
+
+    def test_evacuation_max_threads_controls_inner_workers(self):
+        """Test that EVACUATION_MAX_THREADS config controls per-host thread pool size."""
+        test_cases = [
+            # (workers, max_threads, expected_inner_workers)
+            (4, 32, 8),     # default: 32 // 4 = 8
+            (4, 64, 16),    # doubled budget: 64 // 4 = 16
+            (10, 32, 3),    # more workers, fewer per host: 32 // 10 = 3
+            (10, 100, 10),  # increased budget compensates: 100 // 10 = 10
+            (4, 1, 1),      # minimum clamp: max(1, 1 // 4) = 1
+        ]
+
+        for workers, max_threads, expected_inner in test_cases:
+            with self.subTest(workers=workers, max_threads=max_threads):
+                mock_service = Mock()
+                mock_service.config.get_config_value.side_effect = lambda key, w=workers, mt=max_threads: {
+                    'WORKERS': w,
+                    'EVACUATION_MAX_THREADS': mt,
+                    'EVACUATION_STAGGER': 0,
+                    'EVACUATION_TIMEOUT': 300,
+                    'EVACUATION_RETRIES': 5,
+                    'ORCHESTRATED_RESTART': False,
+                }.get(key, 0)
+
+                mock_servers = [Mock(id=f'server-{i}', status='ACTIVE') for i in range(3)]
+
+                with patch('instanceha.concurrent.futures.ThreadPoolExecutor') as mock_executor_class:
+                    mock_executor = MagicMock()
+                    context_manager = MagicMock()
+                    context_manager.__enter__ = Mock(return_value=mock_executor)
+                    context_manager.__exit__ = Mock(return_value=None)
+                    mock_executor_class.return_value = context_manager
+
+                    futures = [MagicMock() for _ in range(3)]
+                    for f in futures:
+                        f.result.return_value = True
+                    mock_executor.submit.side_effect = futures
+
+                    with patch('instanceha.concurrent.futures.as_completed', return_value=futures):
+                        with patch('instanceha.time.sleep'):
+                            instanceha._concurrent_evacuate(
+                                self.mock_connection, mock_servers, mock_service,
+                                'test-host', 'service-123'
+                            )
+
+                    mock_executor_class.assert_called_once_with(max_workers=expected_inner)
 
     def test_workers_actual_concurrent_limit(self):
         """Test that only WORKERS number of evacuations run concurrently (integration-style test)."""
@@ -1184,7 +1235,12 @@ class TestEvacuationFunctions(unittest.TestCase):
                 mock_service.config.get_config_value.side_effect = lambda key, w=workers_value: {
                     'SMART_EVACUATION': True,
                     'WORKERS': w,
-                    'DELAY': 0
+                    'DELAY': 0,
+                    'EVACUATION_MAX_THREADS': 32,
+                    'EVACUATION_STAGGER': 0,
+                    'EVACUATION_TIMEOUT': 300,
+                    'EVACUATION_RETRIES': 5,
+                    'ORCHESTRATED_RESTART': False,
                 }.get(key, 0)
                 mock_service.is_server_evacuable.return_value = True
 

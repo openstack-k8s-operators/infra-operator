@@ -1,29 +1,92 @@
 config:
-  CHECK_HEARTBEAT: "false"
-  CHECK_KDUMP: "false"
-  DELAY: "0"
-  DELTA: "30"
+  # -- General --
+
+  # Disable fencing and evacuation (monitoring and host re-enabling continue)
   DISABLED: "false"
-  EVACUATION_RETRIES: "5"
-  EVACUABLE_TAG: "evacuable"
-  FENCING_TIMEOUT: "30"
-  FORCE_ENABLE: "false"
-  FORCE_RESERVED_HOST_EVACUATION: "false"
-  HASH_INTERVAL: "60"
-  HEARTBEAT_CLIFF_THRESHOLD: "50"
-  HEARTBEAT_TIMEOUT: "120"
-  K8S_API_CHECK_INTERVAL: "15"
-  KDUMP_TIMEOUT: "30"
-  LEAVE_DISABLED: "false"
+  # Log level: debug, info, warning, error, critical
   LOGLEVEL: "info"
-  ORCHESTRATED_RESTART: "false"
-  POLL: "45"
-  RESERVED_HOSTS: "false"
-  SKIP_SERVERS_WITH_NAME: ""
-  SMART_EVACUATION: "false"
+  # Verify TLS certificates for Redfish fencing connections
   SSL_VERIFY: "true"
-  TAGGED_AGGREGATES: "true"
-  TAGGED_FLAVORS: "true"
-  TAGGED_IMAGES: "true"
+
+  # -- Failure Detection --
+
+  # Seconds between Nova service-list poll cycles
+  POLL: "45"
+  # Seconds of service staleness before considering a host failed
+  DELTA: "30"
+  # Max percentage of failed hosts before evacuation is blocked (0-100)
   THRESHOLD: "50"
+  # Max hosts to fence per poll cycle (limits blast radius)
+  MAX_HOSTS_PER_CYCLE: "10"
+  # Seconds between K8s API reachability checks (3 failures block fencing)
+  K8S_API_CHECK_INTERVAL: "15"
+
+  # -- Heartbeat Verification --
+
+  # Enable UDP heartbeat as a second failure-detection channel
+  CHECK_HEARTBEAT: "false"
+  # Seconds without a heartbeat before marking a host as down
+  HEARTBEAT_TIMEOUT: "120"
+  # Percentage of hosts losing heartbeats simultaneously to trigger cliff detection
+  HEARTBEAT_CLIFF_THRESHOLD: "50"
+  # Poll cycles to wait before accepting mass heartbeat loss as genuine
+  HEARTBEAT_CLIFF_MAX_CYCLES: "3"
+
+  # -- Kdump Detection --
+
+  # Enable kdump crash detection via UDP messages
+  CHECK_KDUMP: "false"
+  # Seconds to wait for the first kdump message before proceeding with normal evacuation
+  KDUMP_TIMEOUT: "30"
+
+  # -- Fencing --
+
+  # Seconds allowed for each fencing operation (IPMI/Redfish/BMH)
+  FENCING_TIMEOUT: "30"
+  # Seconds of heartbeat silence before the watchdog agent declares a host dead
+  WATCHDOG_TIMEOUT: "60"
+  # Parallel host-processing threads (fencing + evacuation)
   WORKERS: "4"
+
+  # -- Evacuation --
+
+  # Track migrations to completion instead of fire-and-forget
+  SMART_EVACUATION: "false"
+  # Enable priority-ordered evacuation phases via server metadata
+  ORCHESTRATED_RESTART: "false"
+  # Seconds to wait after fencing before starting evacuation
+  DELAY: "0"
+  # Total evacuation thread budget; per-host concurrency = this / WORKERS
+  EVACUATION_MAX_THREADS: "32"
+  # Max per-instance retry attempts before giving up
+  EVACUATION_RETRIES: "5"
+  # Seconds between each VM's evacuation start (0 = all start immediately)
+  EVACUATION_STAGGER: "0"
+  # Max seconds to monitor a single instance evacuation
+  EVACUATION_TIMEOUT: "300"
+
+  # -- Evacuable Resource Filtering --
+
+  # Metadata tag name used to identify evacuable resources
+  EVACUABLE_TAG: "evacuable"
+  # Only evacuate VMs whose image has the evacuable tag
+  TAGGED_IMAGES: "true"
+  # Only evacuate VMs whose flavor has the evacuable tag
+  TAGGED_FLAVORS: "true"
+  # Only process hosts in aggregates with the evacuable tag
+  TAGGED_AGGREGATES: "true"
+  # Comma-separated glob patterns for server names to exclude
+  SKIP_SERVERS_WITH_NAME: ""
+
+  # -- Host Recovery --
+
+  # Enable automatic reserved-host management (host enabled before evacuation)
+  RESERVED_HOSTS: "false"
+  # Force evacuation to the reserved host (instead of scheduler)
+  FORCE_RESERVED_HOST_EVACUATION: "false"
+  # Re-enable hosts without waiting for migrations to complete
+  FORCE_ENABLE: "false"
+  # Leave failed hosts disabled after evacuation completes
+  LEAVE_DISABLED: "false"
+  # Seconds between health-check hash updates
+  HASH_INTERVAL: "60"
