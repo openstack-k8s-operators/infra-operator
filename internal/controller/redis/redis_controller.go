@@ -20,6 +20,8 @@ package redis
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	"k8s.io/apimachinery/pkg/fields"
@@ -364,12 +366,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	sentinelHosts := make([]string, 0, int(replicas))
 	for i := int32(0); i < replicas; i++ {
-		host := fmt.Sprintf("%s-%d.%s.%s.svc.%s:%d",
-			headlessServiceName, i,
-			headlessServiceName,
-			instance.Namespace,
-			clusterDomain,
-			redisv1.SentinelPort,
+		host := net.JoinHostPort(
+			fmt.Sprintf("%s-%d.%s.%s.svc.%s",
+				headlessServiceName, i,
+				headlessServiceName,
+				instance.Namespace,
+				clusterDomain),
+			strconv.Itoa(int(redisv1.SentinelPort)),
 		)
 		sentinelHosts = append(sentinelHosts, host)
 	}

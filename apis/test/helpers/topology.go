@@ -14,10 +14,10 @@ limitations under the License.
 package helpers
 
 import (
+	t "github.com/onsi/gomega"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	t "github.com/onsi/gomega"
 )
 
 // CreateTopology - Creates a Topology CR based on the spec passed as input

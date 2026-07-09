@@ -218,7 +218,6 @@ func valiateNetworksChanged(
 				allErrs = append(allErrs, field.Invalid(path.Child("vlan"), _net.Name, fmt.Sprintf(errSubnetParameterChanged, "vlan", vlan)))
 			}
 
-
 		}
 	}
 

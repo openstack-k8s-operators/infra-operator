@@ -20,6 +20,8 @@ package memcached
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
@@ -680,14 +682,14 @@ func (r *Reconciler) GetServerLists(
 	}
 	for i := int32(0); i < *(instance.Spec.Replicas); i++ {
 		server := fmt.Sprintf("%s-%d.%s.%s.svc", instance.Name, i, instance.Name, instance.Namespace)
-		serverList = append(serverList, fmt.Sprintf("%s:%d", server, port))
+		serverList = append(serverList, net.JoinHostPort(server, strconv.Itoa(int(port))))
 
 		// python-memcached requires inet(6) prefix according to the IP version
 		// used by the memcached server. IPv6 addresses also need to be wrapped in brackets.
 		if ipFamily == corev1.IPv6Protocol {
 			server = fmt.Sprintf("[%s]", server)
 		}
-		serverListWithInet = append(serverListWithInet, fmt.Sprintf("%s:%s:%d", prefix, server, memcached.MemcachedPort))
+		serverListWithInet = append(serverListWithInet, fmt.Sprintf("%s:%s", prefix, net.JoinHostPort(server, strconv.Itoa(int(memcached.MemcachedPort)))))
 	}
 
 	return serverList, serverListWithInet

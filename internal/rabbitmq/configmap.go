@@ -2,6 +2,8 @@ package rabbitmq
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
@@ -165,10 +167,10 @@ func buildOperatorDefaults(r *rabbitmqv1.RabbitMq, IPv6Enabled bool, configVersi
 		if IPv6Enabled {
 			loopbackAddr = "::1"
 		}
-		config = append(config, fmt.Sprintf("listeners.tcp.1                            = %s:%d", loopbackAddr, BackendPort))
+		config = append(config, fmt.Sprintf("listeners.tcp.1                            = %s", net.JoinHostPort(loopbackAddr, strconv.Itoa(BackendPort))))
 		if r.Spec.TLS.SecretName != "" {
-			config = append(config, fmt.Sprintf("listeners.ssl.1                            = %s:%d", loopbackAddr, BackendTLSPort))
-			config = append(config, fmt.Sprintf("listeners.ssl.default                      = %s:%d", loopbackAddr, BackendTLSPort))
+			config = append(config, fmt.Sprintf("listeners.ssl.1                            = %s", net.JoinHostPort(loopbackAddr, strconv.Itoa(BackendTLSPort))))
+			config = append(config, fmt.Sprintf("listeners.ssl.default                      = %s", net.JoinHostPort(loopbackAddr, strconv.Itoa(BackendTLSPort))))
 		}
 	} else if r.Spec.TLS.SecretName != "" {
 		// TLS listener configuration (normal mode)
