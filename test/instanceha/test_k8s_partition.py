@@ -169,12 +169,12 @@ class TestFencingGate(unittest.TestCase):
         self.service = instanceha.InstanceHAService(self.config)
 
     def test_k8s_unreachable_blocks_fencing(self):
-        """When k8s_api_reachable is False, _process_stale_services should not be called."""
+        """When k8s_api_reachable is False, _admit_stale_services should not be called."""
         self.service.k8s_api_reachable = False
         self.service.ready = False
 
-        # _process_stale_services should not be called
-        with patch('instanceha._process_stale_services') as mock_process:
+        # _admit_stale_services should not be called
+        with patch('instanceha._admit_stale_services') as mock_process:
             with patch('instanceha._process_reenabling') as mock_reenable:
                 # Simulate what the main loop does
                 if not self.service.k8s_api_reachable:

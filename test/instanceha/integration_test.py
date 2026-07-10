@@ -448,7 +448,7 @@ class TestEvacuationWorkflow(unittest.TestCase):
         with patch('instanceha.process_service') as mock_process_service:
             mock_process_service.return_value = True
 
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 nova_client, service, self.mock_env.services, compute_nodes, to_resume
             )
 
@@ -475,7 +475,7 @@ class TestEvacuationWorkflow(unittest.TestCase):
         )
 
         with patch('instanceha.process_service') as mock_process_service:
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 nova_client, service, self.mock_env.services, compute_nodes, to_resume
             )
 
@@ -807,7 +807,7 @@ class TestPerformanceAndScaling(unittest.TestCase):
 
             # Test concurrent processing
             start_time = time.time()
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 nova_client, service, self.mock_env.services, compute_nodes, to_resume
             )
             processing_time = time.time() - start_time
@@ -913,8 +913,8 @@ class TestIncompleteServiceHandling(unittest.TestCase):
             count = instanceha._count_evacuable_hosts(nova_client, service, self.mock_env.services)
         self.assertEqual(count, 3)
 
-    def test_process_stale_services_with_incomplete_services(self):
-        """_process_stale_services should not crash when incomplete services are in the list."""
+    def test_admit_stale_services_with_incomplete_services(self):
+        """_admit_stale_services should not crash when incomplete services are in the list."""
         self.mock_env.add_incomplete_compute_service('compute-unknown')
         self.mock_env.add_compute_service('compute-ok', state='up', status='enabled')
 
@@ -927,7 +927,7 @@ class TestIncompleteServiceHandling(unittest.TestCase):
         )
 
         with patch('instanceha.process_service') as mock_process:
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 nova_client, service, self.mock_env.services,
                 compute_nodes, to_resume
             )
@@ -978,7 +978,7 @@ class TestErrorHandlingAndRecovery(unittest.TestCase):
                 self.mock_env.services, target_date
             )
 
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 nova_client, service, self.mock_env.services, compute_nodes, to_resume
             )
 

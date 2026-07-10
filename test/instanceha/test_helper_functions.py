@@ -209,7 +209,7 @@ class TestFilterProcessingHosts(unittest.TestCase):
             EVACUATION_TIMEOUT=300, FENCING_TIMEOUT=30))
 
         # Add an entry that would be expired without stagger (350s ago > 300+30),
-        # but should survive with stagger (300 + 31*10 = 610 + 30 padding = 640)
+        # but should survive with stagger (300 + (32-1)*10 = 610 + 30 padding = 640)
         old_time = time.monotonic() - 350
         service.hosts_processing['active-host'] = old_time
 
