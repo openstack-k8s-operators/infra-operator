@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -64,6 +65,11 @@ var (
 	gvrSelfNodeRemediationTemplate = schema.GroupVersionResource{
 		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Resource: "selfnoderemediationtemplates",
 	}
+	// gvrSelfNodeRemediation is the instance CR created by NHC for each node it has decided to remediate.
+	// Its metadata.name equals the node name; it exists only while remediation is active.
+	gvrSelfNodeRemediation = schema.GroupVersionResource{
+		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Resource: "selfnoderemediations",
+	}
 )
 
 // PodRemediatorReconciler reconciles a PodRemediator object
@@ -89,6 +95,7 @@ func (r *PodRemediatorReconciler) GetLogger(ctx context.Context) logr.Logger {
 //+kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get;list;watch
 //+kubebuilder:rbac:groups=remediation.medik8s.io,resources=nodehealthchecks,verbs=get;list;watch
 //+kubebuilder:rbac:groups=self-node-remediation.medik8s.io,resources=selfnoderemediationtemplates,verbs=get;list;watch
+//+kubebuilder:rbac:groups=self-node-remediation.medik8s.io,resources=selfnoderemediations,verbs=get;list;watch
 
 // Reconcile reconciles a PodRemediator
 func (r *PodRemediatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -143,25 +150,41 @@ func (r *PodRemediatorReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return r.reconcileNormal(ctx, instance)
 }
 
+// nodeReadyChangedPredicate fires only when a Node's Ready condition status transitions.
+// This avoids spurious reconciles from kubelet heartbeat patches (which change resourceVersion
+// but not the NodeReady status) while still reacting to actual health state changes.
+type nodeReadyChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (nodeReadyChangedPredicate) Update(e event.UpdateEvent) bool {
+	oldNode, ok := e.ObjectOld.(*corev1.Node)
+	if !ok {
+		return true
+	}
+	newNode, ok := e.ObjectNew.(*corev1.Node)
+	if !ok {
+		return true
+	}
+	return isNodeUnhealthy(oldNode) != isNodeUnhealthy(newNode)
+}
+
 // SetupWithManager sets up the controller with the Manager
 func (r *PodRemediatorReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	Log := r.GetLogger(ctx)
 
-	podFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-		return r.enqueuePodRemediatorsForObject(ctx, o.GetNamespace(), Log)
-	})
-	nodeFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-		return r.enqueuePodRemediatorsForObject(ctx, "", Log) // cluster-wide for nodes
-	})
-	pvcFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
-		return r.enqueuePodRemediatorsForObject(ctx, o.GetNamespace(), Log)
+	// Fix 3: all three map functions use "" so that a PodRemediator in namespace A
+	// watching namespace B is still enqueued by Pod/PVC events in B.
+	allFN := handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
+		return r.enqueuePodRemediatorsForObject(ctx, "", Log)
 	})
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&remediationv1.PodRemediator{}).
-		Watches(&corev1.Pod{}, podFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Watches(&corev1.Node{}, nodeFN).
-		Watches(&corev1.PersistentVolumeClaim{}, pvcFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&corev1.Pod{}, allFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Fix 5: only reconcile when NodeReady status actually changes, not on every heartbeat.
+		Watches(&corev1.Node{}, allFN, builder.WithPredicates(nodeReadyChangedPredicate{})).
+		Watches(&corev1.PersistentVolumeClaim{}, allFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Complete(r)
 }
 
@@ -182,9 +205,35 @@ func (r *PodRemediatorReconciler) enqueuePodRemediatorsForObject(ctx context.Con
 	return result
 }
 
+// Fix 4: reconcileDelete removes the pending-deletion annotation from any PVCs we marked
+// before stripping the CR finalizer, so no PVC is left with a stale orphan annotation.
 func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance *remediationv1.PodRemediator, helper *helper.Helper) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling PodRemediator delete")
+
+	namespaces := instance.Spec.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{instance.Namespace}
+	}
+	for _, ns := range namespaces {
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		if err := r.List(ctx, pvcList, client.InNamespace(ns)); err != nil {
+			Log.Error(err, "list PVCs for annotation cleanup", "namespace", ns)
+			continue
+		}
+		for i := range pvcList.Items {
+			pvc := &pvcList.Items[i]
+			if pvc.Annotations == nil || pvc.Annotations[PodRemediatorPendingDeletionAnnotation] == "" {
+				continue
+			}
+			oldPVC := pvc.DeepCopy()
+			delete(pvc.Annotations, PodRemediatorPendingDeletionAnnotation)
+			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
+				Log.Error(err, "remove pending-deletion annotation during CR delete", "pvc", client.ObjectKeyFromObject(pvc))
+			}
+		}
+	}
+
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
 	return ctrl.Result{}, nil
 }
@@ -213,6 +262,50 @@ func (r *PodRemediatorReconciler) checkNHCAndSNR(ctx context.Context) (bool, err
 		return false, nil
 	}
 	return true, nil
+}
+
+// getNodesWithActiveSNR returns the set of node names for which NHC has already created a
+// SelfNodeRemediation CR (meaning NHC has committed to remediating those nodes).
+// The CR name equals the node name by the medik8s convention.
+// Using this set prevents PodRemediator from acting during the window between a node going
+// NotReady and NHC deciding to remediate it (transient kubelet restarts, brief partitions).
+func (r *PodRemediatorReconciler) getNodesWithActiveSNR(ctx context.Context) (map[string]bool, error) {
+	snrList, err := r.DynamicClient.Resource(gvrSelfNodeRemediation).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if meta.IsNoMatchError(err) || k8s_errors.IsNotFound(err) {
+			return map[string]bool{}, nil
+		}
+		return nil, err
+	}
+	nodes := make(map[string]bool, len(snrList.Items))
+	for _, snr := range snrList.Items {
+		nodes[snr.GetName()] = true
+	}
+	return nodes, nil
+}
+
+// Fix 1: deletePodsForPVC force-deletes (gracePeriod=0) all pods in the same namespace
+// that reference the PVC by name. This releases the kubernetes.io/pvc-protection finalizer
+// so the PVC can actually terminate and the StatefulSet can reschedule the pod.
+func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, Log logr.Logger) {
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(pvc.Namespace)); err != nil {
+		Log.Error(err, "list pods for PVC pod-deletion", "pvc", pvc.Name)
+		return
+	}
+	gracePeriod := int64(0)
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		for _, vol := range pod.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
+				Log.Info("Force-deleting pod referencing PVC to unblock pvc-protection finalizer", "pod", pod.Name, "pvc", pvc.Name)
+				if err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil && !k8s_errors.IsNotFound(err) {
+					Log.Error(err, "force-delete pod", "pod", pod.Name)
+				}
+				break
+			}
+		}
+	}
 }
 
 func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance *remediationv1.PodRemediator) (ctrl.Result, error) {
@@ -251,7 +344,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		namespaces = []string{instance.Namespace}
 	}
 
-	// 3) Find nodes that are NotReady or have remediation in progress (simplified: check Node conditions)
+	// 3) Find nodes that are NotReady
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list nodes: %w", err)
@@ -267,6 +360,24 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 
 	if len(unhealthyNodes) == 0 {
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "No unhealthy nodes; monitoring")
+		return ctrl.Result{}, nil
+	}
+
+	// Filter to only nodes for which NHC has already created a SelfNodeRemediation CR.
+	// This closes the gap between "node goes NotReady" and "NHC decides to remediate":
+	// transient kubelet restarts or brief partitions will not trigger PVC deletion.
+	snrNodes, err := r.getNodesWithActiveSNR(ctx)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("list SelfNodeRemediation CRs: %w", err)
+	}
+	for nodeName := range unhealthyNodes {
+		if !snrNodes[nodeName] {
+			Log.Info("Skipping unhealthy node: no SelfNodeRemediation CR yet (waiting for NHC decision)", "node", nodeName)
+			delete(unhealthyNodes, nodeName)
+		}
+	}
+	if len(unhealthyNodes) == 0 {
+		instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Unhealthy nodes present but none yet under active SNR remediation; monitoring")
 		return ctrl.Result{}, nil
 	}
 
@@ -287,11 +398,14 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrl.Result{}, nil
 	}
 
-	// 4) For each namespace, find PVCs to remediate: either already marked pending-deletion (resume after controller restart) or local on unhealthy node (then annotate + delete)
+	// 4) For each namespace, find PVCs to remediate.
+	// Fix 6: track any scan errors so we requeue rather than reporting Ready=True with incomplete data.
+	hadError := false
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
 		if err := r.List(ctx, pvcList, client.InNamespace(ns)); err != nil {
 			Log.Error(err, "list PVCs", "namespace", ns)
+			hadError = true
 			continue
 		}
 		Log.Info("Listing PVCs in namespace for unhealthy-node remediation", "namespace", ns, "pvcCount", len(pvcList.Items))
@@ -299,10 +413,24 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			pvc := &pvcList.Items[i]
 			pvcKey := client.ObjectKeyFromObject(pvc)
 
-			// Resume path (Option B): PVC was previously marked for deletion but controller restarted before delete completed
+			// Resume path (Option B): PVC was previously marked for deletion but controller restarted before delete completed.
+			// Fix 2: re-check node health before deleting — the node may have recovered since the annotation was written.
 			if pvc.Annotations != nil && pvc.Annotations[PodRemediatorPendingDeletionAnnotation] != "" {
 				nodeName := pvc.Annotations[PodRemediatorPendingDeletionAnnotation]
+				if !unhealthyNodes[nodeName] {
+					// Node recovered; remove the stale annotation.
+					oldPVC := pvc.DeepCopy()
+					delete(pvc.Annotations, PodRemediatorPendingDeletionAnnotation)
+					if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
+						Log.Error(err, "remove stale pending-deletion annotation (node recovered)", "pvc", pvcKey, "node", nodeName)
+					} else {
+						Log.Info("Node recovered; removed stale pending-deletion annotation", "pvc", pvcKey, "node", nodeName)
+					}
+					continue
+				}
 				Log.Info("Resuming: deleting PVC marked pending-deletion (controller may have restarted)", "pvc", pvcKey, "node", nodeName)
+				// Fix 1: delete pods first so pvc-protection finalizer is released.
+				r.deletePodsForPVC(ctx, pvc, Log)
 				if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
 					Log.Error(err, "delete PVC (resume)", "pvc", pvcKey)
 					continue
@@ -321,6 +449,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					continue
 				}
 				Log.Error(err, "get PV", "pv", pvc.Spec.VolumeName)
+				hadError = true
 				continue
 			}
 			if !isLocalPV(pv) {
@@ -336,7 +465,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				Log.Info("Skipping PVC (node not unhealthy)", "pvc", pvcKey, "node", nodeName)
 				continue
 			}
-			// Persist intent (Option B): annotate before delete so a restarted controller can resume
+			// Persist intent (Option B): annotate before delete so a restarted controller can resume.
 			oldPVC := pvc.DeepCopy()
 			if pvc.Annotations == nil {
 				pvc.Annotations = make(map[string]string)
@@ -347,11 +476,21 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				continue
 			}
 			Log.Info("Deleting PVC bound to unhealthy node (intent persisted via annotation)", "pvc", pvcKey, "node", nodeName)
+			// Fix 1: delete pods first so pvc-protection finalizer is released.
+			r.deletePodsForPVC(ctx, pvc, Log)
 			if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
 				Log.Error(err, "delete PVC", "pvc", pvcKey)
 				continue
 			}
 		}
+	}
+
+	// Fix 6: if any namespace or PV lookup failed, requeue rather than reporting Ready=True.
+	if hadError {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning,
+			"Partial scan: errors listing PVCs or fetching PVs; will retry"))
+		return ctrl.Result{}, fmt.Errorf("partial scan errors during PVC remediation; requeueing")
 	}
 
 	instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Monitoring; remediated PVCs on unhealthy nodes if any")
@@ -374,27 +513,42 @@ func isLocalPV(pv *corev1.PersistentVolume) bool {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return false
 	}
-	// local volume type or CSI with node affinity
-	// Check for local volume: either PersistentVolumeLocal or storage class provisioner
 	if pv.Spec.Local != nil {
 		return true
 	}
-	// CSI volumes with node affinity are typically local-like (e.g. local-path, openstack cinder with node affinity)
-	if pv.Spec.CSI != nil && len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) > 0 {
-		return true
+	// For CSI and HostPath, require a known node-pinning topology key rather than accepting any
+	// node affinity. Zone-affinity CSI volumes (e.g. Cinder: topology.cinder.csi.openstack.org/zone)
+	// are reattachable to any node in the zone and must not be treated as node-local.
+	if pv.Spec.CSI != nil || pv.Spec.HostPath != nil {
+		return pvHasLocalTopologyKey(pv)
 	}
-	// HostPath with node affinity
-	if pv.Spec.HostPath != nil && len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) > 0 {
-		return true
+	return false
+}
+
+// pvHasLocalTopologyKey returns true when the PV's required node affinity contains at least one
+// expression keyed by a known node-pinning topology key (hostname or LVMS/TopoLVM node key).
+// Add new keys to localPVNodeTopologyKeys when supporting additional local CSI drivers.
+func pvHasLocalTopologyKey(pv *corev1.PersistentVolume) bool {
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return false
+	}
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, expr := range term.MatchExpressions {
+			for _, key := range localPVNodeTopologyKeys {
+				if expr.Key == key {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
 
 // Known topology keys that carry the node name for local/CSI volumes (e.g. LVMS/TopoLVM).
 var localPVNodeTopologyKeys = []string{
-	corev1.LabelHostname,           // kubernetes.io/hostname (hostPath, local, many CSI)
-	"topology.topolvm.io/node",     // TopoLVM / Red Hat LVMS
-	"topology.lvms.io/node",        // LVMS variant
+	corev1.LabelHostname,       // kubernetes.io/hostname (hostPath, local, many CSI)
+	"topology.topolvm.io/node", // TopoLVM / Red Hat LVMS
+	"topology.lvms.io/node",    // LVMS variant
 }
 
 func getLocalPVNodeName(pv *corev1.PersistentVolume) string {
