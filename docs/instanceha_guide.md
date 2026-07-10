@@ -588,6 +588,17 @@ config:
 
 The agent tracks each migration to completion using a thread pool. It polls Nova for migration status every 5 seconds, retries on transient errors (including target-host retry on 409/500 conflicts), and times out after 300 seconds. Failed evacuations are recorded individually but do not abort remaining ones. This is the recommended mode for production.
 
+When evacuating many VMs from a single host, concurrent API calls can overwhelm the control plane and cause timeouts. Use `EVACUATION_STAGGER` to spread the submissions:
+
+```yaml
+config:
+  SMART_EVACUATION: "true"
+  WORKERS: "8"
+  EVACUATION_STAGGER: "2"   # 2-second delay between each VM's evacuation start
+```
+
+With `EVACUATION_STAGGER: 2` and 30 VMs, the submissions spread over 60 seconds, avoiding thundering-herd timeouts on the control plane.
+
 ### Orchestrated Evacuation
 
 ```yaml
@@ -899,14 +910,16 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 |-----------|------|---------|-------------|
 | `SMART_EVACUATION` | bool | false | Track migrations to completion instead of fire-and-forget |
 | `ORCHESTRATED_RESTART` | bool | false | Enable priority-ordered evacuation phases |
-| `WORKERS` | int | 4 (range: 1-50) | Thread pool size for concurrent smart/orchestrated evacuations |
+| `WORKERS` | int | 4 (range: 1-100) | Thread pool size for concurrent smart/orchestrated evacuations |
 | `THRESHOLD` | int | 50 (range: 0-100) | Max percentage of failed hosts before evacuation is blocked. Set to 100 to disable |
 | `EVACUABLE_TAG` | string | `"evacuable"` | Metadata tag name used to identify evacuable resources |
 | `TAGGED_IMAGES` | bool | true | Filter by image tag |
 | `TAGGED_FLAVORS` | bool | true | Filter by flavor tag |
-| `TAGGED_AGGREGATES` | bool | true | Filter by aggregate tag (also affects threshold calculation and reserved host matching) |
+| `TAGGED_AGGREGATES` | bool | true | Only process hosts in aggregates with the evacuable tag (also affects threshold calculation and reserved host matching) |
 | `SKIP_SERVERS_WITH_NAME` | list | `[]` (empty) | Server name glob patterns (comma-separated) to exclude from evacuation |
+| `EVACUATION_MAX_THREADS` | int | 32 (range: 1-512) | Total evacuation thread budget shared across all hosts. Per-host concurrency is `EVACUATION_MAX_THREADS / WORKERS`. Increase for faster single-host evacuation; decrease to reduce control plane pressure |
 | `EVACUATION_RETRIES` | int | 5 (range: 1-20) | Max per-instance evacuation retry attempts before giving up |
+| `EVACUATION_STAGGER` | int | 0 (range: 0-60) | Seconds between each VM's evacuation start (0 = all start immediately). Reduces control plane pressure when evacuating many VMs from a single host |
 
 #### Host Recovery
 
@@ -936,7 +949,7 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `MAX_HOSTS_PER_CYCLE` | int | 10 (range: 1-100) | Maximum number of hosts that can be fenced in a single poll cycle. Excess hosts are deferred to the next cycle. |
+| `MAX_HOSTS_PER_CYCLE` | int | 10 (range: 1-200) | Maximum number of hosts that can be fenced in a single poll cycle. Excess hosts are deferred to the next cycle. |
 
 `THRESHOLD` (documented above in Evacuation Behavior) also acts as a safety limit -- it blocks all fencing when the percentage of failed hosts exceeds the configured value.
 
@@ -944,13 +957,13 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `SSL_VERIFY` | bool | true | Verify TLS certificates for Redfish and Kubernetes API connections |
+| `SSL_VERIFY` | bool | true | Verify TLS certificates for Redfish fencing connections |
 
 #### Service Control
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `DISABLED` | bool | false | Skip all evacuation logic (health checks continue). Overridden by CR `spec.disabled` |
+| `DISABLED` | bool | false | Skip fencing and evacuation (monitoring and host re-enabling continue). Overridden by CR `spec.disabled` |
 | `LOGLEVEL` | string | `"INFO"` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 ---
@@ -1187,7 +1200,9 @@ These gates are evaluated in sequence -- a host must pass all of them before fen
 | `HEARTBEAT_TIMEOUT` | 120s | How long a heartbeat is considered fresh. At the default 30s send interval, tolerates up to 3 consecutive lost packets before a host appears stale. Raise if heartbeat packets traverse a congested or lossy network. |
 | `K8S_API_CHECK_INTERVAL` | 15s | How often the K8s API reachability probe runs. 3 consecutive failures (3 x interval) block all fencing. On networks with intermittent K8s API latency, raising to 30-60s avoids flapping between reachable/unreachable states. |
 | `FENCING_TIMEOUT` | 30s | Per-request timeout for IPMI/Redfish fencing calls (Redfish retries up to 3 times). If the BMC management network is slow or lossy, fencing may time out even though the host is reachable -- raise toward 60-90s. Also raise `terminationGracePeriodSeconds` accordingly. |
+| `EVACUATION_MAX_THREADS` | 32 | Total evacuation thread budget. Per-host concurrency = `EVACUATION_MAX_THREADS / WORKERS`. With `WORKERS=10`, default gives 3 concurrent evacuations per host; set to 100 to get 10. Increase when single-host failures dominate; decrease to reduce control plane pressure. |
 | `EVACUATION_RETRIES` | 5 | Max per-instance evacuation retry attempts. Each retry re-issues the evacuate API call. On a flaky Nova API, retries cover transient 500s; at large scale, lower to 3 to avoid piling up retry traffic. |
+| `EVACUATION_STAGGER` | 0 | Seconds between each VM's evacuation start within a phase. Set to 2-3 to reduce control plane pressure during mass evacuation of hosts with many VMs. |
 
 #### Tuning by cluster size
 
@@ -1280,7 +1295,7 @@ This section covers tuning InstanceHA for clusters with hundreds of compute node
 InstanceHA runs as a single pod and polls the Nova API for all compute services across all cells. At 1000 nodes, the poll cycle must process 1000 service records, fetch aggregate memberships, and potentially issue fencing and evacuation commands -- all within a reasonable time budget. The key constraints are:
 
 - **Nova API latency**: `services.list(binary="nova-compute")` returns all 1000 services in a single call. Nova's `nova-manage cell_v2` maps cells transparently, so InstanceHA does not need per-cell configuration. However, cross-cell queries are slower -- expect 1-3 seconds per poll at this scale.
-- **Heartbeat processing**: The UDP listener processes heartbeat packets individually. At 1000 nodes with the default `HEARTBEAT_TIMEOUT: 120`, the listener handles ~8 packets/second (1000 nodes / 120 seconds). This is well within capacity -- the [heartbeat performance benchmarks](instanceha_heartbeat_performance.md) show the listener handles 5000+ packets/second.
+- **Heartbeat processing**: The UDP listener processes heartbeat packets individually. At 1000 nodes with the default `HEARTBEAT_TIMEOUT: 120`, the listener handles ~8 packets/second (1000 nodes / 120 seconds). The [heartbeat performance benchmarks](instanceha_heartbeat_performance.md) show the listener handles 5000+ packets/second.
 - **Fencing concurrency**: With `WORKERS: 4`, up to 4 hosts are fenced in parallel. Each fencing operation (IPMI/Redfish) takes 5-30 seconds. At large scale, a correlated failure (e.g., a rack power event taking down 20 nodes) will be fenced across multiple poll cycles due to `MAX_HOSTS_PER_CYCLE`.
 - **Detection latency during long cycles**: The main loop is synchronous -- it blocks on `_process_stale_services` until all fencing and evacuation completes before polling again. Cycles cannot overlap. However, a long cycle delays detection of new failures. With `WORKERS: 8` and `MAX_HOSTS_PER_CYCLE: 5`, a worst-case cycle runs ~30 seconds (5 fencing ops at 30s each, parallelized across 8 workers), plus evacuation. Any host that fails during this window won't be detected until the next poll.
 
@@ -1298,14 +1313,14 @@ spec:
     POLL: "120"                      # 2 min poll -- balances detection latency vs API load at scale
     DELTA: "60"                      # 60s staleness -- tolerates cross-cell query lag
 
-    # Heartbeat (strongly recommended at scale)
-    CHECK_HEARTBEAT: "True"          # Dual-channel detection is essential at 1000 nodes
+    # Heartbeat
+    CHECK_HEARTBEAT: "True"          # Dual-channel detection at 1000 nodes
     HEARTBEAT_TIMEOUT: "180"         # 3 minutes -- tolerates transient network blips at scale
     HEARTBEAT_CLIFF_THRESHOLD: "15"  # 15% -- 150 simultaneous silent hosts is already a strong partition signal
     HEARTBEAT_CLIFF_MAX_CYCLES: "5"  # 5 cycles (10 minutes at POLL=120) before accepting as genuine
 
     # Safety thresholds
-    THRESHOLD: "10"                  # 10% -- at 1000 nodes, 100+ simultaneous failures is almost certainly an anomaly
+    THRESHOLD: "10"                  # 10% -- at 1000 nodes, blocks fencing when 100+ hosts report down simultaneously
     MAX_HOSTS_PER_CYCLE: "5"         # Fence at most 5 hosts per cycle -- conservative, observable, interruptible
     TAGGED_AGGREGATES: "True"        # Use aggregate-based host filtering
 
@@ -1313,6 +1328,7 @@ spec:
     SMART_EVACUATION: "True"         # Track migrations to completion -- essential for visibility at scale
     WORKERS: "8"                     # 8 parallel fencing workers (up from default 4)
     EVACUATION_RETRIES: "3"          # 3 retries per VM (lower than default 5 -- avoid piling up at scale)
+    EVACUATION_STAGGER: "2"          # 2s between each VM -- reduces control plane pressure at scale
 
     # Security
     FENCING_TIMEOUT: "30"            # 30s timeout per fencing command
@@ -1321,19 +1337,19 @@ spec:
 
 #### Why These Values
 
-**`POLL: 120`** -- At 1000 nodes, a poll cycle that triggers fencing and evacuation can take 60+ seconds (cross-cell service list query + aggregate lookups + fencing with `WORKERS: 8`). A 120-second interval ensures the previous cycle completes before the next one starts. The detection latency trade-off (up to POLL + DELTA = 3 minutes) is acceptable because heartbeat verification provides near-real-time detection independent of the poll interval, and at this scale, acting slightly slower but correctly is far better than acting fast on bad data.
+**`POLL: 120`** -- At 1000 nodes, a poll cycle that triggers fencing and evacuation can take 60+ seconds (cross-cell service list query + aggregate lookups + fencing with `WORKERS: 8`). A 120-second interval ensures the previous cycle completes before the next one starts. The detection latency trade-off (up to POLL + DELTA = 3 minutes) is offset by heartbeat verification, which provides near-real-time detection independent of the poll interval.
 
-**`DELTA: 60`** -- Nova's `updated_at` timestamp for compute services can lag during cross-cell database queries, especially when cells are under load. A 60-second staleness window absorbs this variance. Combined with `POLL: 120`, worst-case detection time is ~3 minutes -- well within typical HA SLAs for infrastructure-level recovery.
+**`DELTA: 60`** -- Nova's `updated_at` timestamp for compute services can lag during cross-cell database queries, especially when cells are under load. A 60-second staleness window absorbs this variance. Combined with `POLL: 120`, worst-case detection time is ~3 minutes.
 
-**`HEARTBEAT_CLIFF_THRESHOLD: 15`** -- At 1000 nodes, 15% means 150 hosts going silent simultaneously triggers cliff detection. In a cluster this large, even 50 simultaneous heartbeat losses would be unusual -- 150 is an extremely strong signal that the listener's network path is compromised, not that 150 physical servers died at the same instant. The default 50% (500 hosts) would essentially never trigger at this scale, making it useless as a safety gate.
+**`HEARTBEAT_CLIFF_THRESHOLD: 15`** -- At 1000 nodes, 15% means 150 hosts going silent simultaneously triggers cliff detection. The default 50% (500 hosts) is unlikely to trigger at this scale. 15% catches rack-level or spine-switch failures that affect a significant portion of the cluster.
 
 **`HEARTBEAT_CLIFF_MAX_CYCLES: 5`** -- At `POLL: 120`, 5 cycles = 10 minutes before the cliff detector gives up and accepts the state as genuine. This is long enough for most transient network events (spanning tree convergence, switch firmware upgrades, brief routing flaps) to resolve, while still bounded -- a genuine spine switch failure will be acted on within 10 minutes. **Important**: when the cliff expires, `MAX_HOSTS_PER_CYCLE` is the primary defense against fencing too many hosts at once. These two settings are mutually dependent -- do not raise `MAX_HOSTS_PER_CYCLE` without also ensuring `HEARTBEAT_CLIFF_MAX_CYCLES * POLL` exceeds your longest expected network reconvergence time. Values below 10 for `HEARTBEAT_CLIFF_THRESHOLD` are silently clamped to 10 (the ConfigManager minimum).
 
-**`THRESHOLD: 10`** -- At 1000 nodes, 10% allows up to 100 simultaneous failures. A single rack (~40 nodes) failing is 4% -- well under the threshold. Two racks failing simultaneously (80 nodes, 8%) still passes. But 100+ hosts being reported down at once is almost certainly a Nova API issue, a cell outage, or a network partition -- not a genuine failure of 100 physical servers. The per-aggregate thresholds (see below) provide finer-grained control within failure domains.
+**`THRESHOLD: 10`** -- At 1000 nodes, 10% allows up to 100 simultaneous failures. A single rack (~40 nodes) failing is 4%, two racks (80 nodes) is 8% -- both pass the threshold. 100+ hosts reporting down simultaneously indicates a Nova API issue, a cell outage, or a network partition. The per-aggregate thresholds (see below) provide finer-grained control within failure domains.
 
-**`MAX_HOSTS_PER_CYCLE: 5`** -- Deliberately conservative. At 1000 nodes, simultaneous correlated failures are expected (rack power events, switch failures, storage fabric issues), but the cost of fencing too many hosts on bad data far exceeds the cost of slower recovery for genuine failures. A 40-node rack failure takes 8 poll cycles (16 minutes at `POLL: 120`) to fully fence -- during which operators can observe the steady stream of `FencingRateLimited` events and confirm the failure is real. If recovery speed is critical for specific workloads, use per-aggregate thresholds to allow faster fencing within known failure domains rather than raising the global cap.
+**`MAX_HOSTS_PER_CYCLE: 5`** -- Limits fencing throughput to 5 hosts per cycle. A 40-node rack failure takes 8 poll cycles (16 minutes at `POLL: 120`) to fully fence, during which operators can observe the `FencingRateLimited` events and confirm the failure is genuine. For faster recovery within specific failure domains, use per-aggregate thresholds rather than raising the global cap.
 
-**`WORKERS: 8`** -- With `MAX_HOSTS_PER_CYCLE: 5`, 8 workers process the entire batch in a single round of parallel fencing. The inner evacuation thread pool is capped at `MAX_TOTAL_EVACUATION_THREADS / WORKERS` = 32/8 = 4 concurrent evacuations per host (hardcoded constant, not configurable). At worst, 5 x 4 = 20 simultaneous evacuation requests -- well within what a production Nova deployment should handle.
+**`WORKERS: 8`** -- With `MAX_HOSTS_PER_CYCLE: 5`, 8 workers process the entire batch in a single round of parallel fencing. The inner evacuation thread pool is `EVACUATION_MAX_THREADS / WORKERS` = 32/8 = 4 concurrent evacuations per host (configurable via `EVACUATION_MAX_THREADS`). Peak concurrent evacuation requests: 5 x 4 = 20.
 
 **`EVACUATION_RETRIES: 3`** -- At large scale, 5 retries per VM across 10 hosts with dozens of VMs each can create a long tail of retry traffic against the Nova API. 3 retries catches transient errors without piling up.
 

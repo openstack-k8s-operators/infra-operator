@@ -202,6 +202,42 @@ class TestFilterProcessingHosts(unittest.TestCase):
         # resume-host should be filtered out
         self.assertEqual(len(resume_filtered), 0)
 
+    def test_filter_processing_hosts_stagger_extends_expiry(self):
+        """With non-zero stagger, processing entries should not expire prematurely."""
+        service = instanceha.InstanceHAService(make_mock_config(
+            EVACUATION_STAGGER=10, EVACUATION_MAX_THREADS=32,
+            EVACUATION_TIMEOUT=300, FENCING_TIMEOUT=30))
+
+        # Add an entry that would be expired without stagger (350s ago > 300+30),
+        # but should survive with stagger (300 + 31*10 = 610 + 30 padding = 640)
+        old_time = time.monotonic() - 350
+        service.hosts_processing['active-host'] = old_time
+
+        svc1 = Mock()
+        svc1.host = 'new-host.example.com'
+
+        instanceha._filter_processing_hosts(service, [svc1], [])
+
+        # active-host should NOT be expired because stagger extends the budget
+        self.assertIn('active-host', service.hosts_processing)
+
+    def test_filter_processing_hosts_stagger_zero_original_expiry(self):
+        """With stagger=0, expiry is unchanged from original behavior."""
+        service = instanceha.InstanceHAService(make_mock_config(
+            EVACUATION_STAGGER=0, EVACUATION_MAX_THREADS=32,
+            EVACUATION_TIMEOUT=300, FENCING_TIMEOUT=30))
+
+        # Entry 350s ago should expire (max(30, 300) + 30 padding = 330 < 350)
+        old_time = time.monotonic() - 350
+        service.hosts_processing['old-host'] = old_time
+
+        svc1 = Mock()
+        svc1.host = 'new-host.example.com'
+
+        instanceha._filter_processing_hosts(service, [svc1], [])
+
+        self.assertNotIn('old-host', service.hosts_processing)
+
 
 class TestPrepareEvacuationResources(unittest.TestCase):
     """Test _prepare_evacuation_resources function."""
@@ -438,6 +474,26 @@ class TestCountEvacuableHosts(unittest.TestCase):
 
         # Should count each unique host once (host1, host2, host3)
         self.assertEqual(count, 3)
+
+
+class TestMigrationQueryMinutesForTimeout(unittest.TestCase):
+    """Tests for _migration_query_minutes_for_timeout derivation."""
+
+    def test_default_timeout(self):
+        result = instanceha._migration_query_minutes_for_timeout(300)
+        self.assertEqual(result, 7)
+
+    def test_small_timeout_uses_floor(self):
+        result = instanceha._migration_query_minutes_for_timeout(60)
+        self.assertEqual(result, 5)
+
+    def test_large_timeout(self):
+        result = instanceha._migration_query_minutes_for_timeout(3600)
+        self.assertEqual(result, 62)
+
+    def test_zero_timeout_uses_floor(self):
+        result = instanceha._migration_query_minutes_for_timeout(0)
+        self.assertEqual(result, 5)
 
 
 if __name__ == '__main__':
