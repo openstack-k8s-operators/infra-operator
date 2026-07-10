@@ -383,6 +383,7 @@ rules:
 - apiGroups:
   - self-node-remediation.medik8s.io
   resources:
+  - selfnoderemediations
   - selfnoderemediationtemplates
   verbs:
   - get

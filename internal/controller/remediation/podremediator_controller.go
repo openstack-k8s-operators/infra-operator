@@ -280,11 +280,14 @@ func (r *PodRemediatorReconciler) getNodesWithActiveSNR(ctx context.Context) (ma
 	nodes := make(map[string]bool, len(snrList.Items))
 	for _, snr := range snrList.Items {
 		// NHC names the SNR CR with a random suffix (e.g. worker-0-6lwkb); the
-		// authoritative node name is in the medik8s label, not the CR name.
-		if nodeName, ok := snr.GetLabels()["remediation.medik8s.io/node-name"]; ok && nodeName != "" {
+		// authoritative node name is in the medik8s annotation (not label).
+		if nodeName, ok := snr.GetAnnotations()["remediation.medik8s.io/node-name"]; ok && nodeName != "" {
+			nodes[nodeName] = true
+		} else if nodeName, ok := snr.GetLabels()["remediation.medik8s.io/node-name"]; ok && nodeName != "" {
+			// Fallback to label in case newer medik8s versions move it.
 			nodes[nodeName] = true
 		} else {
-			// Fallback: strip known random suffixes by using the name as-is.
+			// Last resort: use the CR name as-is.
 			nodes[snr.GetName()] = true
 		}
 	}
