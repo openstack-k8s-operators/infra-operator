@@ -79,6 +79,16 @@ DEFAULT_HEARTBEAT_PORT = 7411
 HEARTBEAT_CLEANUP_AGE_SECONDS = 600
 _ALLOWED_HTTP_METHODS = frozenset({'get', 'post', 'patch', 'put', 'delete'})
 
+
+def _migration_query_minutes_for_timeout(evacuation_timeout_seconds):
+    """Derive migration query window from evacuation timeout.
+
+    Always at least MIGRATION_QUERY_MINUTES, with 2 minutes of padding
+    beyond the evacuation timeout so in-progress migrations remain visible.
+    """
+    return max(MIGRATION_QUERY_MINUTES, (evacuation_timeout_seconds + 120) // 60)
+
+
 # Disabled reason markers
 LOCK_REASON_EVACUATION = "instanceha-evacuation"
 DISABLED_REASON_EVACUATION = "instanceha evacuation"
@@ -682,7 +692,7 @@ class ConfigManager:
         'DELTA': ConfigItem('int', 30, 10, 300),
         'POLL': ConfigItem('int', 45, 15, 600),
         'THRESHOLD': ConfigItem('int', 50, 0, 100),
-        'WORKERS': ConfigItem('int', 4, 1, 50),
+        'WORKERS': ConfigItem('int', 4, 1, 100),
         'DELAY': ConfigItem('int', 0, 0, 300),
         'LOGLEVEL': ConfigItem('str', 'INFO'),
         'SMART_EVACUATION': ConfigItem('bool', False),
@@ -703,10 +713,13 @@ class ConfigManager:
         'HASH_INTERVAL': ConfigItem('int', 60, 30, 300),
         'ORCHESTRATED_RESTART': ConfigItem('bool', False),
         'SKIP_SERVERS_WITH_NAME': ConfigItem('list', []),
+        'EVACUATION_MAX_THREADS': ConfigItem('int', MAX_TOTAL_EVACUATION_THREADS, 1, 512),
         'EVACUATION_RETRIES': ConfigItem('int', DEFAULT_EVACUATION_RETRIES, 1, 20),
+        'EVACUATION_STAGGER': ConfigItem('int', 0, 0, 60),
+        'EVACUATION_TIMEOUT': ConfigItem('int', MAX_EVACUATION_TIMEOUT_SECONDS, 60, 3600),
         'HEARTBEAT_CLIFF_THRESHOLD': ConfigItem('int', 50, 10, 100),
         'HEARTBEAT_CLIFF_MAX_CYCLES': ConfigItem('int', 3, 1, 20),
-        'MAX_HOSTS_PER_CYCLE': ConfigItem('int', 10, 1, 100),
+        'MAX_HOSTS_PER_CYCLE': ConfigItem('int', 10, 1, 200),
         'K8S_API_CHECK_INTERVAL': ConfigItem('int', 15, 5, 120),
     }
 
@@ -1694,27 +1707,38 @@ def _build_evacuation_groups(evacuables) -> List[List]:
     return [servers for _, _, servers in phases]
 
 
-def _run_concurrent(func, items, max_workers, item_id_func, log_prefix=""):
+def _run_concurrent(func, items, max_workers, item_id_func, log_prefix="",
+                    timeout=None, stagger=0, shutdown_event=None):
     """Run func for each item concurrently, return True if all succeeded."""
+    effective_timeout = timeout if timeout is not None else MAX_EVACUATION_TIMEOUT_SECONDS + 60
     all_succeeded = True
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_item = {executor.submit(func, item): item for item in items}
-        for future in concurrent.futures.as_completed(future_to_item):
-            item = future_to_item[future]
-            item_id = item_id_func(item)
-            try:
-                if not future.result(timeout=MAX_EVACUATION_TIMEOUT_SECONDS + 60):
-                    logging.warning('%s%s failed', log_prefix, item_id)
+        future_to_item = {}
+        for idx, item in enumerate(items):
+            if stagger > 0 and idx > 0:
+                _interruptible_sleep(shutdown_event, stagger)
+                if shutdown_event and shutdown_event.is_set():
+                    break
+            future_to_item[executor.submit(func, item)] = item
+        try:
+            for future in concurrent.futures.as_completed(future_to_item, timeout=effective_timeout):
+                item = future_to_item[future]
+                item_id = item_id_func(item)
+                try:
+                    if not future.result():
+                        logging.warning('%s%s failed', log_prefix, item_id)
+                        all_succeeded = False
+                    else:
+                        logging.info('%s%s succeeded', log_prefix, item_id)
+                except Exception as exc:
+                    logging.error('%s%s raised exception: %s', log_prefix, item_id, exc)
+                    logging.debug('Exception traceback:', exc_info=True)
                     all_succeeded = False
-                else:
-                    logging.info('%s%s succeeded', log_prefix, item_id)
-            except concurrent.futures.TimeoutError:
-                logging.error('%s%s timed out', log_prefix, item_id)
-                all_succeeded = False
-            except Exception as exc:
-                logging.error('%s%s raised exception: %s', log_prefix, item_id, exc)
-                logging.debug('Exception traceback:', exc_info=True)
-                all_succeeded = False
+        except concurrent.futures.TimeoutError:
+            pending = [item_id_func(future_to_item[f]) for f in future_to_item if not f.done()]
+            logging.error('%s%d item(s) timed out after %ds: %s',
+                          log_prefix, len(pending), effective_timeout, ', '.join(pending))
+            all_succeeded = False
     return all_succeeded
 
 
@@ -1724,10 +1748,15 @@ def _concurrent_evacuate(connection, evacuables, service, host, service_id, targ
     phases = _build_evacuation_groups(evacuables) if orchestrated else [evacuables]
     total_phases = len(phases)
     max_retries = service.config.get_config_value('EVACUATION_RETRIES')
-    inner_workers = max(1, MAX_TOTAL_EVACUATION_THREADS // service.config.get_config_value('WORKERS'))
+    evacuation_timeout = service.config.get_config_value('EVACUATION_TIMEOUT')
+    stagger = service.config.get_config_value('EVACUATION_STAGGER')
+    inner_workers = max(1, service.config.get_config_value('EVACUATION_MAX_THREADS') // service.config.get_config_value('WORKERS'))
 
-    logging.info("Concurrent evacuation: %d phase(s), %d total servers from %s (orchestrated=%s)",
-                total_phases, sum(len(p) for p in phases), host, orchestrated)
+    total_servers = sum(len(p) for p in phases)
+    max_stagger_time = (total_servers - 1) * stagger if stagger else 0
+    logging.info("Concurrent evacuation: %d phase(s), %d total servers from %s (orchestrated=%s, timeout=%ds%s)",
+                total_phases, total_servers, host, orchestrated, evacuation_timeout,
+                f", stagger={stagger}s (last VM delayed {max_stagger_time}s)" if stagger else "")
 
     all_succeeded = True
     for phase_num, phase_servers in enumerate(phases, 1):
@@ -1735,14 +1764,19 @@ def _concurrent_evacuate(connection, evacuables, service, host, service_id, targ
             logging.info("Starting evacuation phase %d/%d (%d servers)",
                         phase_num, total_phases, len(phase_servers))
 
+        max_stagger = (len(phase_servers) - 1) * stagger if phase_servers else 0
         phase_ok = _run_concurrent(
             lambda s: _server_evacuate_future(connection, s, target_host,
                                               max_retries=max_retries,
-                                              shutdown_event=service.shutdown_event),
+                                              shutdown_event=service.shutdown_event,
+                                              evacuation_timeout=evacuation_timeout),
             phase_servers,
             inner_workers,
             lambda s: s.id,
             log_prefix=f"Phase {phase_num}: " if total_phases > 1 else "",
+            timeout=evacuation_timeout + max_stagger + 60,
+            stagger=stagger,
+            shutdown_event=service.shutdown_event,
         )
         if not phase_ok:
             all_succeeded = False
@@ -1876,13 +1910,13 @@ def _server_evacuate(connection, server, target_host=None, server_obj=None) -> E
     )
 
 
-def _server_evacuation_status(connection, server) -> EvacuationStatus:
+def _server_evacuation_status(connection, server, query_minutes=MIGRATION_QUERY_MINUTES) -> EvacuationStatus:
     """Check the status of a server evacuation by querying recent migrations."""
     if not connection or not server:
         return EvacuationStatus(completed=False, error=True)
 
     try:
-        query_time = (datetime.now(timezone.utc) - timedelta(minutes=MIGRATION_QUERY_MINUTES)).isoformat()
+        query_time = (datetime.now(timezone.utc) - timedelta(minutes=query_minutes)).isoformat()
         migrations = connection.migrations.list(
             instance_uuid=str(server),
             migration_type='evacuation',
@@ -1913,23 +1947,26 @@ def _server_evacuation_status(connection, server) -> EvacuationStatus:
 
 def _monitor_evacuation(connection, server_id, response_uuid, start_time,
                         max_retries=DEFAULT_EVACUATION_RETRIES,
-                        shutdown_event=None) -> bool:
+                        shutdown_event=None,
+                        evacuation_timeout=MAX_EVACUATION_TIMEOUT_SECONDS) -> bool:
     """Poll Nova migrations API until evacuation completes, errors out, or times out."""
     migration_error_count = 0
     api_error_count = 0
+    query_minutes = _migration_query_minutes_for_timeout(evacuation_timeout)
 
     while True:
         if shutdown_event and shutdown_event.is_set():
             logging.warning("Shutdown requested, aborting evacuation monitoring for %s", response_uuid)
             return False
 
-        if time.monotonic() - start_time > MAX_EVACUATION_TIMEOUT_SECONDS:
+        if time.monotonic() - start_time > evacuation_timeout:
             logging.error("Evacuation of %s timed out after %d seconds. Giving up.",
-                         response_uuid, MAX_EVACUATION_TIMEOUT_SECONDS)
+                         response_uuid, evacuation_timeout)
             return False
 
         try:
-            status = _server_evacuation_status(connection, server_id)
+            status = _server_evacuation_status(connection, server_id,
+                                               query_minutes=query_minutes)
             api_error_count = 0
 
             if status.completed:
@@ -1975,7 +2012,8 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
 
 def _server_evacuate_future(connection, server, target_host=None,
                             max_retries=DEFAULT_EVACUATION_RETRIES,
-                            shutdown_event=None) -> bool:
+                            shutdown_event=None,
+                            evacuation_timeout=MAX_EVACUATION_TIMEOUT_SECONDS) -> bool:
     """Evacuate a server and monitor until completion."""
     if not hasattr(server, 'id'):
         logging.warning("Could not evacuate instance - missing server ID: %s",
@@ -2023,7 +2061,8 @@ def _server_evacuate_future(connection, server, target_host=None,
 
         result = _monitor_evacuation(connection, server.id, response.uuid, start_time,
                                      max_retries=max_retries,
-                                     shutdown_event=shutdown_event)
+                                     shutdown_event=shutdown_event,
+                                     evacuation_timeout=evacuation_timeout)
 
         if result:
             _emit_k8s_event(source_host, 'InstanceEvacuationSucceeded',
@@ -2923,7 +2962,7 @@ def process_service(failed_service, reserved_hosts, resume, service) -> bool:
 
             # Disable the host (skip if already disabled from previous evacuation attempt)
             # Note: kdump-fenced hosts use resume=True but are NOT yet disabled, so we still disable them
-            if not (resume and failed_service.forced_down and 'disabled' in failed_service.status):
+            if not (resume and getattr(failed_service, 'forced_down', False) and 'disabled' in failed_service.status):
                 if not _execute_step("Host disable", _host_disable, host_name, conn, failed_service, service):
                     return False
 
@@ -3037,7 +3076,7 @@ def _establish_nova_connection(service, fatal=True):
 
 def _is_service_resume_candidate(svc) -> bool:
     """Check if a service is a candidate for resuming evacuation."""
-    if not (svc.forced_down and svc.state == 'down' and 'disabled' in svc.status):
+    if not (getattr(svc, 'forced_down', False) and svc.state == 'down' and 'disabled' in svc.status):
         return False
 
     reason = getattr(svc, 'disabled_reason', '') or ''
@@ -3062,7 +3101,7 @@ def _categorize_services(services: List[Any], target_date: datetime) -> tuple:
     """Categorize services into compute nodes, resume candidates, and re-enable candidates."""
     # Compute nodes needing evacuation (not disabled/forced-down, and either down or stale)
     compute_nodes = (svc for svc in services
-                     if not ('disabled' in svc.status or svc.forced_down)
+                     if not ('disabled' in svc.status or getattr(svc, 'forced_down', False))
                      and (svc.state == 'down' or _is_service_stale(svc, target_date)))
 
     # Resume candidates (forced down, disabled with instanceha marker, not failed, not complete)
@@ -3071,8 +3110,8 @@ def _categorize_services(services: List[Any], target_date: datetime) -> tuple:
     # Re-enable candidates (forced down OR disabled with instanceha complete marker, but NOT resume candidates)
     # Note: We unset force_down first to allow service to report up, then enable once up
     reenable = (svc for svc in services
-                if (('enabled' in svc.status and svc.forced_down)
-                   or ('disabled' in svc.status and DISABLED_REASON_EVACUATION_COMPLETE in (svc.disabled_reason or '')))
+                if (('enabled' in svc.status and getattr(svc, 'forced_down', False))
+                   or ('disabled' in svc.status and DISABLED_REASON_EVACUATION_COMPLETE in (getattr(svc, 'disabled_reason', '') or '')))
                 and not _is_service_resume_candidate(svc))
 
     return compute_nodes, resume, reenable
@@ -3104,7 +3143,11 @@ def _cleanup_filtered_hosts(service, marked_hostnames, final_hostnames, current_
 def _filter_processing_hosts(service, compute_nodes, to_resume):
     """Filter out hosts already being processed and mark new ones."""
     current_time = time.monotonic()
-    max_processing_time = max(service.config.get_config_value('FENCING_TIMEOUT'), MAX_EVACUATION_TIMEOUT_SECONDS)
+    stagger = service.config.get_config_value('EVACUATION_STAGGER')
+    max_threads = service.config.get_config_value('EVACUATION_MAX_THREADS')
+    max_processing_time = max(service.config.get_config_value('FENCING_TIMEOUT'),
+                              service.config.get_config_value('EVACUATION_TIMEOUT')
+                              + (max_threads - 1) * stagger)
     marked_hostnames = set()
 
     with service.processing_lock:
@@ -3260,7 +3303,7 @@ def _filter_reachable_hosts(service, compute_nodes):
             skipped.append(svc)
             logging.warning(
                 'Host %s reported down by Nova but heartbeat received %.1fs ago -- '
-                'skipping fencing (likely nova-compute crash)',
+                'skipping fencing, please check nova-compute service health',
                 svc.host, current_time - last_heartbeat)
         else:
             unreachable.append(svc)
@@ -3296,7 +3339,7 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
                 for svc in heartbeat_skipped:
                     _emit_k8s_event(svc.host, 'HostReachable',
                                     'Host reported down by Nova but still sending heartbeats -- '
-                                    'skipping fencing (likely nova-compute crash)',
+                                    'skipping fencing, please check nova-compute service health',
                                     event_type='Warning')
                     HOST_REACHABLE_TOTAL.labels(host=svc.host).inc()
 
@@ -3305,19 +3348,18 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
             stale_count, len(heartbeat_skipped), len(compute_nodes), cliff_detected)
 
         # Sanity check: if every active service still appears stale after heartbeat
-        # filtering, the data source is likely wrong. Only trigger when there are
+        # filtering, the data source is suspect. Only trigger when there are
         # enough active services for this to be meaningful (>=3), since small
         # clusters (2 nodes) can legitimately have all hosts down.
-        active_services = [s for s in services if 'disabled' not in s.status and not s.forced_down]
+        active_services = [s for s in services if 'disabled' not in s.status and not getattr(s, 'forced_down', False)]
         if compute_nodes and len(active_services) >= MIN_ACTIVE_SERVICES_FOR_STALE_CHECK and len(compute_nodes) >= len(active_services):
             logging.critical(
-                'ALL %d active compute services appear stale -- this is almost certainly '
-                'a Nova API or infrastructure issue, not a genuine failure of every host. '
-                'Skipping fencing this cycle.',
+                'ALL %d active compute services appear stale -- '
+                'skipping fencing this cycle, please check Nova API and infrastructure health.',
                 len(active_services))
             _emit_k8s_event('cluster', 'AllServicesStale',
                             f'All {len(active_services)} active compute services appear stale -- '
-                            'skipping fencing (likely Nova API issue)',
+                            'skipping fencing, please check Nova API and infrastructure health',
                             event_type='Warning')
             ALL_SERVICES_STALE_TOTAL.inc()
             return
@@ -3406,6 +3448,11 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
 
             workers = service.config.get_config_value('WORKERS')
             poll_interval = service.config.get_config_value('POLL')
+            stagger = service.config.get_config_value('EVACUATION_STAGGER')
+            max_threads = service.config.get_config_value('EVACUATION_MAX_THREADS')
+            outer_timeout = (service.config.get_config_value('FENCING_TIMEOUT')
+                             + service.config.get_config_value('EVACUATION_TIMEOUT')
+                             + (max_threads - 1) * stagger + 60)
             for batch_name, batch, resume in [
                 ('new evacuations', to_evacuate, False),
                 ('kdump-fenced', kdump_fenced, True),
@@ -3418,6 +3465,7 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
                     batch,
                     workers,
                     lambda svc: f"{svc.host} ({batch_name})",
+                    timeout=outer_timeout,
                 )
 
             final_hostnames = {_extract_hostname(svc.host) for svc in to_evacuate + kdump_fenced + to_resume}
@@ -3444,7 +3492,7 @@ def _get_evacuable_hosts_from_aggregates(conn, service, aggregates=None):
 def _count_evacuable_hosts(conn, service, services, aggregates=None):
     """Count total number of compute services in evacuable aggregates."""
     evacuable_hosts = _get_evacuable_hosts_from_aggregates(conn, service, aggregates)
-    active_services = [s for s in services if 'disabled' not in s.status and not s.forced_down]
+    active_services = [s for s in services if 'disabled' not in s.status and not getattr(s, 'forced_down', False)]
     if evacuable_hosts is None:
         return len(active_services)
     return sum(1 for svc in active_services if svc.host in evacuable_hosts)
@@ -3525,6 +3573,8 @@ def _process_reenabling(conn, service, to_reenable) -> None:
 
     logging.debug('Checking %d computes for re-enabling', len(to_reenable))
     force_enable = service.config.get_config_value('FORCE_ENABLE')
+    query_minutes = _migration_query_minutes_for_timeout(
+        service.config.get_config_value('EVACUATION_TIMEOUT'))
 
     for svc in to_reenable:
         try:
@@ -3532,10 +3582,15 @@ def _process_reenabling(conn, service, to_reenable) -> None:
             if force_enable:
                 migrations_complete = True
             else:
-                query_time = (datetime.now(timezone.utc) - timedelta(minutes=MIGRATION_QUERY_MINUTES)).isoformat()
+                query_time = (datetime.now(timezone.utc) - timedelta(minutes=query_minutes)).isoformat()
                 migrations = conn.migrations.list(source_compute=svc.host, migration_type='evacuation',
                                                  changes_since=query_time, limit=str(MIGRATION_QUERY_LIMIT))
-                incomplete = [m for m in migrations if m.status not in MIGRATION_STATUS_COMPLETED and m.status not in MIGRATION_STATUS_ERROR]
+                if migrations is None:
+                    logging.warning('Nova returned no migration data for %s (API may be unavailable), skipping re-enable check', svc.host)
+                    continue
+                incomplete = [m for m in migrations
+                              if getattr(m, 'status', None) not in MIGRATION_STATUS_COMPLETED
+                              and getattr(m, 'status', None) not in MIGRATION_STATUS_ERROR]
                 migrations_complete = len(incomplete) == 0
 
             if not migrations_complete:
@@ -3555,7 +3610,7 @@ def _process_reenabling(conn, service, to_reenable) -> None:
                     logging.info('%s kdump messages stopped (%.0fs since last message), proceeding with re-enable', svc.host, time_since_kdump)
 
             # Unset force_down if needed (allows service to report up)
-            if svc.forced_down:
+            if getattr(svc, 'forced_down', False):
                 _host_enable(conn, svc, reenable=True, service=service)
 
             # Enable disabled services only if they're now up
@@ -3569,7 +3624,7 @@ def _process_reenabling(conn, service, to_reenable) -> None:
                 else:
                     logging.debug('%s still down, will enable once up', svc.host)
         except Exception as e:
-            logging.error('Failed to enable %s: %s', svc.host, e)
+            logging.error('Failed to enable %s: %s', svc.host, e, exc_info=True)
 
 def _reconcile_orphaned_hosts(conn):
     """Reconcile hosts left in an inconsistent state after a crash.
@@ -3587,7 +3642,7 @@ def _reconcile_orphaned_hosts(conn):
     recovered = 0
     unlocked = 0
     for svc in services:
-        if not (svc.forced_down and svc.state == 'down'):
+        if not (getattr(svc, 'forced_down', False) and svc.state == 'down'):
             continue
 
         # Mark orphaned fenced hosts for evacuation resume
