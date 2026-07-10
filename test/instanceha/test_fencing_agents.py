@@ -1129,14 +1129,17 @@ class TestFencingRaceCondition(unittest.TestCase):
         mock_services = [Mock(status='enabled', forced_down=False) for _ in range(10)]
 
         # Simulate filtering: hosts get filtered out (no servers)
-        # The cleanup should happen in _process_stale_services after filtering
+        # The cleanup should happen in _admit_stale_services after filtering
         with unittest.mock.patch.object(self.service, 'get_hosts_with_servers_cached', return_value={}), \
              unittest.mock.patch.object(self.service, 'get_evacuable_images', return_value=[]), \
              unittest.mock.patch.object(self.service, 'get_evacuable_flavors', return_value=[]), \
              unittest.mock.patch.object(self.service, 'refresh_evacuable_cache'):
-            instanceha._process_stale_services(mock_conn, self.service, mock_services, [mock_svc1, mock_svc2], [])
+            instanceha._admit_stale_services(mock_conn, self.service, mock_services, [mock_svc1, mock_svc2], [])
 
-        # Verify filtered hosts are cleaned up (were marked but filtered out)
+        # Wait for async processing to complete
+        self.service.processing_executor.shutdown(wait=True)
+
+        # Verify hosts are cleaned up after processing
         with self.service.processing_lock:
             self.assertNotIn('host-1', self.service.hosts_processing)
             self.assertNotIn('host-2', self.service.hosts_processing)
@@ -1161,7 +1164,7 @@ class TestFencingRaceCondition(unittest.TestCase):
              unittest.mock.patch.object(self.service, 'get_evacuable_images', return_value=[]), \
              unittest.mock.patch.object(self.service, 'get_evacuable_flavors', return_value=[]), \
              unittest.mock.patch.object(self.service, 'refresh_evacuable_cache'):
-            instanceha._process_stale_services(mock_conn, self.service, mock_services, [mock_svc], [])
+            instanceha._admit_stale_services(mock_conn, self.service, mock_services, [mock_svc], [])
 
         # Verify host is cleaned up (threshold exceeded, no evacuation)
         with self.service.processing_lock:
@@ -1184,7 +1187,7 @@ class TestFencingRaceCondition(unittest.TestCase):
              unittest.mock.patch.object(self.service, 'get_evacuable_flavors', return_value=[]), \
              unittest.mock.patch.object(self.service, 'refresh_evacuable_cache'):
             # Pass host that will be filtered out
-            instanceha._process_stale_services(mock_conn, self.service, mock_services, [mock_svc], [])
+            instanceha._admit_stale_services(mock_conn, self.service, mock_services, [mock_svc], [])
 
         # Verify host is cleaned up (was marked but filtered out)
         with self.service.processing_lock:

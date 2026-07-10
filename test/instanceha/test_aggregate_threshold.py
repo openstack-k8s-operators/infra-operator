@@ -29,6 +29,7 @@ def _make_service_obj(host):
 def _make_instanceha_service(evacuable_tag='evacuable'):
     service = Mock()
     service.evacuable_tag = evacuable_tag
+    service.hosts_processing = {}
     service._is_resource_evacuable = instanceha.InstanceHAService._is_resource_evacuable.__get__(service)
     service._check_evacuable_tag = instanceha.InstanceHAService._check_evacuable_tag.__get__(service)
     return service

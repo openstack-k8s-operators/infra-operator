@@ -2418,10 +2418,10 @@ class TestFencingRaceCondition(BaseTestCase):
         # Capture the filtered hosts that would be processed
         filtered_hosts_before = [svc.host for svc in compute_nodes]
 
-        # Call _process_stale_services (this should filter out the host being processed)
+        # Call _admit_stale_services (this should filter out the host being processed)
         with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True) as mock_process:
-            instanceha._process_stale_services(mock_conn, self.env.service,
+            instanceha._admit_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),
                                              compute_nodes, to_resume)
 
@@ -2484,10 +2484,10 @@ class TestFencingRaceCondition(BaseTestCase):
         from unittest.mock import Mock, patch
         mock_conn = Mock()
 
-        # Call _process_stale_services which should trigger cleanup
+        # Call _admit_stale_services which should trigger cleanup
         with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True):
-            instanceha._process_stale_services(mock_conn, self.env.service,
+            instanceha._admit_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),
                                              stale_services, [])
 
@@ -2522,10 +2522,10 @@ class TestFencingRaceCondition(BaseTestCase):
         mock_conn = Mock()
         mock_conn.services.list.return_value = []
 
-        # Call _process_stale_services
+        # Call _admit_stale_services
         with patch('instanceha._establish_nova_connection', return_value=mock_conn), \
              patch('instanceha.process_service', return_value=True) as mock_process:
-            instanceha._process_stale_services(mock_conn, self.env.service,
+            instanceha._admit_stale_services(mock_conn, self.env.service,
                                              self.env.mock_nova.services.list(),
                                              stale_services, [])
 

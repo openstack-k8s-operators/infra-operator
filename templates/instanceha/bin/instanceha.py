@@ -854,6 +854,12 @@ class InstanceHAService:
         # Host processing tracking
         self.hosts_processing = defaultdict(float)
         self.processing_lock = threading.Lock()
+        try:
+            workers = self.config.get_config_value('WORKERS')
+        except (TypeError, ValueError, AttributeError):
+            workers = 4
+        self.processing_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers if isinstance(workers, int) and workers > 0 else 4)
         self.reserved_hosts_lock = threading.Lock()
 
         logging.debug("MAX_HOSTS_PER_CYCLE=%d", self.config.get_config_value('MAX_HOSTS_PER_CYCLE'))
@@ -1325,6 +1331,18 @@ class InstanceHAService:
                     self._respond(500, "text/plain",
                                   f"Main loop stale ({staleness:.0f}s since last poll)".encode())
                     return
+
+                if service_instance.hosts_processing:
+                    now = time.monotonic()
+                    oldest_entry = min(service_instance.hosts_processing.values())
+                    max_processing = max(
+                        service_instance.config.get_config_value('FENCING_TIMEOUT'),
+                        service_instance.config.get_config_value('EVACUATION_TIMEOUT')) * 2
+                    if now - oldest_entry > max_processing:
+                        self._respond(500, "text/plain",
+                                      f"Processing stale ({len(service_instance.hosts_processing)} hosts, "
+                                      f"oldest {now - oldest_entry:.0f}s)".encode())
+                        return
 
                 self._respond(200, "text/plain", service_instance.current_hash)
 
@@ -3145,6 +3163,10 @@ def _filter_processing_hosts(service, compute_nodes, to_resume):
     current_time = time.monotonic()
     stagger = service.config.get_config_value('EVACUATION_STAGGER')
     max_threads = service.config.get_config_value('EVACUATION_MAX_THREADS')
+    # Use max_threads (not actual VM count) as the stagger multiplier: we don't
+    # know the per-host VM count at expiry-check time, so this is a deliberate
+    # safe upper bound that prevents premature expiry at the cost of holding the
+    # "in processing" slot longer than strictly necessary.
     max_processing_time = max(service.config.get_config_value('FENCING_TIMEOUT'),
                               service.config.get_config_value('EVACUATION_TIMEOUT')
                               + (max_threads - 1) * stagger)
@@ -3253,11 +3275,13 @@ def _filter_reachable_hosts(service, compute_nodes):
 
         timestamps_snapshot = dict(service.heartbeat_hosts_timestamp)
 
+    processing_hostnames = set(service.hosts_processing.keys())
     current_active = sum(
-        1 for ts in timestamps_snapshot.values()
-        if ts > 0 and (current_time - ts) <= heartbeat_timeout
+        1 for host, ts in timestamps_snapshot.items()
+        if host not in processing_hostnames
+        and ts > 0 and (current_time - ts) <= heartbeat_timeout
     )
-    previous_active = service.heartbeat_previous_active_count
+    previous_active = max(1, service.heartbeat_previous_active_count - len(processing_hostnames))
 
     cliff_detected = False
     if previous_active >= 3:
@@ -3311,14 +3335,15 @@ def _filter_reachable_hosts(service, compute_nodes):
     return unreachable, skipped, False
 
 
-def _process_stale_services(conn, service, services, compute_nodes, to_resume):
-    """Process stale compute services for evacuation."""
+def _admit_stale_services(conn, service, services, compute_nodes, to_resume):
+    """Evaluate safety gates and submit accepted hosts for background processing."""
     # Convert generators to lists - needed for multiple iterations and length checks
     compute_nodes = list(compute_nodes)
     to_resume = list(to_resume)
 
     if not (compute_nodes or to_resume):
         return
+
 
     # Filter out hosts already being processed
     compute_nodes, to_resume, marked_hostnames, current_time = _filter_processing_hosts(service, compute_nodes, to_resume)
@@ -3386,14 +3411,18 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
         compute_nodes, reserved_hosts, images, flavors = _prepare_evacuation_resources(
             conn, service, services, compute_nodes, aggregates=aggregates)
 
-        # Check evacuation threshold
+        # Check evacuation threshold: total cluster health (all down/forced_down
+        # hosts vs total hosts). Catches slow cascades where hosts fail one at a
+        # time -- previously-evacuated hosts that haven't recovered count as impacted.
         if services and compute_nodes:
-            # When TAGGED_AGGREGATES is enabled, calculate threshold against evacuable hosts only
             if service.config.get_config_value('TAGGED_AGGREGATES'):
+                evacuable_hosts = _get_evacuable_hosts_from_aggregates(conn, service, aggregates=aggregates)
                 total_evacuable = _count_evacuable_hosts(conn, service, services, aggregates=aggregates)
-                threshold_percent = (len(compute_nodes) / total_evacuable * 100) if total_evacuable > 0 else 0
+                total_down = _count_down_hosts(services, compute_nodes=compute_nodes, evacuable_hosts=evacuable_hosts)
+                threshold_percent = (total_down / total_evacuable * 100) if total_evacuable > 0 else 0
             else:
-                threshold_percent = (len(compute_nodes) / len(active_services)) * 100 if active_services else 0
+                total_down = _count_down_hosts(services, compute_nodes=compute_nodes)
+                threshold_percent = (total_down / len(services)) * 100 if services else 0
 
             threshold = service.config.get_config_value('THRESHOLD')
             if threshold_percent > threshold:
@@ -3446,13 +3475,6 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
                 to_evacuate = compute_nodes
                 kdump_fenced = []
 
-            workers = service.config.get_config_value('WORKERS')
-            poll_interval = service.config.get_config_value('POLL')
-            stagger = service.config.get_config_value('EVACUATION_STAGGER')
-            max_threads = service.config.get_config_value('EVACUATION_MAX_THREADS')
-            outer_timeout = (service.config.get_config_value('FENCING_TIMEOUT')
-                             + service.config.get_config_value('EVACUATION_TIMEOUT')
-                             + (max_threads - 1) * stagger + 60)
             for batch_name, batch, resume in [
                 ('new evacuations', to_evacuate, False),
                 ('kdump-fenced', kdump_fenced, True),
@@ -3460,13 +3482,19 @@ def _process_stale_services(conn, service, services, compute_nodes, to_resume):
             ]:
                 if not batch:
                     continue
-                _run_concurrent(
-                    lambda svc, _resume=resume: process_service(svc, reserved_hosts, _resume, service),
-                    batch,
-                    workers,
-                    lambda svc: f"{svc.host} ({batch_name})",
-                    timeout=outer_timeout,
-                )
+                logging.info("Submitting %d host(s) for %s", len(batch), batch_name)
+                for svc in batch:
+                    future = service.processing_executor.submit(
+                        process_service, svc, reserved_hosts, resume, service)
+                    _host = svc.host
+                    _batch = batch_name
+                    future.add_done_callback(
+                        lambda f, h=_host, b=_batch: logging.warning(
+                            "%s (%s) failed", h, b
+                        ) if f.exception() or not f.result() else logging.info(
+                            "%s (%s) succeeded", h, b
+                        )
+                    )
 
             final_hostnames = {_extract_hostname(svc.host) for svc in to_evacuate + kdump_fenced + to_resume}
         else:
@@ -3490,12 +3518,28 @@ def _get_evacuable_hosts_from_aggregates(conn, service, aggregates=None):
 
 
 def _count_evacuable_hosts(conn, service, services, aggregates=None):
-    """Count total number of compute services in evacuable aggregates."""
+    """Count total number of compute services in evacuable aggregates (all states)."""
     evacuable_hosts = _get_evacuable_hosts_from_aggregates(conn, service, aggregates)
-    active_services = [s for s in services if 'disabled' not in s.status and not getattr(s, 'forced_down', False)]
     if evacuable_hosts is None:
-        return len(active_services)
-    return sum(1 for svc in active_services if svc.host in evacuable_hosts)
+        return len(services)
+    return sum(1 for svc in services if svc.host in evacuable_hosts)
+
+
+def _count_down_hosts(services, compute_nodes=None, evacuable_hosts=None):
+    """Count compute services that are down, forced_down, or detected as stale.
+
+    Includes compute_nodes (hosts detected as stale by instanceha this cycle)
+    because Nova's state field may not have transitioned to 'down' yet --
+    instanceha detects staleness via timestamp before Nova does.
+    """
+    candidates = services
+    if evacuable_hosts is not None:
+        candidates = [s for s in services if s.host in evacuable_hosts]
+    down_hosts = {s.host for s in candidates
+                  if s.state == 'down' or getattr(s, 'forced_down', False)}
+    if compute_nodes:
+        down_hosts.update(s.host for s in compute_nodes)
+    return len(down_hosts)
 
 
 def _filter_by_aggregates(conn, service, compute_nodes, services, aggregates=None):
@@ -3515,6 +3559,7 @@ def _filter_by_aggregates(conn, service, compute_nodes, services, aggregates=Non
 def _filter_by_aggregate_threshold(compute_nodes, aggregates, service):
     """Filter out compute nodes whose aggregates exceeded their per-aggregate failure threshold."""
     failed_hosts = {svc.host for svc in compute_nodes}
+    processing_hostnames = set(service.hosts_processing.keys())
     blocked_hosts = set()
 
     for agg in aggregates:
@@ -3537,16 +3582,21 @@ def _filter_by_aggregate_threshold(compute_nodes, aggregates, service):
                            agg.name, AGGREGATE_MAX_FAILURES_KEY, max_failures_str)
             continue
 
+        agg_host_shortnames = {_extract_hostname(h) for h in agg.hosts}
         agg_failed = failed_hosts.intersection(agg.hosts)
-        if len(agg_failed) > max_failures:
+        agg_processing = len(processing_hostnames.intersection(agg_host_shortnames))
+        total_agg_impacted = len(agg_failed) + agg_processing
+        if total_agg_impacted > max_failures:
             logging.error(
-                "Aggregate '%s' has %d failed hosts (limit: %d). "
+                "Aggregate '%s' has %d impacted hosts (%d new + %d in-flight, limit: %d). "
                 "Blocking evacuation for hosts in this aggregate: %s",
-                agg.name, len(agg_failed), max_failures, sorted(agg_failed))
+                agg.name, total_agg_impacted, len(agg_failed), agg_processing,
+                max_failures, sorted(agg_failed))
             _emit_k8s_event(
                 agg.name, 'AggregateThresholdExceeded',
-                f'Aggregate has {len(agg_failed)} failed hosts '
-                f'(limit: {max_failures}), evacuation blocked',
+                f'Aggregate has {total_agg_impacted} impacted hosts '
+                f'({len(agg_failed)} new + {agg_processing} in-flight, '
+                f'limit: {max_failures}), evacuation blocked',
                 event_type='Warning')
             AGGREGATE_THRESHOLD_EXCEEDED_TOTAL.labels(aggregate=agg.name).inc()
             blocked_hosts.update(agg_failed)
@@ -3718,6 +3768,7 @@ def main():
         service.shutdown_event.set()
         service.kdump_listener_stop_event.set()
         service.heartbeat_listener_stop_event.set()
+        service.processing_executor.shutdown(wait=False)
         if service._http_server:
             threading.Thread(target=service._http_server.shutdown, daemon=True).start()
 
@@ -3747,7 +3798,7 @@ def main():
 
             compute_nodes_list = list(compute_nodes)
 
-            _process_stale_services(conn, service, services, compute_nodes_list, to_resume)
+            _admit_stale_services(conn, service, services, compute_nodes_list, to_resume)
             _process_reenabling(conn, service, to_reenable)
 
             stale_count = len(compute_nodes_list)
@@ -3783,6 +3834,8 @@ def main():
 
         service.shutdown_event.wait(poll_interval)
 
+    logging.info("Waiting for in-flight evacuations to complete")
+    service.processing_executor.shutdown(wait=True)
     logging.info("Graceful shutdown complete")
 
 
