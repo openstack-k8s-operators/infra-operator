@@ -53,7 +53,7 @@ InstanceHA runs as a Kubernetes-managed workload alongside the OpenStack control
 
 1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp. A service is considered failed if it is reported as `down` or if its `updated_at` timestamp is older than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
 
-2. **Safety checks**: Before acting, the agent verifies that the percentage of failed hosts does not exceed the `THRESHOLD` (default: 50%) -- calculated against only active services, excluding already-disabled and already-forced-down hosts -- and that at least one `nova-scheduler` is running. These checks prevent cascading evacuations during infrastructure-wide outages. A `ThresholdExceeded` K8s event is emitted when the limit is hit.
+2. **Safety checks**: Before acting, the agent verifies that the total percentage of down and forced_down hosts does not exceed the `THRESHOLD` (default: 50%) -- calculated against all services (or all evacuable hosts when `TAGGED_AGGREGATES` is enabled). Previously-evacuated hosts that remain forced_down count toward this total, catching slow cascades. The agent also verifies that at least one `nova-scheduler` is running. These checks prevent cascading evacuations during infrastructure-wide outages. A `ThresholdExceeded` K8s event is emitted when the limit is hit.
 
 3. **Fencing**: The failed host is powered off via its baseboard management controller (BMC) using IPMI, Redfish, or the Metal3 Kubernetes API. Fencing ensures the host is truly offline before evacuation begins, preventing split-brain scenarios where the old and new copies of an instance run simultaneously. The server is locked in Nova (API microversion 2.73, reason `instanceha-evacuation`) to prevent concurrent operations.
 
@@ -142,7 +142,7 @@ See [instanceha_prometheus.md](instanceha_prometheus.md) for the complete metric
 
 ### Graceful Shutdown
 
-When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA immediately marks itself as not-ready (`ready = False`), stops the heartbeat and kdump listeners, shuts down the health check HTTP server, and sets the shutdown flag. In-flight fencing and evacuation workers check this flag between operations and finish promptly. The Deployment is configured with a 45-second termination grace period.
+When the pod receives SIGTERM (during scaling, rolling updates, or node drain), InstanceHA immediately marks itself as not-ready (`ready = False`), stops the heartbeat and kdump listeners, shuts down the health check HTTP server, stops accepting new submissions to the processing executor, and sets the shutdown flag. After the main loop exits, the processing executor waits for all in-flight fencing and evacuation work to complete before the process terminates. The Deployment is configured with a 45-second termination grace period.
 
 > **Note:** The worst-case shutdown time depends on `FENCING_TIMEOUT` (default 30s) plus thread-pool drain time. If you increase `FENCING_TIMEOUT` beyond the default, consider increasing `terminationGracePeriodSeconds` in the Deployment spec accordingly to avoid SIGKILL during in-flight fencing or evacuation. If the pod is killed mid-operation, orphan recovery at the next startup handles any partially-processed hosts.
 
@@ -782,7 +782,7 @@ config:
   TAGGED_AGGREGATES: "true"
 ```
 
-The threshold is calculated against active services only (already-disabled and already-forced-down hosts are excluded from the denominator). When `TAGGED_AGGREGATES` is enabled, the percentage is calculated against only the hosts in evacuable aggregates.
+The threshold evaluates total cluster health: all down and forced_down hosts (including those evacuated in previous cycles that haven't recovered) divided by all services. When `TAGGED_AGGREGATES` is enabled, both the numerator and denominator are restricted to hosts in evacuable aggregates. This catches slow cascades where hosts fail one per poll cycle -- each previously-evacuated host that remains forced_down counts toward the impacted total.
 
 If the threshold is exceeded, InstanceHA logs an error, emits a `ThresholdExceeded` K8s event, and skips evacuation for that poll cycle, waiting for the situation to resolve or for an operator to intervene.
 
@@ -790,32 +790,43 @@ Setting `THRESHOLD` to `100` disables the check entirely (allows up to 100% of h
 
 ### Threshold Is Evaluated After Evacuability Filtering
 
-The global `THRESHOLD` check does **not** count every host Nova reports as down. It runs **after** `_prepare_evacuation_resources()` has narrowed the candidate list. Only hosts that would actually be fenced and evacuated are included in the numerator. The denominator counts **all** active evacuable compute services (including healthy hosts), while the numerator counts only post-filter down hosts -- empty compute nodes are excluded from the numerator but still counted in the denominator, so idle host pools lower the failure percentage.
+The global `THRESHOLD` check runs **after** `_prepare_evacuation_resources()` has narrowed the candidate list. The threshold evaluates total cluster health: the numerator (`_count_down_hosts`) includes all services with `state='down'` or `forced_down=True`, plus compute_nodes detected as stale this cycle. The denominator is all services (or all evacuable hosts when `TAGGED_AGGREGATES` is enabled). Previously-evacuated hosts that remain `forced_down` count toward the numerator, so a slow cascade where hosts fail one per cycle accumulates rather than staying flat.
 
 If evacuability filtering removes every stale host (for example, all down hosts had no VMs), the global threshold check is **skipped** entirely -- even when many hosts were stale upstream.
 
 Hosts in the `to_resume` list (interrupted evacuations) are not counted in the threshold calculation and individually bypass per-aggregate filtering. However, if the global `THRESHOLD` is breached by new fencing candidates, the function returns early -- blocking `to_resume` processing as well. When no new candidates survive filtering, the threshold check is skipped and `to_resume` proceeds unimpeded.
 
-**What is removed before the threshold check:**
+**What the threshold numerator includes:**
 
-| Filter | Effect on threshold numerator |
-|--------|------------------------------|
-| Hosts with no VMs | Excluded -- empty compute nodes are not counted |
-| `TAGGED_FLAVORS` / `TAGGED_IMAGES` | Hosts with no evacuable VMs on them are excluded |
-| `TAGGED_AGGREGATES` | Hosts outside evacuable aggregates are excluded |
-| Heartbeat gate (Gate 4, `CHECK_HEARTBEAT=true` only) | Hosts still sending heartbeats are excluded earlier in the cycle |
-| Nova API query failure (no-VM/flavor filters) | Host is kept -- query errors fail-open so hosts are not incorrectly skipped |
+The numerator is computed by `_count_down_hosts`, which counts all services with `state='down'` or `forced_down=True`, plus compute_nodes detected as stale this cycle (whose Nova state may not have transitioned yet). When `TAGGED_AGGREGATES` is enabled, only services in evacuable aggregates are counted.
+
+| Source | Included in numerator? |
+|--------|----------------------|
+| Services with `state='down'` | Yes |
+| Services with `forced_down=True` (including previously-evacuated hosts) | Yes |
+| Compute nodes detected as stale this cycle | Yes (Nova state may lag) |
+| When `TAGGED_AGGREGATES`: services outside evacuable aggregates | No |
+
+**What is filtered before fencing proceeds (after the threshold check passes):**
+
+| Filter | Effect |
+|--------|--------|
+| Hosts with no VMs | Excluded from fencing |
+| `TAGGED_FLAVORS` / `TAGGED_IMAGES` | Hosts with no evacuable VMs on them excluded from fencing |
+| `TAGGED_AGGREGATES` | Hosts outside evacuable aggregates excluded from fencing |
+| Heartbeat gate (`CHECK_HEARTBEAT=true` only) | Hosts still sending heartbeats excluded earlier in the cycle |
+| Nova API query failure (no-VM/flavor filters) | Host is kept -- query errors fail-open |
 
 **Denominator behavior:**
 
 | Setting | Denominator |
 |---------|-------------|
-| `TAGGED_AGGREGATES: false` | All active compute services (not disabled, not forced-down) |
-| `TAGGED_AGGREGATES: true` | Active compute services in evacuable aggregates only |
+| `TAGGED_AGGREGATES: false` | All compute services (all states) |
+| `TAGGED_AGGREGATES: true` | All compute services in evacuable aggregates (all states) |
 
-**Example:** Nova reports 40 hosts as down across the region. Only 8 are in evacuable aggregates and carry evacuable workloads. With `TAGGED_AGGREGATES: true` and `THRESHOLD: 50`, the agent calculates `8 / total_evacuable x 100` -- not `40 / total_active x 100`. A datacenter-wide outage that mostly affects non-evacuable or untagged hosts may **not** trip the global threshold, even though many physical hosts are unhealthy.
+**Example:** Nova reports 40 hosts as down across the region. Only 8 are in evacuable aggregates and carry evacuable workloads. With `TAGGED_AGGREGATES: true` and `THRESHOLD: 50`, the agent calculates `total_down_in_evacuable / total_evacuable x 100`. A datacenter-wide outage that mostly affects non-evacuable or untagged hosts may **not** trip the global threshold, even though many physical hosts are unhealthy.
 
-**Why this design:** The threshold is a guard against **runaway evacuation**, not a general infrastructure health monitor. Counting hosts InstanceHA would never evacuate would cause false threshold trips during partial outages (for example, a cell where most hosts are intentionally untagged).
+**Why this design:** The threshold evaluates total cluster health (all down/forced_down hosts vs all services) to catch slow cascades. The candidate list used for the numerator includes all services in a down or forced_down state, plus compute_nodes detected as stale this cycle. When `TAGGED_AGGREGATES` is enabled, both numerator and denominator are restricted to evacuable aggregates.
 
 **Earlier gates still protect against infrastructure-wide anomalies:**
 
@@ -846,9 +857,10 @@ For more granular control, you can set an absolute failure limit per aggregate u
 openstack aggregate set --property instanceha:max_failures=2 my-aggregate
 ```
 
-When `TAGGED_AGGREGATES` is enabled and an aggregate has this metadata key, the agent counts how many failed hosts belong to that aggregate. If the count exceeds the limit, evacuation is blocked for all failed hosts in that aggregate -- other aggregates are unaffected.
+When `TAGGED_AGGREGATES` is enabled and an aggregate has this metadata key, the agent counts both newly-failed hosts and in-flight hosts (from previous cycles) that belong to that aggregate. If the total impacted count exceeds the limit, evacuation is blocked for all failed hosts in that aggregate -- other aggregates are unaffected.
 
 - Both checks run after evacuability filtering; the global `THRESHOLD` check runs first, then the per-aggregate check is an additional filter
+- The impacted count for each aggregate includes in-flight hosts from `hosts_processing`, catching slow per-aggregate cascades
 - If a host belongs to multiple aggregates, the most restrictive limit applies
 - Setting `instanceha:max_failures=0` blocks evacuation on any failure in that aggregate
 - Aggregates without the metadata key have no per-aggregate limit
@@ -1297,7 +1309,7 @@ InstanceHA runs as a single pod and polls the Nova API for all compute services 
 - **Nova API latency**: `services.list(binary="nova-compute")` returns all 1000 services in a single call. Nova's `nova-manage cell_v2` maps cells transparently, so InstanceHA does not need per-cell configuration. However, cross-cell queries are slower -- expect 1-3 seconds per poll at this scale.
 - **Heartbeat processing**: The UDP listener processes heartbeat packets individually. At 1000 nodes with the default `HEARTBEAT_TIMEOUT: 120`, the listener handles ~8 packets/second (1000 nodes / 120 seconds). The [heartbeat performance benchmarks](instanceha_heartbeat_performance.md) show the listener handles 5000+ packets/second.
 - **Fencing concurrency**: With `WORKERS: 4`, up to 4 hosts are fenced in parallel. Each fencing operation (IPMI/Redfish) takes 5-30 seconds. At large scale, a correlated failure (e.g., a rack power event taking down 20 nodes) will be fenced across multiple poll cycles due to `MAX_HOSTS_PER_CYCLE`.
-- **Detection latency during long cycles**: The main loop is synchronous -- it blocks on `_process_stale_services` until all fencing and evacuation completes before polling again. Cycles cannot overlap. However, a long cycle delays detection of new failures. With `WORKERS: 8` and `MAX_HOSTS_PER_CYCLE: 5`, a worst-case cycle runs ~30 seconds (5 fencing ops at 30s each, parallelized across 8 workers), plus evacuation. Any host that fails during this window won't be detected until the next poll.
+- **Detection latency**: The main loop runs safety gates synchronously and submits accepted hosts to a background `ThreadPoolExecutor` for fencing and evacuation. The main loop does not block on in-flight work -- it polls every `POLL` seconds regardless of ongoing processing. New failures are detected on the next poll cycle even while previous evacuations are still in flight. Safety gates evaluate total cluster impact by including in-flight hosts from previous cycles in their calculations (global threshold, per-aggregate threshold, all-stale check, heartbeat cliff).
 
 #### Recommended Configuration
 
@@ -1337,7 +1349,7 @@ spec:
 
 #### Why These Values
 
-**`POLL: 120`** -- At 1000 nodes, a poll cycle that triggers fencing and evacuation can take 60+ seconds (cross-cell service list query + aggregate lookups + fencing with `WORKERS: 8`). A 120-second interval ensures the previous cycle completes before the next one starts. The detection latency trade-off (up to POLL + DELTA = 3 minutes) is offset by heartbeat verification, which provides near-real-time detection independent of the poll interval.
+**`POLL: 120`** -- At 1000 nodes, the safety gates evaluate 1000+ services, fetch aggregate memberships, and include in-flight hosts in threshold calculations. A 120-second interval reduces Nova API load. Since the main loop does not block on in-flight fencing and evacuation, the poll interval only affects detection latency (up to POLL + DELTA = 3 minutes), which heartbeat verification offsets with near-real-time detection independent of the poll interval.
 
 **`DELTA: 60`** -- Nova's `updated_at` timestamp for compute services can lag during cross-cell database queries, especially when cells are under load. A 60-second staleness window absorbs this variance. Combined with `POLL: 120`, worst-case detection time is ~3 minutes.
 
@@ -1345,11 +1357,11 @@ spec:
 
 **`HEARTBEAT_CLIFF_MAX_CYCLES: 5`** -- At `POLL: 120`, 5 cycles = 10 minutes before the cliff detector gives up and accepts the state as genuine. This is long enough for most transient network events (spanning tree convergence, switch firmware upgrades, brief routing flaps) to resolve, while still bounded -- a genuine spine switch failure will be acted on within 10 minutes. **Important**: when the cliff expires, `MAX_HOSTS_PER_CYCLE` is the primary defense against fencing too many hosts at once. These two settings are mutually dependent -- do not raise `MAX_HOSTS_PER_CYCLE` without also ensuring `HEARTBEAT_CLIFF_MAX_CYCLES * POLL` exceeds your longest expected network reconvergence time. Values below 10 for `HEARTBEAT_CLIFF_THRESHOLD` are silently clamped to 10 (the ConfigManager minimum).
 
-**`THRESHOLD: 10`** -- At 1000 nodes, 10% allows up to 100 simultaneous failures. A single rack (~40 nodes) failing is 4%, two racks (80 nodes) is 8% -- both pass the threshold. 100+ hosts reporting down simultaneously indicates a Nova API issue, a cell outage, or a network partition. The per-aggregate thresholds (see below) provide finer-grained control within failure domains.
+**`THRESHOLD: 10`** -- At 1000 nodes, 10% means fencing is blocked when 100+ hosts are down or forced_down across the cluster (total cluster health). Since the threshold now counts previously-evacuated hosts that remain forced_down, a slow cascade accumulates toward this limit. A single rack (~40 nodes) failing is 4%, two racks (80 nodes) is 8% -- both pass the threshold. The per-aggregate thresholds (see below) provide finer-grained control within failure domains.
 
 **`MAX_HOSTS_PER_CYCLE: 5`** -- Limits fencing throughput to 5 hosts per cycle. A 40-node rack failure takes 8 poll cycles (16 minutes at `POLL: 120`) to fully fence, during which operators can observe the `FencingRateLimited` events and confirm the failure is genuine. For faster recovery within specific failure domains, use per-aggregate thresholds rather than raising the global cap.
 
-**`WORKERS: 8`** -- With `MAX_HOSTS_PER_CYCLE: 5`, 8 workers process the entire batch in a single round of parallel fencing. The inner evacuation thread pool is `EVACUATION_MAX_THREADS / WORKERS` = 32/8 = 4 concurrent evacuations per host (configurable via `EVACUATION_MAX_THREADS`). Peak concurrent evacuation requests: 5 x 4 = 20.
+**`WORKERS: 8`** -- The persistent `processing_executor` has 8 worker threads. The inner per-host evacuation thread pool is `EVACUATION_MAX_THREADS / WORKERS` = 32/8 = 4 concurrent evacuations per host (configurable via `EVACUATION_MAX_THREADS`). Since hosts are submitted to the executor non-blocking, multiple cycles' worth of hosts can be in flight simultaneously (bounded by `max_workers`).
 
 **`EVACUATION_RETRIES: 3`** -- At large scale, 5 retries per VM across 10 hosts with dozens of VMs each can create a long tail of retry traffic against the Nova API. 3 retries catches transient errors without piling up.
 

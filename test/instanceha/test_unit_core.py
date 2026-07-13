@@ -2830,7 +2830,7 @@ class TestFunctionalIntegration(unittest.TestCase):
              patch.object(service, 'get_hosts_with_servers_cached', return_value=host_servers_cache), \
              patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
 
-            # Simulate one poll cycle - call _process_stale_services
+            # Simulate one poll cycle - call _admit_stale_services
             target_date = datetime.now() - timedelta(seconds=30)
             compute_nodes, to_resume, to_reenable = instanceha._categorize_services(
                 nova_state['services'], target_date
@@ -2840,9 +2840,12 @@ class TestFunctionalIntegration(unittest.TestCase):
             down_hosts = [s for s in list(compute_nodes) if s.state == 'down']
 
             # Process stale services
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 mock_nova, service, nova_state['services'], down_hosts, []
             )
+
+            # Wait for async processing to complete
+            service.processing_executor.shutdown(wait=True)
 
         # Verify cache was used (flavors/images list called for cache)
         self.assertGreaterEqual(mock_nova.flavors.list.call_count, 1)
@@ -2952,12 +2955,102 @@ class TestFunctionalIntegration(unittest.TestCase):
              patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
 
             # Process should now work
-            instanceha._process_stale_services(
+            instanceha._admit_stale_services(
                 mock_nova, service, nova_state['services'], down_list, []
             )
 
-        # Verify at least some hosts were processed
-        self.assertGreaterEqual(mock_nova.services.force_down.call_count, 1)
+            # Wait for async processing to complete
+            service.processing_executor.shutdown(wait=True)
+
+            # Verify at least some hosts were processed
+            self.assertGreaterEqual(mock_nova.services.force_down.call_count, 1)
+
+    def test_cascading_failure_threshold_with_inflight_evacuation(self):
+        """Test that hosts already being evacuated count toward the cluster threshold.
+
+        Scenario: 10 hosts total, threshold 40%.
+        - 3 hosts are already forced_down from a previous cycle (30%)
+        - 2 new hosts fail, bringing total impact to 5/10 = 50% > 40%
+        - The new failures should be blocked by the threshold gate.
+        """
+        mock_nova, nova_state = self._create_mock_nova_stateful()
+
+        for i in range(10):
+            svc = Mock()
+            svc.id = f'service-{i}'
+            svc.host = f'compute-{i}.example.com'
+            svc.binary = 'nova-compute'
+            svc.status = 'enabled'
+            svc.disabled_reason = None
+            if i < 3:
+                # Previously evacuated: forced_down but state='up' means Nova
+                # sees them as recovered enough to report, yet still impacted
+                svc.forced_down = True
+                svc.state = 'down'
+                svc.updated_at = (datetime.now() - timedelta(minutes=30)).isoformat()
+            elif i < 5:
+                # Newly failed this cycle
+                svc.forced_down = False
+                svc.state = 'down'
+                svc.updated_at = (datetime.now() - timedelta(minutes=5)).isoformat()
+            else:
+                svc.forced_down = False
+                svc.state = 'up'
+                svc.updated_at = datetime.now().isoformat()
+            nova_state['services'].append(svc)
+
+        # Add servers on the two newly-failed hosts so they pass filter
+        for i in range(3, 5):
+            server = Mock()
+            server.id = f'server-{i}'
+            server.host = f'compute-{i}.example.com'
+            server.status = 'ACTIVE'
+            server.name = f'test-server-{i}'
+            setattr(server, 'OS-EXT-STS:task_state', None)
+            server.image = {'id': 'image-1'}
+            server.flavor = {'id': 'flavor-1', 'extra_specs': {}}
+            nova_state['servers'].append(server)
+
+        config = instanceha.ConfigManager()
+        service = instanceha.InstanceHAService(config, mock_nova)
+
+        config_values = {
+            'TAGGED_FLAVORS': False,
+            'TAGGED_IMAGES': False,
+            'TAGGED_AGGREGATES': False,
+            'THRESHOLD': 40,
+            'WORKERS': 4,
+        }
+        service.config.get_config_value = Mock(side_effect=lambda key: config_values.get(key, False))
+
+        service.config.fencing = {
+            f'compute-{i}': {'agent': 'ipmi', 'ipaddr': f'192.168.1.{i}', 'login': 'admin', 'passwd': 'test'}
+            for i in range(3, 5)
+        }
+
+        host_servers_cache = {f'compute-{i}.example.com': [nova_state['servers'][i - 3]]
+                              for i in range(3, 5)}
+
+        # Only the 2 newly-failed hosts are passed as compute_nodes
+        target_date = datetime.now() - timedelta(seconds=30)
+        compute_nodes, _, _ = instanceha._categorize_services(nova_state['services'], target_date)
+        new_down = [s for s in list(compute_nodes) if s.state == 'down' and not s.forced_down]
+
+        with patch('instanceha._execute_fence_operation', return_value=True), \
+             patch('instanceha._check_kdump', return_value=(new_down, [])), \
+             patch('instanceha._establish_nova_connection', return_value=mock_nova), \
+             patch.object(service, 'get_hosts_with_servers_cached', return_value=host_servers_cache), \
+             patch.object(service, 'filter_hosts_with_servers', side_effect=lambda services, cache: services):
+
+            instanceha._admit_stale_services(
+                mock_nova, service, nova_state['services'], new_down, []
+            )
+
+            service.processing_executor.shutdown(wait=True)
+
+        # Threshold is 40%, total impact is 5/10 = 50% — evacuation must be blocked
+        self.assertEqual(mock_nova.services.force_down.call_count, 0,
+                         "Evacuation should be blocked: 3 already forced_down + 2 new = 50% > 40% threshold")
 
     def test_host_recovery_workflow(self):
         """Test host recovery: re-enable after forced_down."""
