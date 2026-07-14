@@ -205,6 +205,12 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
     # Host processing tracking
     self.hosts_processing = defaultdict(float)
     self.processing_lock = threading.Lock()
+    try:
+        workers = self.config.get_config_value('WORKERS')
+    except (TypeError, ValueError, AttributeError):
+        workers = 4
+    self.processing_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers if isinstance(workers, int) and workers > 0 else 4)
     self.reserved_hosts_lock = threading.Lock()
 
     logging.info("InstanceHA service initialized successfully")
@@ -214,6 +220,7 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
 
 - `ready` flag starts `False` and is set to `True` after the first successful poll cycle. This drives the `/healthz` readiness probe endpoint -- Kubernetes won't route traffic until the service has completed its first poll.
 - `k8s_api_reachable` starts `True` (fail-open). The background health check thread flips it to `False` after 3 consecutive failures. See [Fencing Safety Model](#fencing-safety-model) for the startup trade-off rationale.
+- `processing_executor` is a persistent `ThreadPoolExecutor` for background host processing (fencing + evacuation). Safety gates run synchronously in the main loop, then accepted hosts are submitted to the executor non-blocking. The main loop polls every `POLL` seconds regardless of in-flight work.
 - `shutdown_event` is set by the SIGTERM handler to signal the main loop and all `wait()` calls to exit gracefully.
 - `kdump_lock` protects all kdump-related state since the UDP listener thread writes concurrently with the main poll loop.
 - `heartbeat_lock` similarly protects heartbeat state from concurrent UDP listener writes.
@@ -463,13 +470,14 @@ def validate_input(value: str, validation_type: str, context: str) -> bool:
                             │
                             ▼
     ┌──────────────────────────────────────────────────┐
-    │ 4. Process Stale Services                        │
+    │ 4. Admit Stale Services (async)                  │
     │    - Filter processing hosts (deduplication)     │
     │    - Filter by servers, tags, aggregates         │
     │    - Filter reachable hosts (heartbeat check)    │
-    │    - Check threshold (active services only)      │
+    │    - Check threshold (total cluster health)      │
     │    - Check critical services operational         │
-    │    - Execute evacuations (with cleanup)          │
+    │    - Submit accepted hosts to executor           │
+    │      (non-blocking -- main loop continues)       │
     └──────────────────────────────────────────────────┘
                             │
                             ▼
@@ -676,7 +684,7 @@ Poll cycle starts
   │   Rationale: if InstanceHA's worker node is network-isolated,
   │   Nova's service list may be stale -- fencing would hit healthy hosts
   │
-  │   ─── enters _process_stale_services ───
+  │   ─── enters _admit_stale_services ───
   │
   ├─ Pre-gate: _filter_processing_hosts
   │   Excludes hosts already being processed (in-flight fencing/evacuation)
@@ -685,6 +693,8 @@ Poll cycle starts
   │   Question: "Did we lose visibility, or did hosts actually fail?"
   │   If >=HEARTBEAT_CLIFF_THRESHOLD% of heartbeats vanish at once -> skip ALL fencing
   │   Requires >= 3 previously active heartbeat hosts to evaluate
+  │   Excludes hosts_processing from active heartbeat counts so expected heartbeat
+  │   absence (host is being fenced/evacuated) does not trigger false cliff detection
   │   Rationale: simultaneous mass heartbeat loss is more likely a listener-side
   │   network partition than N simultaneous host failures
   │   Expiry: after HEARTBEAT_CLIFF_MAX_CYCLES consecutive cliff cycles, accept as genuine
@@ -697,6 +707,7 @@ Poll cycle starts
   │
   ├─ Gate 4: All-services-stale circuit breaker
   │   Question: "Is the data source itself broken?"
+  │   Includes in-flight hosts when checking whether all active services appear stale
   │   If every active service (>=3) still appears stale after heartbeat filtering -> skip ALL fencing
   │   Rationale: all hosts down at once indicates a Nova API or
   │   infrastructure anomaly, not a genuine failure of every server.
@@ -709,17 +720,22 @@ Poll cycle starts
   │   Nova API query errors on no-VM/flavor filters fail-open (host is kept)
   │   Rationale: downstream gates operate on the actionable candidate set only
   │
-  ├─ Gate 6: Global threshold
-  │   Question: "Are too many evacuable hosts down to safely proceed?"
-  │   If failed percentage > THRESHOLD -> skip all fencing (strict `>`, not `>=`)
+  ├─ Gate 6: Global threshold (total cluster health)
+  │   Question: "What percentage of my cluster is down?"
+  │   Evaluates total cluster health: all down/forced_down hosts (including
+  │   in-flight hosts from previous cycles) divided by all services (or all
+  │   evacuable hosts when TAGGED_AGGREGATES is enabled)
+  │   Catches slow cascades where hosts fail one per cycle -- previously-evacuated
+  │   hosts that haven't recovered count as impacted
+  │   If percentage > THRESHOLD -> skip all fencing (strict `>`, not `>=`)
   │   Skipped when filtered compute_nodes is empty
-  │   Note: numerator is post-filter down hosts; denominator is all active evacuable hosts
   │   to_resume hosts are not counted in the calculation, but a threshold breach blocks
   │   all processing including to_resume
   │
-  ├─ Gate 7: Per-aggregate threshold
+  ├─ Gate 7: Per-aggregate threshold (total impact)
   │   Question: "Is this aggregate losing too many hosts?"
-  │   If failed count > instanceha:max_failures metadata -> skip hosts in that aggregate
+  │   Counts in-flight hosts toward their aggregate failure budget
+  │   If total impacted count (new + in-flight) > instanceha:max_failures metadata -> skip hosts in that aggregate
   │   to_resume hosts bypass this gate (only compute_nodes are filtered)
   │
   ├─ Gate 8: Per-cycle rate limit
@@ -1508,9 +1524,9 @@ Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 
 ### 7. Threshold Protection
 
-**Purpose**: Prevent mass evacuations during datacenter-level failures.
+**Purpose**: Prevent mass evacuations during datacenter-level failures and catch slow cascades where hosts fail one per poll cycle.
 
-**Evaluation order**: The threshold check runs **after** evacuability filtering (`_prepare_evacuation_resources`). The numerator is the count of down hosts that survived filtering (have VMs, match flavor/image/aggregate tags). Hosts Nova reported as down but excluded by tagging are not counted.
+**Evaluation order**: The threshold check runs **after** evacuability filtering (`_prepare_evacuation_resources`). It evaluates **total cluster health**: all down/forced_down hosts (including those evacuated in previous cycles that haven't recovered) divided by all services.
 
 **Implementation**:
 ```python
@@ -1518,30 +1534,37 @@ Reserved Hosts: reserved-01 (aggregate-A), reserved-02 (aggregate-B)
 compute_nodes, reserved_hosts, images, flavors = _prepare_evacuation_resources(
     conn, service, services, compute_nodes, aggregates=aggregates)
 
-# Threshold uses the filtered candidate list, not the original stale-service list
+# Threshold evaluates total cluster health using _count_down_hosts
 if service.config.get_config_value('TAGGED_AGGREGATES'):
+    evacuable_hosts = _get_evacuable_hosts_from_aggregates(conn, service, aggregates=aggregates)
     total_evacuable = _count_evacuable_hosts(conn, service, services, aggregates=aggregates)
-    threshold_percent = (len(compute_nodes) / total_evacuable * 100) if total_evacuable > 0 else 0
+    total_down = _count_down_hosts(services, compute_nodes=compute_nodes, evacuable_hosts=evacuable_hosts)
+    threshold_percent = (total_down / total_evacuable * 100) if total_evacuable > 0 else 0
 else:
-    active_services = [s for s in services if 'disabled' not in s.status and not s.forced_down]
-    threshold_percent = (len(compute_nodes) / len(active_services)) * 100 if active_services else 0
+    total_down = _count_down_hosts(services, compute_nodes=compute_nodes)
+    threshold_percent = (total_down / len(services)) * 100 if services else 0
 
 if threshold_percent > service.config.get_config_value('THRESHOLD'):
     logging.error('Impacted (%.1f%%) exceeds threshold', threshold_percent)
     return  # Do not evacuate
 ```
 
-Both paths exclude disabled and forced-down hosts from the denominator. The `TAGGED_AGGREGATES` path further restricts the denominator to hosts in evacuable aggregates. The numerator counts only post-filter down hosts (empty hosts excluded); the denominator counts all active evacuable hosts including healthy ones. The check is skipped when filtered `compute_nodes` is empty. `to_resume` candidates are not counted in the threshold calculation and individually bypass per-aggregate filtering, but a global threshold breach blocks all processing including `to_resume`.
+**Total cluster health model**: The numerator (`_count_down_hosts`) counts all services with `state='down'` or `forced_down=True`, plus compute_nodes detected as stale this cycle (whose Nova state may not have transitioned yet). The denominator is all services (or all evacuable hosts when `TAGGED_AGGREGATES` is enabled) -- **not** just active services. This means previously-evacuated hosts that remain `forced_down` count as impacted: a slow cascade where hosts fail one per cycle accumulates rather than staying flat.
+
+Previously, each evacuated host left both the numerator (no longer a new failure) and the denominator (excluded via forced_down filter), keeping the threshold percentage flat regardless of how many hosts were down. Now the percentage answers "what fraction of my cluster is down?" and a slow cascade triggers the threshold once enough hosts accumulate.
+
+The check is skipped when filtered `compute_nodes` is empty. `to_resume` candidates are not counted in the calculation, but a global threshold breach blocks all processing including `to_resume`.
 
 **Implication**: A partial infrastructure failure (for example, one Nova cell offline) that affects mostly non-evacuable hosts may not trip the global threshold. Use per-aggregate `instanceha:max_failures`, the all-services-stale gate (full-cluster anomalies only), and external monitoring for cell-level protection. See [Threshold Is Evaluated After Evacuability Filtering](instanceha_guide.md#threshold-is-evaluated-after-evacuability-filtering) in the operator guide.
 
 ### Per-Aggregate Threshold
 
-In addition to the global percentage-based threshold, operators can set an absolute failure limit per aggregate via the `instanceha:max_failures` metadata key on Nova aggregates. When `TAGGED_AGGREGATES` is enabled, the agent checks each evacuable aggregate's metadata after the global threshold passes. If the number of failed hosts in an aggregate exceeds its `instanceha:max_failures` value, evacuation is blocked for all failed hosts in that aggregate.
+In addition to the global percentage-based threshold, operators can set an absolute failure limit per aggregate via the `instanceha:max_failures` metadata key on Nova aggregates. When `TAGGED_AGGREGATES` is enabled, the agent checks each evacuable aggregate's metadata after the global threshold passes. The count includes both newly-failed hosts and in-flight hosts (from `hosts_processing`) that belong to the aggregate, so the per-aggregate budget accounts for total impact across cycles. If the total impacted count exceeds the aggregate's `instanceha:max_failures` value, evacuation is blocked for all failed hosts in that aggregate.
 
 - **Activation**: Automatic when the metadata key is present (no config option needed)
+- **Total impact**: The impacted count for each aggregate is `new failures + in-flight hosts in that aggregate`, catching slow per-aggregate cascades
 - **Multi-aggregate semantics**: Most-restrictive-wins -- if a host belongs to multiple aggregates and any one exceeds its limit, the host is blocked
-- **K8s event**: `AggregateThresholdExceeded` (Warning) emitted per blocked aggregate
+- **K8s event**: `AggregateThresholdExceeded` (Warning) emitted per blocked aggregate, including the breakdown of new vs in-flight hosts
 - **Metric**: `instanceha_aggregate_threshold_exceeded_total{aggregate}` counter
 
 ```
@@ -1836,8 +1859,9 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 **Behavior**:
 - `shutdown_event` is a `threading.Event` checked in the main loop condition (`while not service.shutdown_event.is_set()`)
 - All `time.sleep()` calls replaced with `service.shutdown_event.wait(seconds)` -- these return immediately when the event is set
-- In-flight evacuations complete before shutdown (no abrupt termination)
-- Logs `"Graceful shutdown complete"` on exit
+- SIGTERM stops new submissions to the processing executor, then the main loop exits
+- After the main loop exits, `processing_executor.shutdown(wait=True)` waits for all in-flight fencing and evacuation work to complete
+- Logs `"Waiting for in-flight evacuations to complete"` followed by `"Graceful shutdown complete"` on exit
 
 **Kubernetes Integration**:
 - The Deployment's `terminationGracePeriodSeconds` is set to 45 seconds
@@ -2406,20 +2430,23 @@ config:
 **Description**: Maximum percentage of failed compute services before evacuation is blocked.
 
 **Usage**:
-- Denominator always excludes disabled and force-downed hosts (active services only)
+- Evaluates total cluster health: all down/forced_down hosts divided by all services
 - Calculation depends on `TAGGED_AGGREGATES` setting:
-  - When `TAGGED_AGGREGATES=false`: `(failed_hosts / active_hosts) * 100`
-  - When `TAGGED_AGGREGATES=true`: `(failed_hosts / active_evacuable_hosts) * 100`
+  - When `TAGGED_AGGREGATES=false`: `(total_down_hosts / all_services) * 100`
+  - When `TAGGED_AGGREGATES=true`: `(total_down_hosts / all_evacuable_hosts) * 100`
+- `total_down_hosts` = all services with `state='down'` or `forced_down=True`, plus compute_nodes detected as stale this cycle
 - If percentage is strictly greater than threshold, evacuation is skipped and error logged
 
 **Behavior**:
 - **Without aggregate filtering** (`TAGGED_AGGREGATES=false`):
-  - Calculates percentage against active compute services (excludes disabled/force-downed)
-  - Example: 3 failed / 6 active = 50% (not 3/10 total = 30%)
+  - Calculates percentage against all compute services
+  - Example: 3 down + 2 forced_down / 10 total = 50%
 
 - **With aggregate filtering** (`TAGGED_AGGREGATES=true`):
-  - Calculates percentage against active hosts in evacuable aggregates
-  - Example: 3 failed / 5 active evacuable = 60%
+  - Calculates percentage against all hosts in evacuable aggregates
+  - Example: 3 down + 2 forced_down / 8 evacuable = 62.5%
+
+- **Slow cascade protection**: Previously-evacuated hosts that remain `forced_down` count toward the numerator. A slow cascade where hosts fail one per cycle accumulates until the threshold fires, rather than staying flat (as it did when only new failures were counted).
 
 **Testing**:
 - Unit tests verify percentage validation and clamping
@@ -2448,10 +2475,10 @@ config:
 **Default**: `4`
 **Range**: `1-100`
 
-**Description**: Thread pool size for concurrent processing. Controls parallelism at two levels: host-level processing and per-host server evacuation.
+**Description**: Thread pool size for the persistent `processing_executor` that handles background host processing (fencing + evacuation). Also controls per-host server evacuation concurrency.
 
 **Usage**:
-- **Host-level**: `_process_stale_services` uses `_run_concurrent` with `WORKERS` threads to process multiple failed hosts in parallel via `process_service`. This applies to all evacuation modes (traditional, smart, and orchestrated).
+- **Host-level**: `_admit_stale_services` runs safety gates synchronously, then submits accepted hosts to `processing_executor` (a persistent `ThreadPoolExecutor` with `max_workers=WORKERS`). Each host runs `process_service` in a background thread, non-blocking to the main poll loop.
 - **Per-host (smart/orchestrated only)**: Within each host's evacuation, `_smart_evacuate` and `_orchestrated_evacuate` use `_run_concurrent` to evacuate multiple VMs concurrently. The per-host thread count is calculated as `EVACUATION_MAX_THREADS // WORKERS` to cap the total system-wide thread count.
 
 **Testing**:
@@ -2918,7 +2945,7 @@ openstack flavor set --property ha-enabled=true m1.small
 - When `false`:
   - Ignore aggregate tags (all aggregates considered evacuable)
   - Reserved hosts matched by availability zone
-  - `THRESHOLD` percentage calculated against active compute services (excludes disabled/force-downed)
+  - `THRESHOLD` percentage calculated against all compute services (total cluster health)
 
 **Testing**:
 - Functional tests verify aggregate-based filtering
@@ -2941,7 +2968,7 @@ openstack aggregate set --property ha-enabled=true production-hosts
 
 **Notes**:
 - Affects reserved host matching behavior
-- Affects threshold calculation (percentage of active evacuable hosts vs active hosts)
+- Affects threshold calculation (percentage of total down/forced_down hosts in evacuable aggregates vs all evacuable hosts)
 
 ---
 
@@ -3238,7 +3265,7 @@ config:
 **Description**: Maximum number of hosts that can be fenced in a single poll cycle. If more hosts are detected as down, the first `MAX_HOSTS_PER_CYCLE` are fenced and the rest are deferred to the next cycle. This bounds the blast radius of a single poll cycle -- a Nova API anomaly (conductor crash, stale data, Keystone token issue) cannot trigger mass fencing beyond this cap.
 
 **Usage**:
-- Applied in `_process_stale_services()` after all other safety gates (threshold, per-aggregate, heartbeat) have run
+- Applied in `_admit_stale_services()` after all other safety gates (threshold, per-aggregate, heartbeat) have run
 - Deferred hosts are not lost -- they are re-evaluated on the next poll cycle
 - A `FencingRateLimited` K8s event (Warning) is emitted when the cap is hit
 
@@ -3413,7 +3440,7 @@ requests.post(url, timeout=20)  # Retry up to 3 times
 **Behavior**:
 - Health hash updated approximately every `HASH_INTERVAL` seconds
 - Hash exposed via HTTP health check server on port 8080:
-  - `GET /` -- **Liveness probe**: returns 200 with current hash if `hash_update_successful`, 500 otherwise
+  - `GET /` -- **Liveness probe**: returns 200 with current hash if `hash_update_successful`, 500 otherwise. Also returns 500 if any `hosts_processing` entry is older than `2 * max(FENCING_TIMEOUT, EVACUATION_TIMEOUT)`, indicating a stale processing entry (since the main loop no longer blocks on evacuation, hung processing cannot be detected via poll staleness)
   - `GET /healthz` -- **Readiness probe**: returns 200 if `ready` flag is set (after first successful poll), 503 otherwise
   - `GET /metrics` -- **Prometheus metrics**: returns all registered metrics in Prometheus text format
 - `hash_update_successful` flag indicates service liveness

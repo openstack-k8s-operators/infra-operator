@@ -84,7 +84,7 @@ class TestDisabledConfig(unittest.TestCase):
             with patch('instanceha._prepare_evacuation_resources', return_value=(compute_nodes, [], [], [])):
                 with patch('instanceha._cleanup_filtered_hosts'):
                     with patch('instanceha.process_service') as mock_process:
-                        instanceha._process_stale_services(
+                        instanceha._admit_stale_services(
                             mock_conn,
                             mock_service,
                             services,
@@ -123,17 +123,16 @@ class TestDisabledConfig(unittest.TestCase):
         with patch('instanceha._filter_processing_hosts', return_value=(compute_nodes, [], set(['test-host']), 0)):
             with patch('instanceha._prepare_evacuation_resources', return_value=(compute_nodes, [], [], [])):
                 with patch('instanceha._cleanup_filtered_hosts'):
-                    with patch('instanceha.process_service', return_value=True) as mock_process:
-                        instanceha._process_stale_services(
-                            mock_conn,
-                            mock_service,
-                            services,
-                            compute_nodes,
-                            []
-                        )
+                    instanceha._admit_stale_services(
+                        mock_conn,
+                        mock_service,
+                        services,
+                        compute_nodes,
+                        []
+                    )
 
-        # Should process services when not disabled
-        mock_process.assert_called()
+        # Should submit services for processing when not disabled
+        mock_service.processing_executor.submit.assert_called()
 
 
 class TestForceEnableConfig(unittest.TestCase):
@@ -421,19 +420,19 @@ class TestTaggedAggregatesConfig(unittest.TestCase):
         mock_service.processing_lock = Mock()
         mock_service.hosts_processing = {}
 
-        svc1 = Mock(host='host1', status='enabled', forced_down=False)
-        svc2 = Mock(host='host2', status='enabled', forced_down=False)
+        svc1 = Mock(host='host1', status='enabled', forced_down=False, state='down')
+        svc2 = Mock(host='host2', status='enabled', forced_down=False, state='down')
+        healthy = [Mock(host=f'host{i}', status='enabled', forced_down=False, state='up') for i in range(3, 8)]
 
-        services = [svc1, svc2]
+        services = [svc1, svc2] + healthy
         compute_nodes = [svc1, svc2]
 
         with patch('instanceha._filter_processing_hosts', return_value=(compute_nodes, [], set(['host1', 'host2']), 0)):
             with patch('instanceha._prepare_evacuation_resources', return_value=(compute_nodes, [], [], [])):
                 with patch('instanceha._cleanup_filtered_hosts'):
-                    with patch('instanceha.process_service', return_value=True):
-                        # Should not call _filter_by_aggregates when disabled
+                    with patch('instanceha._check_critical_services', return_value=(True, '')):
                         with patch('instanceha._filter_by_aggregates') as mock_filter:
-                            instanceha._process_stale_services(
+                            instanceha._admit_stale_services(
                                 mock_conn,
                                 mock_service,
                                 services,

@@ -15,7 +15,7 @@ Covers:
 - _is_service_stale: datetime.fromisoformat error handling
 - _monitor_evacuation: poll/retry/timeout behavior
 - main() backoff: exponential backoff on Unauthorized/DiscoveryFailure/generic errors
-- _process_stale_services: safety branches for empty/threshold/disabled paths
+- _admit_stale_services: safety branches for empty/threshold/disabled paths
 """
 
 import threading
@@ -863,7 +863,7 @@ class TestMainLoopBackoff(unittest.TestCase):
 
     @patch('instanceha.signal.signal')
     @patch('instanceha._process_reenabling')
-    @patch('instanceha._process_stale_services')
+    @patch('instanceha._admit_stale_services')
     @patch('instanceha._categorize_services')
     @patch('instanceha._establish_nova_connection')
     @patch('instanceha._initialize_service')
@@ -924,11 +924,11 @@ class TestMainLoopBackoff(unittest.TestCase):
 
 
 # ============================================================================
-# _process_stale_services safety branches tests
+# _admit_stale_services safety branches tests
 # ============================================================================
 
 class TestProcessStaleServicesSafety(unittest.TestCase):
-    """Tests for _process_stale_services safety branches."""
+    """Tests for _admit_stale_services safety branches."""
 
     def _make_service(self):
         import threading
@@ -952,7 +952,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
 
     def test_empty_compute_nodes_and_resume(self):
         service = self._make_service()
-        instanceha._process_stale_services(Mock(), service, [], [], [])
+        instanceha._admit_stale_services(Mock(), service, [], [], [])
 
     def test_all_hosts_already_processing(self):
         import time as time_mod
@@ -961,7 +961,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         svc1.host = 'host-1'
         with service.processing_lock:
             service.hosts_processing['host-1'] = time_mod.monotonic()
-        instanceha._process_stale_services(Mock(), service, [svc1], [svc1], [])
+        instanceha._admit_stale_services(Mock(), service, [svc1], [svc1], [])
 
     def test_threshold_exceeded_skips_evacuation(self):
         service = self._make_service()
@@ -975,7 +975,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         service.filter_hosts_with_servers.return_value = [svc1]
         with patch('instanceha._emit_k8s_event'):
             with patch('instanceha._check_critical_services', return_value=(True, "")):
-                instanceha._process_stale_services(conn, service, [svc1], [svc1], [])
+                instanceha._admit_stale_services(conn, service, [svc1], [svc1], [])
 
     def test_disabled_mode_skips_evacuation(self):
         service = self._make_service()
@@ -992,7 +992,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         service.get_hosts_with_servers_cached.return_value = {'host-1': ['server-1']}
         service.filter_hosts_with_servers.return_value = [svc1]
         with patch('instanceha._emit_k8s_event'):
-            instanceha._process_stale_services(conn, service, [svc1], [svc1], [])
+            instanceha._admit_stale_services(conn, service, [svc1], [svc1], [])
 
     def test_no_evacuable_servers_after_filtering(self):
         service = self._make_service()
@@ -1002,7 +1002,7 @@ class TestProcessStaleServicesSafety(unittest.TestCase):
         service.get_hosts_with_servers_cached.return_value = {}
         service.filter_hosts_with_servers.return_value = []
         with patch('instanceha._emit_k8s_event'):
-            instanceha._process_stale_services(conn, service, [svc1], [svc1], [])
+            instanceha._admit_stale_services(conn, service, [svc1], [svc1], [])
 
 
 class TestReconcileOrphanedHosts(unittest.TestCase):
@@ -1779,7 +1779,7 @@ class TestNovaLoginAC(unittest.TestCase):
 # ============================================================================
 
 class TestFencingRateLimiter(unittest.TestCase):
-    """Tests for MAX_HOSTS_PER_CYCLE rate limiting in _process_stale_services."""
+    """Tests for MAX_HOSTS_PER_CYCLE rate limiting in _admit_stale_services."""
 
     def _make_service(self):
         import threading
@@ -1827,7 +1827,7 @@ class TestFencingRateLimiter(unittest.TestCase):
             f'host-{i}': [f'server-{i}'] for i in range(5)
         }
 
-        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
 
         fenced_hosts = [c[0][0] for c in mock_fence.call_args_list]
         self.assertLessEqual(len(fenced_hosts), 3)
@@ -1848,7 +1848,7 @@ class TestFencingRateLimiter(unittest.TestCase):
             f'host-{i}': [f'server-{i}'] for i in range(2)
         }
 
-        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
 
         rate_events = [c for c in mock_event.call_args_list
                        if len(c[0]) >= 2 and c[0][1] == 'FencingRateLimited']
@@ -1870,7 +1870,7 @@ class TestFencingRateLimiter(unittest.TestCase):
             f'host-{i}': [f'server-{i}'] for i in range(5)
         }
 
-        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
 
         rate_events = [c for c in mock_event.call_args_list
                        if len(c[0]) >= 2 and c[0][1] == 'FencingRateLimited']
@@ -1893,7 +1893,7 @@ class TestFencingRateLimiter(unittest.TestCase):
         }
 
         before = instanceha.FENCING_RATE_LIMITED_TOTAL._value.get()
-        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
         after = instanceha.FENCING_RATE_LIMITED_TOTAL._value.get()
         self.assertEqual(after - before, 1)
 
@@ -1903,7 +1903,7 @@ class TestFencingRateLimiter(unittest.TestCase):
 # ============================================================================
 
 class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
-    """Tests for the all-services-stale safety check in _process_stale_services."""
+    """Tests for the all-services-stale safety check in _admit_stale_services."""
 
     def _make_service(self):
         import threading
@@ -1943,7 +1943,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         all_services = list(hosts)
 
         with patch('instanceha._execute_fence_operation') as mock_fence:
-            instanceha._process_stale_services(conn, service, all_services, hosts, [])
+            instanceha._admit_stale_services(conn, service, all_services, hosts, [])
             mock_fence.assert_not_called()
 
         stale_events = [c for c in mock_event.call_args_list
@@ -1959,7 +1959,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         all_services = list(hosts)
 
         before = instanceha.ALL_SERVICES_STALE_TOTAL._value.get()
-        instanceha._process_stale_services(conn, service, all_services, hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, hosts, [])
         after = instanceha.ALL_SERVICES_STALE_TOTAL._value.get()
         self.assertEqual(after - before, 1)
 
@@ -1978,7 +1978,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
             f'host-{i}': [f'server-{i}'] for i in range(3)
         }
 
-        instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
 
         stale_events = [c for c in mock_event.call_args_list
                         if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
@@ -1996,7 +1996,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
             f'host-{i}': [f'server-{i}'] for i in range(2)
         }
 
-        instanceha._process_stale_services(conn, service, all_services, hosts, [])
+        instanceha._admit_stale_services(conn, service, all_services, hosts, [])
 
         stale_events = [c for c in mock_event.call_args_list
                         if len(c[0]) >= 2 and c[0][1] == 'AllServicesStale']
@@ -2012,7 +2012,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         all_services = stale_hosts + disabled_hosts
 
         with patch('instanceha._execute_fence_operation') as mock_fence:
-            instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+            instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
             mock_fence.assert_not_called()
 
         stale_events = [c for c in mock_event.call_args_list
@@ -2029,7 +2029,7 @@ class TestAllServicesStaleCircuitBreaker(unittest.TestCase):
         all_services = stale_hosts + forced_hosts
 
         with patch('instanceha._execute_fence_operation') as mock_fence:
-            instanceha._process_stale_services(conn, service, all_services, stale_hosts, [])
+            instanceha._admit_stale_services(conn, service, all_services, stale_hosts, [])
             mock_fence.assert_not_called()
 
         stale_events = [c for c in mock_event.call_args_list
