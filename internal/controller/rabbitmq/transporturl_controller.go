@@ -19,6 +19,7 @@ package rabbitmq
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -607,7 +608,7 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	encodedPass := url.QueryEscape(password)
 	var hostParts []string
 	for _, host := range hosts {
-		hostParts = append(hostParts, fmt.Sprintf("%s:%s@%s:%s", encodedUser, encodedPass, host, port))
+		hostParts = append(hostParts, fmt.Sprintf("%s:%s@%s", encodedUser, encodedPass, net.JoinHostPort(host, port)))
 	}
 	transportURL := fmt.Sprintf("rabbit://%s%s%s", strings.Join(hostParts, ","), vhost, query)
 

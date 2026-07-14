@@ -23,11 +23,11 @@ import (
 
 func TestTransportURLFinalizerFor(t *testing.T) {
 	tests := []struct {
-		name           string
-		transportURL   string
-		wantPrefix     bool
-		wantMaxLen     int
-		wantExact      string
+		name         string
+		transportURL string
+		wantPrefix   bool
+		wantMaxLen   int
+		wantExact    string
 	}{
 		{
 			name:         "short name used directly",
