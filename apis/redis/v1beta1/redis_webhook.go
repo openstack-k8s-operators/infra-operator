@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
@@ -50,8 +49,6 @@ func SetupRedisDefaults(defaults RedisDefaults) {
 	redislog.Info("Redis defaults initialized", "defaults", defaults)
 }
 
-var _ webhook.Defaulter = &Redis{}
-
 // Default implements webhook.Defaulter so a webhook will be registered for the type
 func (r *Redis) Default() {
 	redislog.Info("default", "name", r.Name)
@@ -71,8 +68,6 @@ func (spec *RedisSpec) Default() {
 func (spec *RedisSpecCore) Default() {
 	//nothing to validate yet
 }
-
-var _ webhook.Validator = &Redis{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *Redis) ValidateCreate() (admission.Warnings, error) {
