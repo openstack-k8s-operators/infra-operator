@@ -19,14 +19,11 @@ package v1beta1
 import (
 	"k8s.io/apimachinery/pkg/runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // log is for logging in this package.
 var reservationlog = logf.Log.WithName("reservation-resource")
-
-var _ webhook.Defaulter = &Reservation{}
 
 // Default implements webhook.Defaulter so a webhook will be registered for the type
 func (r *Reservation) Default() {
@@ -34,8 +31,6 @@ func (r *Reservation) Default() {
 
 	// TODO(user): fill in your defaulting logic.
 }
-
-var _ webhook.Validator = &Reservation{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *Reservation) ValidateCreate() (admission.Warnings, error) {

@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
@@ -50,8 +49,6 @@ func SetupMemcachedDefaults(defaults MemcachedDefaults) {
 	memcachedlog.Info("Memcached defaults initialized", "defaults", defaults)
 }
 
-var _ webhook.Defaulter = &Memcached{}
-
 // Default implements webhook.Defaulter so a webhook will be registered for the type
 func (r *Memcached) Default() {
 	memcachedlog.Info("default", "name", r.Name)
@@ -71,8 +68,6 @@ func (spec *MemcachedSpec) Default() {
 func (spec *MemcachedSpecCore) Default() {
 	// nothing here
 }
-
-var _ webhook.Validator = &Memcached{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
 func (r *Memcached) ValidateCreate() (admission.Warnings, error) {
