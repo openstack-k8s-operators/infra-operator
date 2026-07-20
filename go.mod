@@ -6,7 +6,7 @@ require (
 	github.com/go-logr/logr v1.4.3
 	github.com/google/uuid v1.6.0
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.7
-	github.com/metallb/frr-k8s v0.0.15
+	github.com/metallb/frr-k8s v0.0.20
 	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.42.1
 	github.com/openshift/api v3.9.0+incompatible
@@ -114,7 +114,7 @@ replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20260710141509-36dec0bfafe4 //allow-merging
 
 // pin frr-k8s to v0.0.11 because later versions have a req for golang 1.22
-replace github.com/metallb/frr-k8s => github.com/metallb/frr-k8s v0.0.15 //allow-merging
+replace github.com/metallb/frr-k8s => github.com/metallb/frr-k8s v0.0.20 //allow-merging
 
 // pin these to avoid later versions pulled
 replace k8s.io/apimachinery => k8s.io/apimachinery v0.33.13 //allow-merging
