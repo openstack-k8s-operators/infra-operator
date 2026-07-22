@@ -8,6 +8,7 @@ import (
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -153,12 +154,11 @@ func BuildProxySidecarContainer(instance *rabbitmqv1beta1.RabbitMq, IPv6Enabled 
 			TimeoutSeconds:      3,
 			FailureThreshold:    3,
 		},
-		SecurityContext: &corev1.SecurityContext{
-			AllowPrivilegeEscalation: ptr.To(false),
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-			},
-		},
+		SecurityContext: func() *corev1.SecurityContext {
+			sc := pod.RestrictiveSecurityContext(999)
+			sc.ReadOnlyRootFilesystem = ptr.To(false)
+			return sc
+		}(),
 	}
 
 	// Mount TLS certificates if TLS is enabled
