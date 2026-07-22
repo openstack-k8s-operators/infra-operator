@@ -137,6 +137,9 @@ type Reconciler struct {
 // Required to manage PodDisruptionBudgets for multi-replica deployments
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
+// Required to grant nonroot-v2 SCC to RabbitMQ workload SA
+// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=nonroot-v2,resources=securitycontextconstraints,verbs=use
+
 // Required to create per-pod LoadBalancer services
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 
@@ -577,7 +580,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	rbacRules := []rbacv1.PolicyRule{
 		{
 			APIGroups:     []string{"security.openshift.io"},
-			ResourceNames: []string{"anyuid"},
+			ResourceNames: []string{"nonroot-v2"},
 			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
 		},

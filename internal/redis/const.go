@@ -13,18 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package dnsmasq provides constants and utilities for DNSMasq service configuration
-package dnsmasq
+package redis
 
 const (
-	// ServiceName -
-	ServiceName = "dnsmasq"
-
-	// DNSPort -
-	DNSPort int32 = 53
-	// DNSTargetPort - port used the service is listening on in the pod
-	DNSTargetPort int32 = 5353
-
-	// DnsmasqUID - https://github.com/openstack/kolla/blob/master/kolla/common/users.py
-	DnsmasqUID int64 = 42435
+	// RedisUID -
+	// https://github.com/openstack/kolla/blob/master/kolla/common/users.py
+	RedisUID int64 = 42460
 )
