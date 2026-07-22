@@ -16,22 +16,6 @@ const (
 func getVolumes(m *memcachedv1.Memcached) []corev1.Volume {
 	vols := []corev1.Volume{
 		{
-			Name: "kolla-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: fmt.Sprintf("%s-config-data", m.Name),
-					},
-					Items: []corev1.KeyToPath{
-						{
-							Key:  "config.json",
-							Path: "config.json",
-						},
-					},
-				},
-			},
-		},
-		{
 			Name: "config-data",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -41,7 +25,7 @@ func getVolumes(m *memcachedv1.Memcached) []corev1.Volume {
 					Items: []corev1.KeyToPath{
 						{
 							Key:  "memcached",
-							Path: "etc/sysconfig/memcached",
+							Path: "memcached",
 						},
 					},
 				},
@@ -67,13 +51,9 @@ func getVolumes(m *memcachedv1.Memcached) []corev1.Volume {
 
 func getVolumeMounts(m *memcachedv1.Memcached) []corev1.VolumeMount {
 	vm := []corev1.VolumeMount{{
-		MountPath: "/var/lib/kolla/config_files/src",
+		MountPath: "/etc/sysconfig",
 		ReadOnly:  true,
 		Name:      "config-data",
-	}, {
-		MountPath: "/var/lib/kolla/config_files",
-		ReadOnly:  true,
-		Name:      "kolla-config",
 	}}
 
 	if m.Spec.TLS.Enabled() {

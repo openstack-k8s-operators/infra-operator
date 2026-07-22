@@ -14,21 +14,19 @@ limitations under the License.
 package instanceha
 
 import (
+	"fmt"
+
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
-
-	"fmt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
-
-const instanceHaUID int64 = 42401
 
 // Deployment creates a Kubernetes Deployment for the InstanceHa resource
 func Deployment(
@@ -172,31 +170,41 @@ func Deployment(
 					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: instance.RbacResourceName(),
+					ServiceAccountName:           instance.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup: ptr.To(instanceHaUID),
+						// No RunAsUser/RunAsGroup/FSGroup pinning: instanceha runs
+						// under the restricted-v2 SCC, which assigns a random UID
+						// and matching fsGroup from the namespace's allotted range.
+						RunAsNonRoot: ptr.To(true),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
 					},
-					Volumes:                       volumes,
+					Volumes:                       append(volumes, serviceaccount.KubeAPIAccessVolume()),
 					TerminationGracePeriodSeconds: ptr.To[int64](45),
 					Containers: []corev1.Container{{
 						Name:    "instanceha",
 						Image:   containerImage,
 						Command: []string{"/usr/bin/python3", "-u", "/var/lib/instanceha/instanceha.py"},
 						SecurityContext: &corev1.SecurityContext{
-							RunAsUser:                ptr.To(instanceHaUID),
-							RunAsGroup:               ptr.To(instanceHaUID),
+							// instanceha is a stateless workload that reads only from
+							// mounted secrets/configmaps, so it needs no fixed UID and
+							// runs under restricted-v2 with a random, admission-assigned
+							// UID. Everything else stays hardened.
 							RunAsNonRoot:             ptr.To(true),
 							ReadOnlyRootFilesystem:   ptr.To(true),
 							AllowPrivilegeEscalation: ptr.To(false),
 							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{
-									"ALL",
-								},
+								Drop: []corev1.Capability{"ALL"},
+							},
+							SeccompProfile: &corev1.SeccompProfile{
+								Type: corev1.SeccompProfileTypeRuntimeDefault,
 							},
 						},
 						Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
 						Ports:          instancehaPorts(instance),
-						VolumeMounts:   volumeMounts,
+						VolumeMounts:   append(volumeMounts, serviceaccount.KubeAPIAccessVolumeMount()),
 						LivenessProbe:  livenessProbe,
 						ReadinessProbe: readinessProbe,
 					}},

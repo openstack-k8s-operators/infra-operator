@@ -39,6 +39,24 @@ const (
 	ServiceCommand = "dnsmasq"
 )
 
+// dnsmasqSecurityContext returns the hardened container SecurityContext for
+// dnsmasq. It pins no UID/GID so the workload runs under the restricted-v2 SCC
+// with a random, admission-assigned UID. ReadOnlyRootFilesystem stays disabled
+// to match the existing behavior.
+func dnsmasqSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
+		ReadOnlyRootFilesystem:   ptr.To(false),
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
 // Deployment func
 func Deployment(
 	instance *networkv1.DNSMasq,
@@ -71,6 +89,10 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
 	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
 	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
+	// Disable the pidfile: k8s manages the process lifecycle, and writing the
+	// default pidfile under /run would fail under the restricted-v2 SCC's
+	// random, admission-assigned UID (which doesn't own that image path).
+	dnsmasqCmd = append(dnsmasqCmd, "--pid-file=")
 	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
 	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
 	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
@@ -121,42 +143,40 @@ func Deployment(
 					Labels:      labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: instance.RbacResourceName(),
-					Volumes:            getVolumes(instance.Name, cms),
+					ServiceAccountName:           instance.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
+					SecurityContext: &corev1.PodSecurityContext{
+						// No RunAsUser/RunAsGroup/FSGroup pinning: dnsmasq runs
+						// under the restricted-v2 SCC, which assigns a random UID
+						// and matching fsGroup from the namespace's allotted range.
+						RunAsNonRoot: ptr.To(true),
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					Volumes: getVolumes(instance.Name, cms),
 					InitContainers: []corev1.Container{
 						{
-							Name:    "init",
-							Command: command,
-							Args:    initArgs,
-							Image:   instance.Spec.ContainerImage,
-							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             ptr.To(true),
-								AllowPrivilegeEscalation: ptr.To(false),
-								SeccompProfile: &corev1.SeccompProfile{
-									Type: corev1.SeccompProfileTypeRuntimeDefault,
-								},
-							},
-							Env:          env.MergeEnvs([]corev1.EnvVar{}, envVars),
-							VolumeMounts: getVolumeMounts(instance.Name, cms),
+							Name:            "init",
+							Command:         command,
+							Args:            initArgs,
+							Image:           instance.Spec.ContainerImage,
+							SecurityContext: dnsmasqSecurityContext(),
+							Env:             env.MergeEnvs([]corev1.EnvVar{}, envVars),
+							VolumeMounts:    getVolumeMounts(instance.Name, cms),
 						},
 					},
 					Containers: []corev1.Container{
 						{
-							Name:    ServiceName + "-dns",
-							Command: command,
-							Args:    args,
-							Image:   instance.Spec.ContainerImage,
-							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             ptr.To(true),
-								AllowPrivilegeEscalation: ptr.To(false),
-								SeccompProfile: &corev1.SeccompProfile{
-									Type: corev1.SeccompProfileTypeRuntimeDefault,
-								},
-							},
-							Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
-							VolumeMounts:   getVolumeMounts(instance.Name, cms),
-							ReadinessProbe: readinessProbe,
-							LivenessProbe:  livenessProbe,
+							Name:            ServiceName + "-dns",
+							Command:         command,
+							Args:            args,
+							Image:           instance.Spec.ContainerImage,
+							SecurityContext: dnsmasqSecurityContext(),
+							Env:             env.MergeEnvs([]corev1.EnvVar{}, envVars),
+							VolumeMounts:    getVolumeMounts(instance.Name, cms),
+							ReadinessProbe:  readinessProbe,
+							LivenessProbe:   livenessProbe,
 						},
 					},
 					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,

@@ -97,7 +97,6 @@ func (r *DNSMasqReconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update;patch
 // service account permissions that are needed to grant permission to the above
-// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -200,15 +199,10 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return r.reconcileDelete(ctx, instance, helper)
 	}
 
-	// Service account, role, binding
-	rbacRules := []rbacv1.PolicyRule{
-		{
-			APIGroups:     []string{"security.openshift.io"},
-			ResourceNames: []string{"anyuid"},
-			Resources:     []string{"securitycontextconstraints"},
-			Verbs:         []string{"use"},
-		},
-	}
+	// Service account, role, binding.
+	// No securitycontextconstraints "use" grant: dnsmasq runs under the
+	// default restricted-v2 SCC (random UID), which needs no explicit grant.
+	rbacRules := []rbacv1.PolicyRule{}
 	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
 	if err != nil {
 		return rbacResult, err
