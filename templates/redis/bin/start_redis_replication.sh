@@ -5,17 +5,19 @@
 generate_configs
 sudo -E kolla_set_configs
 
-# 1. check if a redis cluster is already running by contacting sentinel
-output=$(timeout ${TIMEOUT} $REDIS_CLI_CMD -h ${SVC_FQDN} -p 26379 sentinel master redis)
+# 1. check if a redis cluster is already running by contacting peer sentinels
+master=$(wait_for_master)
 if [ $? -eq 0 ]; then
-    master=$(echo "$output" | awk '/^ip$/ {getline; print $0; exit}')
-    # TODO skip if no master was found
     log "Connecting to the existing Redis cluster (master: ${master})"
     exec redis-server $REDIS_CONFIG --protected-mode no --replicaof "$master" 6379
 fi
 
-# 2. else bootstrap a new cluster (assume we should be the first redis pod)
+# 2. else bootstrap a new cluster if no peers are alive (fresh deployment)
 if is_bootstrap_pod $POD_NAME; then
+    if has_alive_peers; then
+        log_error "Peers are alive but no master found. Refusing to bootstrap to avoid split-brain."
+        exit 1
+    fi
     log "Bootstrapping a new Redis cluster from ${POD_NAME}"
     set_pod_label $POD_NAME redis~1master
     exec redis-server $REDIS_CONFIG --protected-mode no
