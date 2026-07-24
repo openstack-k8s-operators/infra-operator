@@ -1005,33 +1005,26 @@ func (r *Reconciler) findInstanceHaWithPendingRotation(ctx context.Context, _ cl
 	return requests
 }
 
-// GetContainerImage returns the container image to use for the instance, either from
-// the provided containerImage parameter or from the infra-instanceha-config ConfigMap
+// GetContainerImage returns the container image for InstanceHa. Priority:
+// 1. spec.containerImage (explicit user override)
+// 2. infra-instanceha-config ConfigMap (managed by openstack-operator)
+// 3. RELATED_IMAGE env var or hardcoded fallback (standalone deployment)
 func (r *Reconciler) GetContainerImage(
 	ctx context.Context,
 	containerImage string,
 	src client.Object,
 ) (string, error) {
-	cm := &corev1.ConfigMap{}
-	instanceHaConfigMapName := "infra-instanceha-config"
-
 	if len(containerImage) > 0 {
 		return containerImage, nil
 	}
 
-	objectKey := client.ObjectKey{Namespace: src.GetNamespace(), Name: instanceHaConfigMapName}
-	err := r.Get(ctx, objectKey, cm)
-	if err != nil {
-		return "", err
+	cm := &corev1.ConfigMap{}
+	objectKey := client.ObjectKey{Namespace: src.GetNamespace(), Name: "infra-instanceha-config"}
+	if err := r.Get(ctx, objectKey, cm); err == nil && cm.Data != nil {
+		if cmImage, exists := cm.Data["instanceha-image"]; exists && len(cmImage) > 0 {
+			return cmImage, nil
+		}
 	}
 
-	if cm.Data == nil {
-		return util.GetEnvVar("RELATED_IMAGE_INFRA_INSTANCE_HA_IMAGE_URL_DEFAULT", ""), nil
-	}
-
-	if cmImage, exists := cm.Data["instanceha-image"]; exists {
-		return cmImage, nil
-	}
-
-	return "", fmt.Errorf("no container image found: key 'instanceha-image' not in ConfigMap %s and RELATED_IMAGE_INFRA_INSTANCE_HA_IMAGE_URL_DEFAULT not set", instanceHaConfigMapName)
+	return util.GetEnvVar("RELATED_IMAGE_INFRA_INSTANCE_HA_IMAGE_URL_DEFAULT", instancehav1.InstanceHaContainerImage), nil
 }
