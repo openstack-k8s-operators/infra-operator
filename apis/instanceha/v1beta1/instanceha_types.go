@@ -77,7 +77,8 @@ type InstanceHaMetricsTLS struct {
 // InstanceHaSpec defines the desired state of InstanceHa
 type InstanceHaSpec struct {
 	// +kubebuilder:validation:Optional
-	// ContainerImage for the InstanceHa container (will be set to environmental default if empty)
+	// ContainerImage for the InstanceHa container. If empty, resolved from
+	// the infra-instanceha-config ConfigMap or the RELATED_IMAGE env var.
 	ContainerImage string `json:"containerImage"`
 
 	// +kubebuilder:validation:Required

@@ -36,6 +36,7 @@ var _ = Describe("InstanceHa webhook", func() {
 
 			instanceha.Default()
 
+			Expect(instanceha.Spec.ContainerImage).To(BeEmpty())
 			Expect(instanceha.Spec.OpenStackCloud).To(Equal(instancehav1beta1.OpenStackCloud))
 			Expect(instanceha.Spec.OpenStackConfigMap).To(Equal("openstack-config"))
 			Expect(instanceha.Spec.OpenStackConfigSecret).To(Equal("openstack-config-secret"))
@@ -45,6 +46,22 @@ var _ = Describe("InstanceHa webhook", func() {
 			Expect(instanceha.Spec.InstanceHaHeartbeatPort).To(Equal(int32(7411)))
 			Expect(instanceha.Spec.MetricsTLS.MinTLSVersion).To(Equal("1.2"))
 			Expect(instanceha.Spec.MetricsTLS.CipherSuites).To(Equal("HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"))
+		})
+
+		It("should not override an explicitly set containerImage", func() {
+			instanceha := &instancehav1beta1.InstanceHa{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-instanceha-explicit-image",
+					Namespace: "default",
+				},
+				Spec: instancehav1beta1.InstanceHaSpec{
+					ContainerImage: "my-custom-image:v1",
+				},
+			}
+
+			instanceha.Default()
+
+			Expect(instanceha.Spec.ContainerImage).To(Equal("my-custom-image:v1"))
 		})
 
 		It("should not override explicitly set values", func() {
