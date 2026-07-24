@@ -130,9 +130,8 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=config.openshift.io,resources=networks,verbs=get;list;watch;
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 
-// Required to exec into pods
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete;
-// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
+// Required to label and delete pods during CR deletion
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;delete
 
 // Required to manage PodDisruptionBudgets for multi-replica deployments
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
