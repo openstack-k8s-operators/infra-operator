@@ -58,9 +58,6 @@ func (r *InstanceHa) Default() {
 
 // Default - set defaults for this InstanceHa spec
 func (spec *InstanceHaSpec) Default() {
-	if spec.ContainerImage == "" {
-		spec.ContainerImage = instanceHaDefaults.ContainerImageURL
-	}
 	if spec.OpenStackCloud == "" {
 		spec.OpenStackCloud = OpenStackCloud
 	}
