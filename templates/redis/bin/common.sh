@@ -15,12 +15,12 @@ POD_IP=$(grep "$HOSTNAME" /etc/hosts | awk '{print $1}' | head -1)
 
 if test -d /var/lib/config-data/tls; then
     REDIS_CLI_CMD="redis-cli --tls"
-    REDIS_CONFIG=/var/lib/redis/redis-tls.conf
-    SENTINEL_CONFIG=/var/lib/redis/sentinel-tls.conf
+    REDIS_CONFIG=/var/lib/config-data/generated/var/lib/redis/redis-tls.conf
+    SENTINEL_CONFIG=/var/lib/config-data/generated/var/lib/redis/sentinel-tls.conf
 else
     REDIS_CLI_CMD=redis-cli
-    REDIS_CONFIG=/var/lib/redis/redis.conf
-    SENTINEL_CONFIG=/var/lib/redis/sentinel.conf
+    REDIS_CONFIG=/var/lib/config-data/generated/var/lib/redis/redis.conf
+    SENTINEL_CONFIG=/var/lib/config-data/generated/var/lib/redis/sentinel.conf
 fi
 
 function log() {

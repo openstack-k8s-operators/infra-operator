@@ -6,6 +6,7 @@ import (
 	. "github.com/onsi/gomega" //revive:disable:dot-imports
 
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -100,6 +101,51 @@ func TestDeploymentSecurityContext(t *testing.T) {
 
 	g.Expect(container.SecurityContext.ReadOnlyRootFilesystem).NotTo(BeNil())
 	g.Expect(*container.SecurityContext.ReadOnlyRootFilesystem).To(BeTrue())
+
+	g.Expect(container.SecurityContext.RunAsNonRoot).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.RunAsNonRoot).To(BeTrue())
+
+	g.Expect(container.SecurityContext.RunAsUser).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.RunAsUser).To(Equal(int64(42401)))
+
+	g.Expect(container.SecurityContext.RunAsGroup).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.RunAsGroup).To(Equal(int64(42401)))
+
+	g.Expect(container.SecurityContext.AllowPrivilegeEscalation).NotTo(BeNil())
+	g.Expect(*container.SecurityContext.AllowPrivilegeEscalation).To(BeFalse())
+
+	g.Expect(container.SecurityContext.Capabilities).NotTo(BeNil())
+	g.Expect(container.SecurityContext.Capabilities.Drop).To(ContainElement(corev1.Capability("ALL")))
+
+	g.Expect(container.SecurityContext.SeccompProfile).NotTo(BeNil())
+	g.Expect(container.SecurityContext.SeccompProfile.Type).To(Equal(corev1.SeccompProfileTypeRuntimeDefault))
+
+	// Verify AutomountServiceAccountToken is disabled
+	g.Expect(dep.Spec.Template.Spec.AutomountServiceAccountToken).NotTo(BeNil())
+	g.Expect(*dep.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
+
+	// Verify kube-api-access projected volume exists
+	var kubeAPIVolumeFound bool
+	for _, vol := range dep.Spec.Template.Spec.Volumes {
+		if vol.Name == "kube-api-access" {
+			kubeAPIVolumeFound = true
+			g.Expect(vol.VolumeSource.Projected).NotTo(BeNil())
+			g.Expect(vol.VolumeSource.Projected.Sources).To(HaveLen(3))
+			break
+		}
+	}
+	g.Expect(kubeAPIVolumeFound).To(BeTrue(), "kube-api-access projected volume should exist")
+
+	// Verify kube-api-access mount exists
+	var kubeAPIMountFound bool
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "kube-api-access" && mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
+			kubeAPIMountFound = true
+			g.Expect(mount.ReadOnly).To(BeTrue())
+			break
+		}
+	}
+	g.Expect(kubeAPIMountFound).To(BeTrue(), "kube-api-access volume mount should exist")
 
 	// Verify /tmp emptyDir volume exists
 	var tmpVolumeFound bool

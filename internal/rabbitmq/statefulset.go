@@ -7,6 +7,8 @@ import (
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -64,9 +66,14 @@ func StatefulSet(
 		Command:        []string{"rabbitmq-server"},
 		Env:            containerEnv,
 		Ports:          buildContainerPorts(r),
-		VolumeMounts:   getVolumeMounts(r, proxy.IPv6Enabled),
+		VolumeMounts:   append(getVolumeMounts(r, proxy.IPv6Enabled), serviceaccount.KubeAPIAccessVolumeMount()),
 		ReadinessProbe: readinessProbe,
 		Lifecycle:      buildLifecycle(r),
+		SecurityContext: func() *corev1.SecurityContext {
+			sc := pod.RestrictiveSecurityContext(999)
+			sc.ReadOnlyRootFilesystem = ptr.To(false)
+			return sc
+		}(),
 	}
 
 	// When proxy is enabled, RabbitMQ listens on localhost only (backend port).
@@ -159,14 +166,15 @@ func StatefulSet(
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            r.RbacResourceName(),
-					AutomountServiceAccountToken:  ptr.To(true),
+					AutomountServiceAccountToken:  ptr.To(false),
 					TerminationGracePeriodSeconds: r.Spec.TerminationGracePeriodSeconds,
 					InitContainers:                initContainers,
 					Containers:                    containers,
-					Volumes:                       volumes,
+					Volumes:                       append(volumes, serviceaccount.KubeAPIAccessVolume()),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup:   ptr.To(int64(0)),
-						RunAsUser: ptr.To(int64(999)),
+						FSGroup:             ptr.To(int64(999)),
+						FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
+						RunAsUser:           ptr.To(int64(999)),
 					},
 				},
 			},

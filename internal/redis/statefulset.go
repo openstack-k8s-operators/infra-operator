@@ -9,10 +9,13 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/clusterdns"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 // StatefulSet returns a StatefulSet resource for the Redis CR
@@ -28,36 +31,36 @@ func StatefulSet(
 	ls := labels.GetLabels(r, "redis", matchls)
 
 	livenessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
 		InitialDelaySeconds: 3,
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+			},
+		},
 	}
 	readinessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
 		InitialDelaySeconds: 5,
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
+			},
+		},
 	}
 	sentinelLivenessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
 		InitialDelaySeconds: 3,
 	}
 	sentinelReadinessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
 		InitialDelaySeconds: 5,
 	}
 
-	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
-	}
-	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
-	}
 	sentinelLivenessProbe.TCPSocket = &corev1.TCPSocketAction{
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
 	}
@@ -96,43 +99,45 @@ func StatefulSet(
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: r.RbacResourceName(),
+					ServiceAccountName:           r.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup: ptr.To(RedisUID),
+					},
 					Containers: []corev1.Container{
 						{
-							Image:        r.Spec.ContainerImage,
-							Command:      []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_redis_replication.sh"},
-							Name:         "redis",
+							Image:   r.Spec.ContainerImage,
+							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_redis_replication.sh"},
+							Name:    "redis",
+							SecurityContext: func() *corev1.SecurityContext {
+								sc := pod.RestrictiveSecurityContext(RedisUID)
+								sc.ReadOnlyRootFilesystem = ptr.To(false)
+								return sc
+							}(),
 							Env:          commonEnvVars,
 							Resources:    r.Spec.Resources,
-							VolumeMounts: getRedisVolumeMounts(r),
+							VolumeMounts: append(getRedisVolumeMounts(r), serviceaccount.KubeAPIAccessVolumeMount()),
 							Ports: []corev1.ContainerPort{{
 								ContainerPort: 6379,
 								Name:          "redis",
 							}},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
-									},
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
-									},
-								},
-							},
+							LivenessProbe:  livenessProbe,
+							ReadinessProbe: readinessProbe,
 						}, {
 							Image:   r.Spec.ContainerImage,
 							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_sentinel.sh"},
 							Name:    "sentinel",
+							SecurityContext: func() *corev1.SecurityContext {
+								sc := pod.RestrictiveSecurityContext(RedisUID)
+								sc.ReadOnlyRootFilesystem = ptr.To(false)
+								return sc
+							}(),
 							Env: append(commonEnvVars, corev1.EnvVar{
 								Name:  "SENTINEL_QUORUM",
 								Value: strconv.Itoa((int(*r.Spec.Replicas) / 2) + 1),
 							}),
 							Resources:    r.Spec.SentinelResources,
-							VolumeMounts: getSentinelVolumeMounts(r),
+							VolumeMounts: append(getSentinelVolumeMounts(r), serviceaccount.KubeAPIAccessVolumeMount()),
 							Ports: []corev1.ContainerPort{{
 								ContainerPort: 26379,
 								Name:          "sentinel",
@@ -141,7 +146,7 @@ func StatefulSet(
 							LivenessProbe:  sentinelLivenessProbe,
 						},
 					},
-					Volumes: getVolumes(r),
+					Volumes: append(getVolumes(r), serviceaccount.KubeAPIAccessVolume()),
 				},
 			},
 		},
