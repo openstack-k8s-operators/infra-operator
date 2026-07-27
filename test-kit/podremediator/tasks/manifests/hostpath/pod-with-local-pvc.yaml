@@ -1,0 +1,34 @@
+# Test Pod using the local PVC. Must run on the same node as the PV's nodeAffinity.
+# Replace NODE_NAME with the node name used in pv-local.yaml.
+# Apply with:
+#   NODE_NAME=$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
+#   sed "s/NODE_NAME/${NODE_NAME}/g" pod-with-local-pvc.yaml | oc apply -f - -n openstack-operators
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-local-pvc-podremediator
+  namespace: openstack-operators
+spec:
+  nodeName: NODE_NAME
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test
+      image: registry.redhat.io/ubi9/ubi-minimal:latest
+      command: ["sleep", "infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        runAsNonRoot: true
+        runAsUser: 1000
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: test-local-pvc-podremediator
+  restartPolicy: Always

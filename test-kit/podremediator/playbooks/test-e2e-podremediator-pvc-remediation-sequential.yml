@@ -1,0 +1,15 @@
+# Convenience only: runs two independent E2E scenarios in order — (1) base lab StatefulSet + virsh
+# (validates PodRemediator on our minimal workload), (2) RabbitMQ on existing OpenStack RabbitMQ.
+# Scenario (2) does not depend on (1); use separate playbooks if you only need one.
+#
+# From had-18:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/test-e2e-podremediator-pvc-remediation-sequential.yml -b
+#
+# Prerequisites: PodRemediator should list both workload namespaces, e.g.
+# spec.namespaces: [openstack-operators, openstack].
+
+---
+- import_playbook: test-e2e-podremediator-pvc-remediation.yml
+
+- import_playbook: test-e2e-podremediator-pvc-remediation-rabbitmq.yml
