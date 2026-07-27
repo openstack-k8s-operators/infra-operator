@@ -64,6 +64,7 @@ KDUMP_MAGIC_NUMBER = 0x1B302A40
 MAX_PROCESSING_TIME_PADDING_SECONDS = 30
 MIGRATION_QUERY_MINUTES = 5
 MIGRATION_QUERY_LIMIT = 1000
+RESUME_MIGRATION_QUERY_MINUTES = 60
 USERNAME_MAX_LENGTH = 64
 FENCING_RETRY_DELAY_SECONDS = 1
 KDUMP_REENABLE_DELAY_SECONDS = 60
@@ -262,6 +263,7 @@ class EvacuationStatus:
     """Status of an ongoing server evacuation."""
     completed: bool
     error: bool
+    created_at: Optional[str] = None
 
 
 @dataclass
@@ -1635,13 +1637,16 @@ def _should_skip_server(server, skip_names) -> bool:
     return any(fnmatch.fnmatch(server.name, pattern) for pattern in skip_names)
 
 
-def _get_evacuable_servers(connection, host, service) -> List:
+def _get_evacuable_servers(connection, host, service, resume=False) -> List:
     """Get list of evacuable servers from a host."""
     images = service.get_evacuable_images(connection)
     flavors = service.get_evacuable_flavors(connection)
 
     servers = connection.servers.list(search_opts={'host': host, 'all_tenants': 1})
-    servers = [s for s in servers if s.status in {'ACTIVE', 'ERROR', 'SHUTOFF'}]
+    allowed_statuses = {'ACTIVE', 'ERROR', 'SHUTOFF'}
+    if resume:
+        allowed_statuses.add('REBUILD')
+    servers = [s for s in servers if s.status in allowed_statuses]
 
     skip_names = service.config.get_config_value('SKIP_SERVERS_WITH_NAME')
     if skip_names:
@@ -1760,7 +1765,7 @@ def _run_concurrent(func, items, max_workers, item_id_func, log_prefix="",
     return all_succeeded
 
 
-def _concurrent_evacuate(connection, evacuables, service, host, service_id, target_host=None) -> bool:
+def _concurrent_evacuate(connection, evacuables, service, host, service_id, target_host=None, resume=False) -> bool:
     """Evacuate concurrently, optionally with priority-ordered phases."""
     orchestrated = service.config.get_config_value('ORCHESTRATED_RESTART')
     phases = _build_evacuation_groups(evacuables) if orchestrated else [evacuables]
@@ -1787,7 +1792,8 @@ def _concurrent_evacuate(connection, evacuables, service, host, service_id, targ
             lambda s: _server_evacuate_future(connection, s, target_host,
                                               max_retries=max_retries,
                                               shutdown_event=service.shutdown_event,
-                                              evacuation_timeout=evacuation_timeout),
+                                              evacuation_timeout=evacuation_timeout,
+                                              resume=resume),
             phase_servers,
             inner_workers,
             lambda s: s.id,
@@ -1832,11 +1838,11 @@ def _traditional_evacuate(connection, evacuables, host, target_host=None) -> boo
 
     return all_succeeded
 
-def _host_evacuate(connection, failed_service, service, target_host=None) -> bool:
+def _host_evacuate(connection, failed_service, service, target_host=None, resume=False) -> bool:
     """Evacuate all instances from a failed host."""
     host = failed_service.host
 
-    evacuables = _get_evacuable_servers(connection, host, service)
+    evacuables = _get_evacuable_servers(connection, host, service, resume=resume)
     if not evacuables:
         logging.info("Nothing to evacuate")
         return True
@@ -1844,7 +1850,7 @@ def _host_evacuate(connection, failed_service, service, target_host=None) -> boo
     _interruptible_sleep(service.shutdown_event, service.config.get_config_value('DELAY'))
 
     if service.config.get_config_value('ORCHESTRATED_RESTART') or service.config.get_config_value('SMART_EVACUATION'):
-        return _concurrent_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host)
+        return _concurrent_evacuate(connection, evacuables, service, host, failed_service.id, target_host=target_host, resume=resume)
     else:
         return _traditional_evacuate(connection, evacuables, host, target_host=target_host)
 
@@ -1952,10 +1958,12 @@ def _server_evacuation_status(connection, server, query_minutes=MIGRATION_QUERY_
         migrations = sorted(migrations, key=_migration_sort_key, reverse=True)
         migration = migrations[0]
         status = getattr(migration, 'status', None) or getattr(migration, '_info', {}).get('status')
+        created_at = getattr(migration, 'created_at', None)
 
         return EvacuationStatus(
             completed=status in MIGRATION_STATUS_COMPLETED if status else False,
-            error=status in MIGRATION_STATUS_ERROR if status else True
+            error=status in MIGRATION_STATUS_ERROR if status else True,
+            created_at=created_at,
         )
 
     except Exception as e:
@@ -2031,7 +2039,8 @@ def _monitor_evacuation(connection, server_id, response_uuid, start_time,
 def _server_evacuate_future(connection, server, target_host=None,
                             max_retries=DEFAULT_EVACUATION_RETRIES,
                             shutdown_event=None,
-                            evacuation_timeout=MAX_EVACUATION_TIMEOUT_SECONDS) -> bool:
+                            evacuation_timeout=MAX_EVACUATION_TIMEOUT_SECONDS,
+                            resume=False) -> bool:
     """Evacuate a server and monitor until completion."""
     if not hasattr(server, 'id'):
         logging.warning("Could not evacuate instance - missing server ID: %s",
@@ -2052,6 +2061,73 @@ def _server_evacuate_future(connection, server, target_host=None,
         logging.warning("Could not lock server %s (may already be locked)", server.id)
 
     try:
+        if resume:
+            mig_status = _server_evacuation_status(connection, server.id,
+                                                   query_minutes=RESUME_MIGRATION_QUERY_MINUTES)
+
+            if mig_status.completed:
+                logging.info("Server %s already evacuated (migration completed), skipping",
+                             server.id)
+                INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='succeeded').inc()
+                return True
+
+            if not mig_status.error:
+                # Compute elapsed time from when the migration actually started,
+                # not from when this pod started, so the timeout reflects real
+                # migration age and a crash-loop can't grant infinite extensions.
+                resume_start = start_time
+                if mig_status.created_at:
+                    try:
+                        created_dt = datetime.fromisoformat(
+                            str(mig_status.created_at).replace('Z', '+00:00'))
+                        elapsed = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                        resume_start = time.monotonic() - elapsed
+                    except (ValueError, TypeError):
+                        pass
+
+                logging.info("Server %s has in-progress evacuation, monitoring existing migration",
+                             server.id)
+                _emit_k8s_event(source_host, 'InstanceEvacuationResumed',
+                                f'Resuming monitoring of in-progress evacuation for {server.id}')
+                INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='started').inc()
+
+                result = _monitor_evacuation(
+                    connection, server.id, server.id, resume_start,
+                    max_retries=max_retries,
+                    shutdown_event=shutdown_event,
+                    evacuation_timeout=evacuation_timeout)
+
+                if result:
+                    _emit_k8s_event(source_host, 'InstanceEvacuationSucceeded',
+                                    f'Instance {server.id} evacuated successfully (resumed)')
+                    INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='succeeded').inc()
+                    INSTANCE_EVACUATION_DURATION.labels(host=source_host).observe(
+                        time.monotonic() - start_time)
+                    if original_status in ('SHUTOFF', 'ERROR'):
+                        current = connection.servers.get(server.id)
+                        current_status = getattr(current, 'status', None)
+                        if current_status != original_status:
+                            try:
+                                if original_status == 'SHUTOFF':
+                                    connection.servers.stop(server.id)
+                                else:
+                                    connection.servers.reset_state(server.id, 'error')
+                                logging.info("Restored server %s to %s state",
+                                             server.id, original_status)
+                            except Exception as e:
+                                logging.warning("Failed to restore %s state for %s: %s",
+                                                original_status, server.id, e)
+                else:
+                    _emit_k8s_event(source_host, 'InstanceEvacuationFailed',
+                                    f'Instance {server.id} evacuation failed (resumed)',
+                                    event_type='Warning')
+                    INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='failed').inc()
+
+                return result
+
+            logging.info("Server %s has no recent successful migration, will re-evacuate",
+                         server.id)
+
         _emit_k8s_event(source_host, 'InstanceEvacuationStarted',
                         f'Evacuating instance {server.id}')
         INSTANCE_EVACUATION_TOTAL.labels(host=source_host, result='started').inc()
@@ -3003,7 +3079,8 @@ def process_service(failed_service, reserved_hosts, resume, service) -> bool:
             if evac_target:
                 logging.info("Forcing evacuation to reserved host: %s", evac_target)
             if not _execute_step("Evacuation", _host_evacuate, host_name,
-                                conn, failed_service, service, evac_target):
+                                conn, failed_service, service, evac_target,
+                                resume=resume):
                 _emit_k8s_event(host_name, 'EvacuationFailed',
                                 'VM evacuation failed', event_type='Warning')
                 EVACUATION_TOTAL.labels(host=host_name, result='failed').inc()

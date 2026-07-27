@@ -3789,6 +3789,255 @@ class TestMainFunction(unittest.TestCase):
             mock_init.assert_called_once_with(mock_cm)
 
 
+class TestResumeSafeEvacuation(unittest.TestCase):
+    """Test resume-safe evacuation after pod restart."""
+
+    def setUp(self):
+        self.mock_connection = Mock()
+        self.mock_service = Mock()
+
+    def test_get_evacuable_servers_includes_rebuild_on_resume(self):
+        """REBUILD servers are included when resume=True, excluded otherwise."""
+        active = Mock(status='ACTIVE', name='vm-1', id='s-1')
+        rebuild = Mock(status='REBUILD', name='vm-2', id='s-2')
+        self.mock_connection.servers.list.return_value = [active, rebuild]
+        self.mock_service.get_evacuable_images.return_value = []
+        self.mock_service.get_evacuable_flavors.return_value = []
+        self.mock_service.config.get_config_value.side_effect = lambda k: {
+            'SKIP_SERVERS_WITH_NAME': [],
+        }.get(k, False)
+
+        without_resume = instanceha._get_evacuable_servers(
+            self.mock_connection, 'host', self.mock_service)
+        self.assertEqual(len(without_resume), 1)
+        self.assertEqual(without_resume[0].id, 's-1')
+
+        with_resume = instanceha._get_evacuable_servers(
+            self.mock_connection, 'host', self.mock_service, resume=True)
+        self.assertEqual(len(with_resume), 2)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_skips_completed_migration(self, mock_status, mock_event):
+        """Server with completed migration returns True without calling evacuate."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=True, error=False)
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        self.mock_connection.servers.evacuate.assert_not_called()
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_monitors_in_progress_migration(self, mock_status, mock_monitor, mock_event):
+        """Server with in-progress migration calls monitor, not evacuate."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=False)
+        mock_monitor.return_value = True
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        mock_monitor.assert_called_once()
+        self.mock_connection.servers.evacuate.assert_not_called()
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuate')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_re_evacuates_on_error(self, mock_status, mock_evacuate, mock_monitor, mock_event):
+        """Server with errored migration falls through to normal evacuate path."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        setattr(server, 'OS-EXT-STS:task_state', None)
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=True)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.reason = 'OK'
+        mock_response.accepted = True
+        mock_response.uuid = 's-1'
+        mock_response.request_id = 'req-1'
+        mock_evacuate.return_value = mock_response
+        mock_monitor.return_value = True
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        mock_evacuate.assert_called_once()
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_restores_shutoff_state(self, mock_status, mock_monitor, mock_event):
+        """Resumed in-progress evacuation restores SHUTOFF state on success."""
+        server = Mock(id='s-1', status='SHUTOFF')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=False)
+        mock_monitor.return_value = True
+        current_server = Mock(status='ACTIVE')
+        self.mock_connection.servers.get.return_value = current_server
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        self.mock_connection.servers.stop.assert_called_once_with('s-1')
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_restores_error_state(self, mock_status, mock_monitor, mock_event):
+        """Resumed in-progress evacuation restores ERROR state on success."""
+        server = Mock(id='s-1', status='ERROR')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=False)
+        mock_monitor.return_value = True
+        current_server = Mock(status='ACTIVE')
+        self.mock_connection.servers.get.return_value = current_server
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        self.mock_connection.servers.reset_state.assert_called_with('s-1', 'error')
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_in_progress_monitor_fails(self, mock_status, mock_monitor, mock_event):
+        """Resumed in-progress evacuation returns False when monitor fails."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=False)
+        mock_monitor.return_value = False
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertFalse(result)
+        mock_monitor.assert_called_once()
+        self.mock_connection.servers.evacuate.assert_not_called()
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._server_evacuate')
+    @patch('instanceha._server_evacuation_status')
+    def test_non_resume_skips_migration_check(self, mock_status, mock_evacuate, mock_event):
+        """Without resume=True, migration status is never checked."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        setattr(server, 'OS-EXT-STS:task_state', None)
+
+        mock_response = Mock(accepted=True, uuid='s-1', request_id='req-1',
+                             status_code=200, reason='OK')
+        mock_evacuate.return_value = mock_response
+
+        with patch('instanceha._monitor_evacuation', return_value=True):
+            instanceha._server_evacuate_future(
+                self.mock_connection, server, resume=False)
+
+        mock_status.assert_not_called()
+        mock_evacuate.assert_called_once()
+
+    @patch('instanceha._interruptible_sleep')
+    @patch('instanceha._concurrent_evacuate')
+    def test_host_evacuate_passes_resume_through(self, mock_concurrent, mock_sleep):
+        """_host_evacuate passes resume flag to _concurrent_evacuate."""
+        failed_service = Mock(host='test-host', id='svc-1')
+        service = Mock()
+        service.config.get_config_value.side_effect = lambda k: {
+            'SKIP_SERVERS_WITH_NAME': [], 'SMART_EVACUATION': True,
+            'DELAY': 0, 'ORCHESTRATED_RESTART': False,
+        }.get(k, False)
+        service.get_evacuable_images.return_value = []
+        service.get_evacuable_flavors.return_value = []
+        server = Mock(id='s-1', status='ACTIVE', name='vm-1')
+        self.mock_connection.servers.list.return_value = [server]
+        mock_concurrent.return_value = True
+
+        instanceha._host_evacuate(self.mock_connection, failed_service, service,
+                                  resume=True)
+
+        mock_concurrent.assert_called_once()
+        _, kwargs = mock_concurrent.call_args
+        self.assertTrue(kwargs.get('resume'))
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_rebuild_server_with_in_progress_migration(self, mock_status, mock_monitor, mock_event):
+        """REBUILD server on resume with in-progress migration is monitored, not re-evacuated."""
+        server = Mock(id='s-1', status='REBUILD')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=False, error=False)
+        mock_monitor.return_value = True
+
+        result = instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        self.assertTrue(result)
+        mock_monitor.assert_called_once()
+        self.mock_connection.servers.evacuate.assert_not_called()
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_uses_wide_query_window(self, mock_status, mock_monitor, mock_event):
+        """Resume path uses RESUME_MIGRATION_QUERY_MINUTES, not timeout-bounded window."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        mock_status.return_value = instanceha.EvacuationStatus(completed=True, error=False)
+
+        instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True)
+
+        mock_status.assert_called_once_with(
+            self.mock_connection, 's-1',
+            query_minutes=instanceha.RESUME_MIGRATION_QUERY_MINUTES)
+
+    @patch('instanceha._emit_k8s_event')
+    @patch('instanceha._monitor_evacuation')
+    @patch('instanceha._server_evacuation_status')
+    def test_resume_uses_migration_created_at_for_timeout(self, mock_status, mock_monitor, mock_event):
+        """Resume computes elapsed time from migration created_at, not pod start time."""
+        server = Mock(id='s-1', status='ACTIVE')
+        server.name = 'vm-1'
+        setattr(server, 'OS-EXT-SRV-ATTR:host', 'src-host')
+        # Migration started 120 seconds ago
+        from datetime import datetime, timezone, timedelta
+        created = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        mock_status.return_value = instanceha.EvacuationStatus(
+            completed=False, error=False, created_at=created)
+        mock_monitor.return_value = True
+
+        instanceha._server_evacuate_future(
+            self.mock_connection, server, resume=True, evacuation_timeout=300)
+
+        # _monitor_evacuation should have been called with a start_time
+        # that reflects ~120s elapsed, not 0s
+        call_args = mock_monitor.call_args
+        resume_start = call_args[0][3]  # 4th positional arg is start_time
+        elapsed = time.monotonic() - resume_start
+        self.assertGreater(elapsed, 100, "start_time should reflect migration age (~120s)")
+        self.assertLess(elapsed, 150, "start_time should not overshoot")
+
+
 if __name__ == '__main__':
     # Create test suite
     test_suite = unittest.TestSuite()
@@ -3809,6 +4058,7 @@ if __name__ == '__main__':
         TestFunctionalIntegration,
         TestAdvancedIntegration,
         TestMainFunction,
+        TestResumeSafeEvacuation,
     ]
 
     for test_class in test_classes:
