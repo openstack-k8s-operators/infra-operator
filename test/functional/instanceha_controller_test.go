@@ -184,6 +184,91 @@ var _ = Describe("InstanceHa Controller", func() {
 		})
 	})
 
+	When("container image resolution", func() {
+		BeforeEach(func() {
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "openstack-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"clouds.yaml": "test-data",
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "openstack-config-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"secure.yaml": []byte("test-data"),
+			}))
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateSecret(types.NamespacedName{
+				Name:      "fencing-secret",
+				Namespace: namespace,
+			}, map[string][]byte{
+				"fencing.yaml": []byte("test-data"),
+			}))
+		})
+
+		It("should use explicit containerImage from the CR when set", func() {
+			spec := GetDefaultInstanceHaSpec()
+			spec["containerImage"] = "my-custom-image:v1"
+			ih := CreateInstanceHaConfig(namespace, spec)
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			// Also create the ConfigMap to ensure CR takes precedence
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "infra-instanceha-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"instanceha-image": "configmap-image:latest",
+			}))
+
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, instanceHaName, dep)).Should(Succeed())
+				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("my-custom-image:v1"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should use ConfigMap image when containerImage is not set on the CR", func() {
+			spec := GetDefaultInstanceHaSpec()
+			delete(spec, "containerImage")
+			ih := CreateInstanceHaConfig(namespace, spec)
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateConfigMap(types.NamespacedName{
+				Name:      "infra-instanceha-config",
+				Namespace: namespace,
+			}, map[string]any{
+				"instanceha-image": "configmap-image:latest",
+			}))
+
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, instanceHaName, dep)).Should(Succeed())
+				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("configmap-image:latest"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should fall back to the default image when neither CR nor ConfigMap provide one", func() {
+			spec := GetDefaultInstanceHaSpec()
+			delete(spec, "containerImage")
+			ih := CreateInstanceHaConfig(namespace, spec)
+			instanceHaName.Name = ih.GetName()
+			instanceHaName.Namespace = ih.GetNamespace()
+			DeferCleanup(th.DeleteInstance, ih)
+
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k8sClient.Get(ctx, instanceHaName, dep)).Should(Succeed())
+				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(instancehav1.InstanceHaContainerImage))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("MetricsTLS is configured without the TLS secret", func() {
 		BeforeEach(func() {
 			spec := GetDefaultInstanceHaSpec()
