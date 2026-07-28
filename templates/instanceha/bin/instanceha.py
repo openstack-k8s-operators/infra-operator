@@ -3636,7 +3636,8 @@ def _filter_by_aggregates(conn, service, compute_nodes, services, aggregates=Non
 def _filter_by_aggregate_threshold(compute_nodes, aggregates, service):
     """Filter out compute nodes whose aggregates exceeded their per-aggregate failure threshold."""
     failed_hosts = {svc.host for svc in compute_nodes}
-    processing_hostnames = set(service.hosts_processing.keys())
+    failed_shortnames = {_extract_hostname(h) for h in failed_hosts}
+    processing_hostnames = set(service.hosts_processing.keys()) - failed_shortnames
     blocked_hosts = set()
 
     for agg in aggregates:
