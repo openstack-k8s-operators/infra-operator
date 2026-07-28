@@ -143,6 +143,12 @@ func StatefulSet(
 			ServiceName:         fmt.Sprintf("%s-nodes", r.Name),
 			Replicas:            replicas,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				RollingUpdate: &appsv1.RollingUpdateStatefulSetStrategy{
+					Partition: ptr.To(int32(0)),
+				},
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: matchls,
 			},
@@ -392,10 +398,19 @@ func buildReadinessProbe(r *rabbitmqv1.RabbitMq) *corev1.Probe {
 // before draining. For single-replica clusters, quorum checks are
 // skipped since there are no other nodes to maintain quorum.
 func buildLifecycle(r *rabbitmqv1.RabbitMq) *corev1.Lifecycle {
-	preStopCmd := `if [ ! -z "$(cat /etc/pod-info/skipPreStopChecks)" ]; then exit 0; fi; rabbitmq-upgrade await_online_quorum_plus_one -t 600 && rabbitmq-upgrade await_online_synchronized_mirror -t 600 || true && rabbitmq-upgrade drain -t 600`
-	if r.Spec.Replicas != nil && *r.Spec.Replicas <= 1 {
-		preStopCmd = `if [ ! -z "$(cat /etc/pod-info/skipPreStopChecks)" ]; then exit 0; fi; rabbitmq-upgrade drain -t 600`
+	// Derive per-command timeouts from TerminationGracePeriodSeconds using a
+	// proportional split (T/6 for quorum checks, T/2 for drain) so that drain
+	// always gets a chance to run within the grace period.
+	timeout := int64(60)
+	if r.Spec.TerminationGracePeriodSeconds != nil {
+		timeout = *r.Spec.TerminationGracePeriodSeconds
 	}
+	preStopCmd := fmt.Sprintf(
+		`if [ ! -z "$(cat /etc/pod-info/skipPreStopChecks)" ]; then exit 0; fi; `+
+			`if rabbitmqctl eval 'length(rabbit_nodes:list_running()) > 1.' 2>/dev/null | grep -q true; then `+
+			`rabbitmq-upgrade await_online_quorum_plus_one -t %d && rabbitmq-upgrade await_online_synchronized_mirror -t %d || true; fi; `+
+			`rabbitmq-upgrade drain -t %d`,
+		timeout/6, timeout/6, timeout/2)
 	return &corev1.Lifecycle{
 		PreStop: &corev1.LifecycleHandler{
 			Exec: &corev1.ExecAction{

@@ -2240,7 +2240,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 		})
 	})
 
-	When("TLS secret is rotated, config hash changes to trigger rolling restart", func() {
+	When("TLS secret data is rotated, config hash remains stable", func() {
 		var certSecret *corev1.Secret
 
 		BeforeEach(func() {
@@ -2254,7 +2254,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 		})
 
-		It("should update the config-hash annotation on the StatefulSet when TLS secret changes", func() {
+		It("should NOT update the config-hash annotation when TLS secret data changes", func() {
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
 			// Get initial config-hash from the StatefulSet
@@ -2274,12 +2274,14 @@ var _ = Describe("RabbitMQ Controller", func() {
 				g.Expect(th.K8sClient.Update(th.Ctx, secret)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			// Verify config-hash changed on the StatefulSet (triggers rolling restart)
-			Eventually(func(g Gomega) {
+			// Verify config-hash did NOT change — cert rotation is handled
+			// by projected volumes and RabbitMQ 4.x automatic reload, not
+			// by rolling restart. Hashing cert data caused quorum queue
+			// corruption during initial deployment.
+			Consistently(func(g Gomega) {
 				sts := GetRabbitMQStatefulSet(rabbitmqName)
 				newHash := sts.Spec.Template.Annotations["config-hash"]
-				g.Expect(newHash).NotTo(BeEmpty())
-				g.Expect(newHash).NotTo(Equal(initialHash), "config-hash should change when TLS secret is rotated")
+				g.Expect(newHash).To(Equal(initialHash), "config-hash should not change on TLS secret data rotation")
 			}, timeout, interval).Should(Succeed())
 		})
 	})

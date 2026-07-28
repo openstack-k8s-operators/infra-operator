@@ -388,45 +388,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	// Calculate hash for config tracking.
-	// Include TLS secret content so that certificate rotation (e.g. by
-	// cert-manager) triggers a rolling restart of the StatefulSet pods.
+	// TLS cert content is NOT included: certs are mounted via projected
+	// volumes that kubelet updates in-place, and RabbitMQ 4.x reloads
+	// them automatically. Hashing cert data here would trigger a
+	// rolling restart on every cert-manager update, which can corrupt
+	// quorum queues when replicas haven't fully synced yet.
 	hashInput := map[string]interface{}{
 		"ipv6Enabled":       IPv6Enabled,
 		"fipsEnabled":       fipsEnabled,
 		"tlsSecret":         instance.Spec.TLS.SecretName,
+		"caSecret":          instance.Spec.TLS.CaSecretName,
 		"additionalConfig":  instance.Spec.Rabbitmq.AdditionalConfig,
 		"advancedConfig":    instance.Spec.Rabbitmq.AdvancedConfig,
 		"envConfig":         instance.Spec.Rabbitmq.EnvConfig,
 		"erlangInetConfig":  instance.Spec.Rabbitmq.ErlangInetConfig,
 		"additionalPlugins": instance.Spec.Rabbitmq.AdditionalPlugins,
 		"containerImage":    instance.Spec.ContainerImage,
-		"replicas":          instance.Spec.Replicas,
-	}
-	if instance.Spec.TLS.SecretName != "" {
-		tlsSecret := &corev1.Secret{}
-		if err := r.Get(ctx, types.NamespacedName{
-			Name:      instance.Spec.TLS.SecretName,
-			Namespace: instance.Namespace,
-		}, tlsSecret); err != nil {
-			if !k8s_errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("failed to get TLS secret %s: %w", instance.Spec.TLS.SecretName, err)
-			}
-		} else {
-			hashInput["tlsSecretData"] = tlsSecret.Data
-		}
-		if instance.Spec.TLS.CaSecretName != "" && instance.Spec.TLS.CaSecretName != instance.Spec.TLS.SecretName {
-			caSecret := &corev1.Secret{}
-			if err := r.Get(ctx, types.NamespacedName{
-				Name:      instance.Spec.TLS.CaSecretName,
-				Namespace: instance.Namespace,
-			}, caSecret); err != nil {
-				if !k8s_errors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("failed to get CA secret %s: %w", instance.Spec.TLS.CaSecretName, err)
-				}
-			} else {
-				hashInput["caSecretData"] = caSecret.Data
-			}
-		}
 	}
 	configMapHash, err := util.ObjectHash(hashInput)
 	if err != nil {
