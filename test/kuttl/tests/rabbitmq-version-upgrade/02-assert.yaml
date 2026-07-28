@@ -42,19 +42,19 @@ commands:
       echo "PASS: wipeReason is cleared"
   - script: |
       set -e
-      # Verify proxyRequired is set (3.x to 4.x upgrade with Quorum queues)
+      # Verify proxyRequired is NOT set (cluster was already on Quorum, no migration needed)
       PROXY=$(oc get rabbitmq.rabbitmq.openstack.org -n $NAMESPACE rabbitmq-upgrade -o jsonpath='{.status.proxyRequired}')
-      if [ "$PROXY" != "True" ]; then
-        echo "FAIL: Expected proxyRequired=True after 3.x→4.x upgrade, got: $PROXY"
+      if [ "$PROXY" = "True" ]; then
+        echo "FAIL: proxyRequired should not be True for version-only upgrade on Quorum cluster, got: $PROXY"
         exit 1
       fi
-      echo "PASS: proxyRequired is $PROXY"
+      echo "PASS: proxyRequired is not set (no Mirrored→Quorum migration)"
   - script: |
       set -e
-      # Verify proxy sidecar container is present in StatefulSet
+      # Verify proxy sidecar container is NOT present (no queue type migration)
       CONTAINERS=$(oc get statefulset -n $NAMESPACE rabbitmq-upgrade-server -o jsonpath='{.spec.template.spec.containers[*].name}')
-      if ! echo "$CONTAINERS" | grep -qw "amqp-proxy"; then
-        echo "FAIL: Proxy sidecar container not found. Containers: $CONTAINERS"
+      if echo "$CONTAINERS" | grep -qw "amqp-proxy"; then
+        echo "FAIL: Proxy sidecar should not be present for version-only upgrade. Containers: $CONTAINERS"
         exit 1
       fi
-      echo "PASS: Proxy sidecar container present: $CONTAINERS"
+      echo "PASS: No proxy sidecar (version-only upgrade): $CONTAINERS"

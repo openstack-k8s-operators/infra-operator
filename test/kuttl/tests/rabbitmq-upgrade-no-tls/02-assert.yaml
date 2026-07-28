@@ -39,30 +39,10 @@ commands:
       echo "PASS: wipeReason is cleared"
   - script: |
       set -e
-      # Verify proxy sidecar container is present in StatefulSet
+      # Verify proxy sidecar container is NOT present (cluster was already on Quorum, no migration needed)
       CONTAINERS=$(oc get statefulset -n $NAMESPACE rabbitmq-upgrade-notls-server -o jsonpath='{.spec.template.spec.containers[*].name}')
-      if ! echo "$CONTAINERS" | grep -qw "amqp-proxy"; then
-        echo "FAIL: Proxy sidecar container not found. Containers: $CONTAINERS"
+      if echo "$CONTAINERS" | grep -qw "amqp-proxy"; then
+        echo "FAIL: Proxy sidecar should not be present for version-only upgrade. Containers: $CONTAINERS"
         exit 1
       fi
-      echo "PASS: Proxy sidecar container present: $CONTAINERS"
-  - script: |
-      set -e
-      # Verify proxy listens on plain AMQP port 5672 (no TLS)
-      PROXY_PORT=$(oc get statefulset -n $NAMESPACE rabbitmq-upgrade-notls-server -o \
-        jsonpath='{.spec.template.spec.containers[?(@.name=="amqp-proxy")].ports[0].containerPort}')
-      if [ "$PROXY_PORT" != "5672" ]; then
-        echo "FAIL: Expected proxy to listen on port 5672 (plain AMQP), got: $PROXY_PORT"
-        exit 1
-      fi
-      echo "PASS: Proxy listens on plain AMQP port $PROXY_PORT"
-  - script: |
-      set -e
-      # Verify proxy command does NOT contain TLS args
-      ARGS=$(oc get statefulset -n $NAMESPACE rabbitmq-upgrade-notls-server -o \
-        jsonpath='{.spec.template.spec.containers[?(@.name=="amqp-proxy")].args}')
-      if echo "$ARGS" | grep -q "tls-cert"; then
-        echo "FAIL: Proxy should not have TLS args in non-TLS mode. Args: $ARGS"
-        exit 1
-      fi
-      echo "PASS: Proxy has no TLS args"
+      echo "PASS: No proxy sidecar (version-only upgrade on Quorum cluster): $CONTAINERS"
