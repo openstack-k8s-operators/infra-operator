@@ -199,5 +199,91 @@ class TestFilterByAggregateThreshold(unittest.TestCase):
         self.assertEqual(len(blocked), 0)
 
 
+    @patch('instanceha._emit_k8s_event')
+    def test_in_flight_hosts_not_double_counted(self, mock_event):
+        """Hosts already in hosts_processing must not be double-counted as both
+        'new' and 'in-flight', which would inflate the impacted count and
+        incorrectly block aggregates within the threshold."""
+        nodes = [_make_service_obj('host-10'), _make_service_obj('host-11')]
+        aggs = [_make_aggregate('mix-B', [f'host-{i}' for i in range(10, 20)],
+                                {'evacuable': 'true',
+                                 'instanceha:max_failures': '3'})]
+        service = _make_instanceha_service()
+        # Simulate _filter_processing_hosts having marked these hosts before
+        # the aggregate threshold check runs
+        service.hosts_processing = {'host-10': 1000.0, 'host-11': 1000.0}
+
+        allowed, blocked = instanceha._filter_by_aggregate_threshold(nodes, aggs, service)
+
+        # 2 failed hosts with max_failures=3 should be allowed
+        self.assertEqual(len(allowed), 2,
+                         "2 failures in a max_failures=3 aggregate should not be blocked")
+        self.assertEqual(len(blocked), 0)
+        mock_event.assert_not_called()
+
+    @patch('instanceha._emit_k8s_event')
+    def test_in_flight_plus_new_exceeds_threshold(self, mock_event):
+        """Genuine in-flight hosts (from a prior cycle) plus new failures should
+        be counted together to enforce the threshold correctly."""
+        nodes = [_make_service_obj('host-3'), _make_service_obj('host-4')]
+        aggs = [_make_aggregate('agg1', [f'host-{i}' for i in range(10)],
+                                {'evacuable': 'true',
+                                 'instanceha:max_failures': '3'})]
+        service = _make_instanceha_service()
+        # 2 hosts already in-flight from a prior cycle (different from current failures)
+        service.hosts_processing = {'host-1': 900.0, 'host-2': 900.0}
+
+        allowed, blocked = instanceha._filter_by_aggregate_threshold(nodes, aggs, service)
+
+        # 2 in-flight + 2 new = 4 > max_failures=3 → should be blocked
+        self.assertEqual(len(allowed), 0)
+        self.assertEqual(len(blocked), 2)
+        mock_event.assert_called_once()
+
+    @patch('instanceha._emit_k8s_event')
+    def test_mixed_aggregates_with_in_flight_double_counting(self, mock_event):
+        """Reproduces test 27 failure: two aggregates where in-flight
+        double-counting blocks an aggregate that should be within its limit.
+
+        mix-A: 4 failures, max_failures=3 → should be blocked
+        mix-B: 2 failures, max_failures=3 → should be allowed
+        """
+        mix_a_failed = [_make_service_obj(f'fake-compute-vm0-{i}') for i in range(4)]
+        mix_b_failed = [_make_service_obj(f'fake-compute-vm1-{i}') for i in range(2)]
+        nodes = mix_a_failed + mix_b_failed
+        aggs = [
+            _make_aggregate('mix-A',
+                            [f'fake-compute-vm0-{i}' for i in range(10)],
+                            {'evacuable': 'true',
+                             'instanceha:max_failures': '3'}),
+            _make_aggregate('mix-B',
+                            [f'fake-compute-vm1-{i}' for i in range(10)],
+                            {'evacuable': 'true',
+                             'instanceha:max_failures': '3'}),
+        ]
+        service = _make_instanceha_service()
+        # Simulate _filter_processing_hosts marking all 6 hosts before
+        # the aggregate threshold check
+        service.hosts_processing = {
+            f'fake-compute-vm0-{i}': 1000.0 for i in range(4)
+        }
+        service.hosts_processing.update({
+            f'fake-compute-vm1-{i}': 1000.0 for i in range(2)
+        })
+
+        allowed, blocked = instanceha._filter_by_aggregate_threshold(nodes, aggs, service)
+
+        allowed_hosts = sorted([s.host for s in allowed])
+        blocked_hosts = sorted([s.host for s in blocked])
+
+        # mix-A has 4 failures > max_failures=3 → blocked
+        self.assertIn('fake-compute-vm0-0', blocked_hosts)
+        # mix-B has 2 failures <= max_failures=3 → allowed
+        self.assertIn('fake-compute-vm1-0', allowed_hosts)
+        self.assertIn('fake-compute-vm1-1', allowed_hosts)
+        self.assertEqual(len(allowed), 2)
+        self.assertEqual(len(blocked), 4)
+
+
 if __name__ == '__main__':
     unittest.main()
