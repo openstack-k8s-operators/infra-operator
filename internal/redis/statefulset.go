@@ -31,36 +31,36 @@ func StatefulSet(
 	ls := labels.GetLabels(r, "redis", matchls)
 
 	livenessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
 		InitialDelaySeconds: 3,
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+			},
+		},
 	}
 	readinessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
 		InitialDelaySeconds: 5,
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
+			},
+		},
 	}
 	sentinelLivenessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
 		InitialDelaySeconds: 3,
 	}
 	sentinelReadinessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
 		InitialDelaySeconds: 5,
 	}
 
-	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
-	}
-	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
-	}
 	sentinelLivenessProbe.TCPSocket = &corev1.TCPSocketAction{
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
 	}
@@ -121,20 +121,8 @@ func StatefulSet(
 								ContainerPort: 6379,
 								Name:          "redis",
 							}},
-							LivenessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
-									},
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
-									},
-								},
-							},
+							LivenessProbe:  livenessProbe,
+							ReadinessProbe: readinessProbe,
 						}, {
 							Image:   r.Spec.ContainerImage,
 							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_sentinel.sh"},
