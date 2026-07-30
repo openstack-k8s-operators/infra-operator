@@ -84,7 +84,7 @@ func (r *BGPConfigurationReconciler) getLegacyMetalLBNamespace() string {
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=network.openstack.org,resources=bgpconfigurations/finalizers,verbs=update
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=list;watch
 //+kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 //+kubebuilder:rbac:groups=frrk8s.metallb.io,resources=frrconfigurations,verbs=get;list;watch;create;update;patch;delete;deletecollection
 //+kubebuilder:rbac:groups=k8s.cni.cncf.io,resources=network-attachment-definitions,verbs=get;list;watch
