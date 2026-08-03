@@ -886,7 +886,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		labelMap := rabbitmq.CommonLabels(instance.Name)
 
 		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 1 {
-			// Apply PDB for multi-replica deployments
 			pdbSpec := pdb.MaxUnavailablePodDisruptionBudget(
 				instance.Name,
 				instance.Namespace,
@@ -895,23 +894,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			)
 			pdbInstance := pdb.NewPDB(pdbSpec, 5*time.Second)
 
-			_, err := pdbInstance.CreateOrPatch(ctx, helper)
+			ctrlResult, err := pdbInstance.CreateOrPatch(ctx, helper)
 			if err != nil {
-				Log.Error(err, "Could not apply PDB")
 				instance.Status.Conditions.Set(condition.FalseCondition(
 					condition.PDBReadyCondition,
 					condition.ErrorReason,
 					condition.SeverityWarning,
 					condition.PDBReadyErrorMessage, err.Error()))
 				return ctrl.Result{}, err
+			} else if (ctrlResult != ctrl.Result{}) {
+				return ctrlResult, nil
 			}
 		} else {
-			// Clean up PDB when replicas <= 1 (PDB is not needed for single-replica)
-			pdbObj := &policyv1.PodDisruptionBudget{}
-			pdbObj.Name = instance.Name
-			pdbObj.Namespace = instance.Namespace
-			err := r.Delete(ctx, pdbObj)
-			if err != nil && !k8s_errors.IsNotFound(err) {
+			err := pdb.DeletePDBWithName(ctx, helper, instance.Name, instance.Namespace)
+			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to delete PDB: %w", err)
 			}
 		}
