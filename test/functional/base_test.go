@@ -34,7 +34,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -1035,6 +1037,243 @@ func GetPodRemediatorSpec(disabled bool, namespaces []string) map[string]any {
 		spec["namespaces"] = namespaces
 	}
 	return spec
+}
+
+func CreateMedik8sCRDs() {
+	nhcCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "nodehealthchecks.remediation.medik8s.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "remediation.medik8s.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "nodehealthchecks",
+				Singular: "nodehealthcheck",
+				Kind:     "NodeHealthCheck",
+				ListKind: "NodeHealthCheckList",
+			},
+			Scope: apiextensionsv1.ClusterScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name: "v1alpha1", Served: true, Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type:                   "object",
+							XPreserveUnknownFields: boolPtr(true),
+						},
+					},
+				},
+			},
+		},
+	}
+	snrTemplateCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "selfnoderemediationtemplates.self-node-remediation.medik8s.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "self-node-remediation.medik8s.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "selfnoderemediationtemplates",
+				Singular: "selfnoderemediationtemplate",
+				Kind:     "SelfNodeRemediationTemplate",
+				ListKind: "SelfNodeRemediationTemplateList",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name: "v1alpha1", Served: true, Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type:                   "object",
+							XPreserveUnknownFields: boolPtr(true),
+						},
+					},
+				},
+			},
+		},
+	}
+	snrCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "selfnoderemediations.self-node-remediation.medik8s.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "self-node-remediation.medik8s.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   "selfnoderemediations",
+				Singular: "selfnoderemediation",
+				Kind:     "SelfNodeRemediation",
+				ListKind: "SelfNodeRemediationList",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name: "v1alpha1", Served: true, Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type:                   "object",
+							XPreserveUnknownFields: boolPtr(true),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{nhcCRD, snrTemplateCRD, snrCRD} {
+		existing := &apiextensionsv1.CustomResourceDefinition{}
+		err := k8sClient.Get(ctx, types.NamespacedName{Name: crd.Name}, existing)
+		if k8s_errors.IsNotFound(err) {
+			Expect(k8sClient.Create(ctx, crd)).To(Succeed())
+		}
+		Eventually(func(g Gomega) {
+			obj := &apiextensionsv1.CustomResourceDefinition{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: crd.Name}, obj)).To(Succeed())
+			established := false
+			for _, c := range obj.Status.Conditions {
+				if c.Type == apiextensionsv1.Established && c.Status == apiextensionsv1.ConditionTrue {
+					established = true
+				}
+			}
+			g.Expect(established).To(BeTrue())
+		}, timeout, interval).Should(Succeed())
+	}
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+func CreateNHCInstance() {
+	nhc := &unstructured.Unstructured{}
+	nhc.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "remediation.medik8s.io", Version: "v1alpha1", Kind: "NodeHealthCheck",
+	})
+	nhc.SetName("test-nhc")
+	Expect(k8sClient.Create(ctx, nhc)).To(Succeed())
+}
+
+func CreateSNRTemplate(ns string) {
+	snrTemplate := &unstructured.Unstructured{}
+	snrTemplate.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediationTemplate",
+	})
+	snrTemplate.SetName("test-snr-template")
+	snrTemplate.SetNamespace(ns)
+	Expect(k8sClient.Create(ctx, snrTemplate)).To(Succeed())
+}
+
+func CreateSelfNodeRemediation(ns string, nodeName string) {
+	snr := &unstructured.Unstructured{}
+	snr.SetGroupVersionKind(schema.GroupVersionKind{
+		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation",
+	})
+	snr.SetName(nodeName + "-snr")
+	snr.SetNamespace(ns)
+	snr.SetAnnotations(map[string]string{
+		"remediation.medik8s.io/node-name": nodeName,
+	})
+	Expect(k8sClient.Create(ctx, snr)).To(Succeed())
+}
+
+func CreateNodeWithReadyCondition(name string, ready bool) *corev1.Node {
+	status := corev1.ConditionTrue
+	if !ready {
+		status = corev1.ConditionFalse
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{
+				{
+					Type:   corev1.NodeReady,
+					Status: status,
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, node)).To(Succeed())
+	node.Status.Conditions = []corev1.NodeCondition{
+		{
+			Type:   corev1.NodeReady,
+			Status: status,
+		},
+	}
+	Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+	return node
+}
+
+func UpdateNodeReadyCondition(name string, ready bool) {
+	status := corev1.ConditionTrue
+	if !ready {
+		status = corev1.ConditionFalse
+	}
+	node := &corev1.Node{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, node)).To(Succeed())
+	node.Status.Conditions = []corev1.NodeCondition{
+		{
+			Type:   corev1.NodeReady,
+			Status: status,
+		},
+	}
+	Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
+}
+
+func CreateLocalPV(name string, nodeName string) *corev1.PersistentVolume {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				Local: &corev1.LocalVolumeSource{
+					Path: "/mnt/data",
+				},
+			},
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      corev1.LabelHostname,
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{nodeName},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pv)).To(Succeed())
+	return pv
+}
+
+func CreateBoundPVC(ns string, pvcName string, pvName string) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: ns,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+			VolumeName: pvName,
+		},
+	}
+	Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
+	return pvc
 }
 
 func GetFRRConfiguration(name types.NamespacedName) *frrk8sv1.FRRConfiguration {

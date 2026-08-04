@@ -52,10 +52,16 @@ const (
 	// NHCNotFoundReason is the condition reason when NHC/SNR are missing
 	NHCNotFoundReason = "NHC/SNRNotFound"
 
-	// PodRemediatorPendingDeletionAnnotation is set on a PVC when we have decided to delete it (node unhealthy).
-	// If the controller restarts before the delete completes, it will see this annotation and complete the deletion (Option B: persist intent).
-	// Same idea as Instance HA (IHA), which stores evacuation state in the Nova service disabled_reason so the process can resume after restart (see docs/INSTANCEHA_ARCHITECTURE.md).
-	PodRemediatorPendingDeletionAnnotation = "remediation.openstack.org/podremediator-pending-deletion"
+	// PVCStuckOnNodeAnnotation is set by PodRemediator on a PVC when the PVC
+	// is bound to a local PV on an unhealthy node (NotReady + active SNR).
+	// Value is the node name. This signals the application operator to evaluate
+	// whether it is safe to delete the PVC.
+	PVCStuckOnNodeAnnotation = "remediation.openstack.org/pvc-stuck-on-node"
+
+	// SafeToDeleteAnnotation is set by the application operator (e.g.
+	// mariadb-operator) on a PVC to authorize PodRemediator to delete it.
+	// PodRemediator watches for this annotation but never sets it itself.
+	SafeToDeleteAnnotation = "remediation.openstack.org/safe-to-delete"
 )
 
 var (
@@ -184,7 +190,8 @@ func (r *PodRemediatorReconciler) SetupWithManager(ctx context.Context, mgr ctrl
 		Watches(&corev1.Pod{}, allFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		// Fix 5: only reconcile when NodeReady status actually changes, not on every heartbeat.
 		Watches(&corev1.Node{}, allFN, builder.WithPredicates(nodeReadyChangedPredicate{})).
-		Watches(&corev1.PersistentVolumeClaim{}, allFN, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(&corev1.PersistentVolumeClaim{}, allFN, builder.WithPredicates(
+			predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
 		Complete(r)
 }
 
@@ -223,13 +230,13 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 		}
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
-			if pvc.Annotations == nil || pvc.Annotations[PodRemediatorPendingDeletionAnnotation] == "" {
+			if pvc.Annotations == nil || pvc.Annotations[PVCStuckOnNodeAnnotation] == "" {
 				continue
 			}
 			oldPVC := pvc.DeepCopy()
-			delete(pvc.Annotations, PodRemediatorPendingDeletionAnnotation)
+			delete(pvc.Annotations, PVCStuckOnNodeAnnotation)
 			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "remove pending-deletion annotation during CR delete", "pvc", client.ObjectKeyFromObject(pvc))
+				Log.Error(err, "remove pvc-stuck-on-node annotation during CR delete", "pvc", client.ObjectKeyFromObject(pvc))
 			}
 		}
 	}
@@ -403,8 +410,8 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		Log.Info("Skipping PVC remediation: unhealthy node count exceeds maxUnhealthyNodes",
 			"unhealthyCount", len(unhealthyNodes), "maxUnhealthyNodes", maxUnhealthy)
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
-			fmt.Sprintf("PVC remediation skipped: %d unhealthy nodes exceed maxUnhealthyNodes (%d)",
-				len(unhealthyNodes), maxUnhealthy))
+			"PVC remediation skipped: %d unhealthy nodes exceed maxUnhealthyNodes (%d)",
+			len(unhealthyNodes), maxUnhealthy)
 		return ctrl.Result{}, nil
 	}
 
@@ -423,39 +430,47 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			pvc := &pvcList.Items[i]
 			pvcKey := client.ObjectKeyFromObject(pvc)
 
-			// Resume path (Option B): PVC was previously marked for deletion but controller restarted before delete completed.
-			// Fix 2: re-check node health before deleting — the node may have recovered since the annotation was written.
-			if pvc.Annotations != nil && pvc.Annotations[PodRemediatorPendingDeletionAnnotation] != "" {
-				nodeName := pvc.Annotations[PodRemediatorPendingDeletionAnnotation]
-				if !unhealthyNodes[nodeName] {
-					// Node recovered; remove the stale annotation.
+			stuckOnNode := ""
+			if pvc.Annotations != nil {
+				stuckOnNode = pvc.Annotations[PVCStuckOnNodeAnnotation]
+			}
+
+			if stuckOnNode != "" {
+				// Path A: node recovered — remove pvc-stuck-on-node (and safe-to-delete if present)
+				if !unhealthyNodes[stuckOnNode] {
 					oldPVC := pvc.DeepCopy()
-					delete(pvc.Annotations, PodRemediatorPendingDeletionAnnotation)
+					delete(pvc.Annotations, PVCStuckOnNodeAnnotation)
+					delete(pvc.Annotations, SafeToDeleteAnnotation)
 					if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
-						Log.Error(err, "remove stale pending-deletion annotation (node recovered)", "pvc", pvcKey, "node", nodeName)
+						Log.Error(err, "remove pvc-stuck-on-node annotation (node recovered)", "pvc", pvcKey, "node", stuckOnNode)
 					} else {
-						Log.Info("Node recovered; removed stale pending-deletion annotation", "pvc", pvcKey, "node", nodeName)
+						Log.Info("Node recovered; removed pvc-stuck-on-node annotation", "pvc", pvcKey, "node", stuckOnNode)
 					}
 					continue
 				}
-				Log.Info("Resuming: deleting PVC marked pending-deletion (controller may have restarted)", "pvc", pvcKey, "node", nodeName)
-				// Fix 1: delete pods first so pvc-protection finalizer is released.
-				r.deletePodsForPVC(ctx, pvc, Log)
-				if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
-					Log.Error(err, "delete PVC (resume)", "pvc", pvcKey)
+
+				// Path B: both annotations present and node still unhealthy — delete PVC
+				if pvc.Annotations[SafeToDeleteAnnotation] == "true" {
+					Log.Info("Deleting PVC (stuck on unhealthy node and marked safe-to-delete)", "pvc", pvcKey, "node", stuckOnNode)
+					r.deletePodsForPVC(ctx, pvc, Log)
+					if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
+						Log.Error(err, "delete PVC", "pvc", pvcKey)
+					}
 					continue
 				}
+
+				// Path C: stuck but waiting for app operator to set safe-to-delete
+				Log.V(1).Info("PVC stuck on unhealthy node; waiting for safe-to-delete annotation", "pvc", pvcKey, "node", stuckOnNode)
 				continue
 			}
 
+			// Path D: check if this is a local PVC on an unhealthy node (Phase 1 detection)
 			if pvc.Spec.VolumeName == "" {
-				Log.Info("Skipping PVC (unbound)", "pvc", pvcKey)
 				continue
 			}
 			pv := &corev1.PersistentVolume{}
 			if err := r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 				if k8s_errors.IsNotFound(err) {
-					Log.Info("Skipping PVC (PV not found)", "pvc", pvcKey, "volumeName", pvc.Spec.VolumeName)
 					continue
 				}
 				Log.Error(err, "get PV", "pv", pvc.Spec.VolumeName)
@@ -463,35 +478,27 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				continue
 			}
 			if !isLocalPV(pv) {
-				Log.Info("Skipping PVC (PV not local)", "pvc", pvcKey, "pv", pv.Name)
 				continue
 			}
 			nodeName := getLocalPVNodeName(pv)
 			if nodeName == "" {
-				Log.Info("Skipping PVC (PV node affinity hostname not found)", "pvc", pvcKey, "pv", pv.Name)
 				continue
 			}
 			if !unhealthyNodes[nodeName] {
-				Log.Info("Skipping PVC (node not unhealthy)", "pvc", pvcKey, "node", nodeName)
 				continue
 			}
-			// Persist intent (Option B): annotate before delete so a restarted controller can resume.
+
+			// Phase 1: annotate PVC as stuck, wait for app operator to authorize deletion
 			oldPVC := pvc.DeepCopy()
 			if pvc.Annotations == nil {
 				pvc.Annotations = make(map[string]string)
 			}
-			pvc.Annotations[PodRemediatorPendingDeletionAnnotation] = nodeName
+			pvc.Annotations[PVCStuckOnNodeAnnotation] = nodeName
 			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil {
-				Log.Error(err, "patch PVC with pending-deletion annotation", "pvc", pvcKey)
+				Log.Error(err, "annotate PVC with pvc-stuck-on-node", "pvc", pvcKey)
 				continue
 			}
-			Log.Info("Deleting PVC bound to unhealthy node (intent persisted via annotation)", "pvc", pvcKey, "node", nodeName)
-			// Fix 1: delete pods first so pvc-protection finalizer is released.
-			r.deletePodsForPVC(ctx, pvc, Log)
-			if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "delete PVC", "pvc", pvcKey)
-				continue
-			}
+			Log.Info("Local PVC on unhealthy node; annotated pvc-stuck-on-node, awaiting safe-to-delete", "pvc", pvcKey, "node", nodeName)
 		}
 	}
 
