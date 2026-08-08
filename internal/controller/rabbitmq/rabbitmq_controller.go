@@ -737,7 +737,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// never connect to quorum queues without the durability proxy.
 		if instance.Status.ProxyRequired != "True" && instance.Spec.QueueType != nil && *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum {
 			isVersionUpgradeWithMigration := instance.Spec.TargetVersion != nil && *instance.Spec.TargetVersion != "" &&
-				rabbitmq.Is3xTo4xUpgrade(instance.Status.CurrentVersion, *instance.Spec.TargetVersion)
+				rabbitmq.Is3xTo4xUpgrade(instance.Status.CurrentVersion, *instance.Spec.TargetVersion) &&
+				instance.Status.QueueType == rabbitmqv1beta1.QueueTypeMirrored
 			isQueueTypeMigration := instance.Status.WipeReason == rabbitmqv1beta1.WipeReasonQueueTypeMigration
 
 			if isVersionUpgradeWithMigration || isQueueTypeMigration {
