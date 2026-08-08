@@ -1,0 +1,12 @@
+# Minimal playbook to install NHC/SNR via cifmw_snr_nhc role (ci-framework).
+# Run from ci-framework repo root on a host that has kubeconfig and kubeadmin password:
+#   ansible-playbook -i localhost, playbook-nhc-snr.yml
+# On controller-0 as zuul (paths for zuul's home):
+- name: Configure SNR and NHC
+  hosts: localhost
+  connection: local
+  roles:
+    - role: cifmw_snr_nhc
+      cifmw_snr_nhc_kubeconfig: "{{ controller_user_home | default(ansible_env.HOME) }}/.kube/config"
+      cifmw_snr_nhc_kubeadmin_password_file: "{{ controller_user_home | default(ansible_env.HOME) }}/.kube/kubeadmin-password"
+      cifmw_snr_nhc_namespace: openshift-workload-availability

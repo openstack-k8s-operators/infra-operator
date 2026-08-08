@@ -43,6 +43,7 @@ import (
 	networkcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/network"
 	rabbitmqcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
 	rediscontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/redis"
+	remediationcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	webhookinstancehav1beta1 "github.com/openstack-k8s-operators/infra-operator/internal/webhook/instanceha/v1beta1"
 	webhookmemcachedv1beta1 "github.com/openstack-k8s-operators/infra-operator/internal/webhook/memcached/v1beta1"
 	webhooknetworkv1beta1 "github.com/openstack-k8s-operators/infra-operator/internal/webhook/network/v1beta1"
@@ -60,8 +61,10 @@ import (
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	topologyv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/operator"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
@@ -78,6 +81,7 @@ func init() {
 	utilruntime.Must(memcachedv1.AddToScheme(scheme))
 	utilruntime.Must(instancehav1.AddToScheme(scheme))
 	utilruntime.Must(redisv1.AddToScheme(scheme))
+	utilruntime.Must(remediationv1.AddToScheme(scheme))
 	utilruntime.Must(networkv1.AddToScheme(scheme))
 	utilruntime.Must(frrk8sv1.AddToScheme(scheme))
 	utilruntime.Must(k8s_networkv1.AddToScheme(scheme))
@@ -259,8 +263,9 @@ func main() {
 		setupLog.Error(err, "")
 		os.Exit(1)
 	}
+	dynamicClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
+		setupLog.Error(err, "unable to create dynamic client")
 		os.Exit(1)
 	}
 
@@ -333,6 +338,15 @@ func main() {
 		Kclient: kclient,
 	}).SetupWithManager(context.Background(), mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BGPConfiguration")
+		os.Exit(1)
+	}
+	if err := (&remediationcontroller.PodRemediatorReconciler{
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Kclient:        kclient,
+		DynamicClient:  dynamicClient,
+	}).SetupWithManager(context.Background(), mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PodRemediator")
 		os.Exit(1)
 	}
 	if err := (&rabbitmqcontroller.Reconciler{
