@@ -14,16 +14,17 @@ limitations under the License.
 package instanceha
 
 import (
+	"fmt"
+
 	instancehav1 "github.com/openstack-k8s-operators/infra-operator/apis/instanceha/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
-
-	"fmt"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
@@ -172,33 +173,23 @@ func Deployment(
 					Annotations: annotations,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: instance.RbacResourceName(),
+					ServiceAccountName:           instance.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						FSGroup: ptr.To(instanceHaUID),
 					},
-					Volumes:                       volumes,
+					Volumes:                       append(volumes, serviceaccount.KubeAPIAccessVolume()),
 					TerminationGracePeriodSeconds: ptr.To[int64](45),
 					Containers: []corev1.Container{{
-						Name:    "instanceha",
-						Image:   containerImage,
-						Command: []string{"/usr/bin/python3", "-u", "/var/lib/instanceha/instanceha.py"},
-						SecurityContext: &corev1.SecurityContext{
-							RunAsUser:                ptr.To(instanceHaUID),
-							RunAsGroup:               ptr.To(instanceHaUID),
-							RunAsNonRoot:             ptr.To(true),
-							ReadOnlyRootFilesystem:   ptr.To(true),
-							AllowPrivilegeEscalation: ptr.To(false),
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{
-									"ALL",
-								},
-							},
-						},
-						Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
-						Ports:          instancehaPorts(instance),
-						VolumeMounts:   volumeMounts,
-						LivenessProbe:  livenessProbe,
-						ReadinessProbe: readinessProbe,
+						Name:            "instanceha",
+						Image:           containerImage,
+						Command:         []string{"/usr/bin/python3", "-u", "/var/lib/instanceha/instanceha.py"},
+						SecurityContext: pod.RestrictiveSecurityContext(instanceHaUID),
+						Env:             env.MergeEnvs([]corev1.EnvVar{}, envVars),
+						Ports:           instancehaPorts(instance),
+						VolumeMounts:    append(volumeMounts, serviceaccount.KubeAPIAccessVolumeMount()),
+						LivenessProbe:   livenessProbe,
+						ReadinessProbe:  readinessProbe,
 					}},
 				},
 			},

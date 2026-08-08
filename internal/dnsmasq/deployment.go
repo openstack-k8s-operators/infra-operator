@@ -26,6 +26,7 @@ import (
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -121,21 +122,20 @@ func Deployment(
 					Labels:      labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: instance.RbacResourceName(),
-					Volumes:            getVolumes(instance.Name, cms),
+					ServiceAccountName:           instance.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
+					Volumes:                      getVolumes(instance.Name, cms),
 					InitContainers: []corev1.Container{
 						{
 							Name:    "init",
 							Command: command,
 							Args:    initArgs,
 							Image:   instance.Spec.ContainerImage,
-							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             ptr.To(true),
-								AllowPrivilegeEscalation: ptr.To(false),
-								SeccompProfile: &corev1.SeccompProfile{
-									Type: corev1.SeccompProfileTypeRuntimeDefault,
-								},
-							},
+							SecurityContext: func() *corev1.SecurityContext {
+								sc := pod.RestrictiveSecurityContext(DnsmasqUID)
+								sc.ReadOnlyRootFilesystem = ptr.To(false)
+								return sc
+							}(),
 							Env:          env.MergeEnvs([]corev1.EnvVar{}, envVars),
 							VolumeMounts: getVolumeMounts(instance.Name, cms),
 						},
@@ -146,13 +146,11 @@ func Deployment(
 							Command: command,
 							Args:    args,
 							Image:   instance.Spec.ContainerImage,
-							SecurityContext: &corev1.SecurityContext{
-								RunAsNonRoot:             ptr.To(true),
-								AllowPrivilegeEscalation: ptr.To(false),
-								SeccompProfile: &corev1.SeccompProfile{
-									Type: corev1.SeccompProfileTypeRuntimeDefault,
-								},
-							},
+							SecurityContext: func() *corev1.SecurityContext {
+								sc := pod.RestrictiveSecurityContext(DnsmasqUID)
+								sc.ReadOnlyRootFilesystem = ptr.To(false)
+								return sc
+							}(),
 							Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
 							VolumeMounts:   getVolumeMounts(instance.Name, cms),
 							ReadinessProbe: readinessProbe,

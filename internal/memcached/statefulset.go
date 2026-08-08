@@ -6,6 +6,7 @@ import (
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,19 +64,21 @@ func StatefulSet(
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: m.RbacResourceName(),
+					ServiceAccountName:           m.RbacResourceName(),
+					AutomountServiceAccountToken: ptr.To(false),
+					SecurityContext: &corev1.PodSecurityContext{
+						FSGroup: ptr.To(MemcachedUID),
+					},
 					Containers: []corev1.Container{{
 						Image:   m.Spec.ContainerImage,
 						Name:    "memcached",
-						Command: []string{"/usr/bin/dumb-init", "--", "/usr/local/bin/kolla_start"},
-						SecurityContext: &corev1.SecurityContext{
-							RunAsUser:  ptr.To(MemcachedUID),
-							RunAsGroup: ptr.To(MemcachedUID),
-						},
+						Command: []string{"/usr/bin/dumb-init", "--", "bash", "-c", "source /etc/sysconfig/memcached && exec /usr/bin/memcached -p ${PORT} -u ${USER} -m ${CACHESIZE} -c ${MAXCONN} $OPTIONS"},
+						SecurityContext: func() *corev1.SecurityContext {
+							sc := pod.RestrictiveSecurityContext(MemcachedUID)
+							sc.ReadOnlyRootFilesystem = ptr.To(false)
+							return sc
+						}(),
 						Env: []corev1.EnvVar{{
-							Name:  "KOLLA_CONFIG_STRATEGY",
-							Value: "COPY_ALWAYS",
-						}, {
 							Name: "POD_IPS",
 							ValueFrom: &corev1.EnvVarSource{
 								FieldRef: &corev1.ObjectFieldSelector{

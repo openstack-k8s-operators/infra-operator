@@ -102,7 +102,7 @@ func (r *Reconciler) GetLogger(ctx context.Context) logr.Logger {
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;update;patch
 // service account permissions that are needed to grant permission to the above
-// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=anyuid,resources=securitycontextconstraints,verbs=use
+// +kubebuilder:rbac:groups="security.openshift.io",resourceNames=nonroot-v2,resources=securitycontextconstraints,verbs=use
 // +kubebuilder:rbac:groups=topology.openstack.org,resources=topologies,verbs=get;list;watch;update
 
 // Reconcile - Memcached
@@ -223,7 +223,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	rbacRules := []rbacv1.PolicyRule{
 		{
 			APIGroups:     []string{"security.openshift.io"},
-			ResourceNames: []string{"anyuid"},
+			ResourceNames: []string{"nonroot-v2"},
 			Resources:     []string{"securitycontextconstraints"},
 			Verbs:         []string{"use"},
 		},
@@ -489,8 +489,8 @@ func (r *Reconciler) generateConfigMaps(
 	if instance.Spec.TLS.Enabled() {
 		memcachedTLSListen = "| sed 's/\\(.*\\)/\\1\\nnotls:\\1:11211/'"
 		memcachedTLSOptions = "-Z " +
-			"-o ssl_chain_cert=/etc/pki/tls/certs/memcached.crt " +
-			"-o ssl_key=/etc/pki/tls/private/memcached.key " +
+			"-o ssl_chain_cert=/var/lib/config-data/tls/certs/memcached.crt " +
+			"-o ssl_key=/var/lib/config-data/tls/private/memcached.key " +
 			"-o ssl_ca_cert=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
 
 		switch instance.Spec.TLS.MTLS.SslVerifyMode {
