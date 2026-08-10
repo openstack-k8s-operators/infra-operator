@@ -66,16 +66,20 @@ type TransportURLStatus struct {
 	// Empty if using default cluster admin credentials (no dedicated RabbitMQUser CR)
 	RabbitmqUserRef string `json:"rabbitmqUserRef,omitempty"`
 
+	// SecretHash - hash of the current TransportURL secret content.
+	// Consuming services compare this with the hash they computed to
+	// confirm credential rotation is complete.
+	SecretHash string `json:"secretHash,omitempty"`
+
+	// PreviousSecretName - name of the previous TransportURL secret retained
+	// during credential rotation, pending consumer finalization.
+	// Cleared when the old secret is cleaned up after all consumers release it.
+	PreviousSecretName string `json:"previousSecretName,omitempty"`
+
 	// PreviousRabbitmqUserRef - the name of a previous RabbitMQUser CR whose
 	// finalizer removal was deferred during a credential rotation, pending
 	// deployment verification. Only set while a rotation is in progress.
 	PreviousRabbitmqUserRef string `json:"previousRabbitmqUserRef,omitempty"`
-
-	// NodeSetSynced - set to "false" when a credential rotation is detected
-	// and we are waiting for NodeSet deployments to push the new config.
-	// Cleared when the deployment completes and the old user is released.
-	// +kubebuilder:validation:Optional
-	NodeSetSynced string `json:"nodeSetSynced,omitempty"`
 
 	// ObservedGeneration - the most recent generation observed for this
 	// service. If the observed generation is less than the spec generation,
