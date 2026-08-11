@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -106,6 +108,83 @@ func TestGenerateServerConfigMap_TLS_VersionAware(t *testing.T) {
 	adv3xFips := cm3xFips.Data["advanced.config"]
 	if !strings.Contains(adv3xFips, "['tlsv1.2','tlsv1.3']") {
 		t.Error("3.x FIPS advanced.config should use TLS 1.2+1.3")
+	}
+}
+
+func TestGenerateServerConfigMap_MemoryWatermark(t *testing.T) {
+	tests := []struct {
+		name         string
+		resources    *corev1.ResourceRequirements
+		wantAbsolute string
+		wantRelative bool
+	}{
+		{
+			name: "default 2Gi limit uses absolute watermark",
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+			// 2Gi = 2147483648 bytes, 60% = 1288490188
+			wantAbsolute: "vm_memory_high_watermark.absolute           = 1288490188",
+		},
+		{
+			name: "custom 4Gi limit uses absolute watermark",
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+			// 4Gi = 4294967296 bytes, 60% = 2576980377
+			wantAbsolute: "vm_memory_high_watermark.absolute           = 2576980377",
+		},
+		{
+			name:         "nil resources falls back to relative watermark",
+			resources:    nil,
+			wantRelative: true,
+		},
+		{
+			name: "no memory limit falls back to relative watermark",
+			resources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2000m"),
+				},
+			},
+			wantRelative: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &rabbitmqv1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-mq", Namespace: "test-ns"},
+				Spec: rabbitmqv1.RabbitMqSpec{
+					RabbitMqSpecCore: rabbitmqv1.RabbitMqSpecCore{
+						Replicas:  ptr.To(int32(1)),
+						Resources: tt.resources,
+					},
+				},
+			}
+
+			cm := GenerateServerConfigMap(r, false, false, "4.2", false)
+			defaults := cm.Data["operatorDefaults.conf"]
+
+			if tt.wantRelative {
+				if !strings.Contains(defaults, "vm_memory_high_watermark.relative") {
+					t.Error("expected relative watermark fallback")
+				}
+				if strings.Contains(defaults, "vm_memory_high_watermark.absolute") {
+					t.Error("should not contain absolute watermark")
+				}
+			} else {
+				if !strings.Contains(defaults, tt.wantAbsolute) {
+					t.Errorf("expected %q in defaults, got:\n%s", tt.wantAbsolute, defaults)
+				}
+				if strings.Contains(defaults, "vm_memory_high_watermark.relative") {
+					t.Error("should not contain relative watermark when absolute is set")
+				}
+			}
+		})
 	}
 }
 
