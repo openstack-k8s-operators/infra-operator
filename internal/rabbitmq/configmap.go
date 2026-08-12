@@ -156,7 +156,19 @@ func buildOperatorDefaults(r *rabbitmqv1.RabbitMq, IPv6Enabled bool, configVersi
 	// Prometheus and management bind address
 	config = append(config, "prometheus.tcp.ip                          = ::")
 	config = append(config, "management.tcp.ip                          = ::")
-	config = append(config, "vm_memory_high_watermark.relative           = 0.6")
+
+	// Use an absolute memory watermark derived from the container's memory limit.
+	// RabbitMQ can't always detect cgroup limits in containers (see rabbitmq.com/docs/memory).
+	if r.Spec.Resources != nil {
+		if memLimit, ok := r.Spec.Resources.Limits[corev1.ResourceMemory]; ok {
+			absoluteBytes := memLimit.Value() * 6 / 10
+			config = append(config, fmt.Sprintf("vm_memory_high_watermark.absolute           = %d", absoluteBytes))
+		} else {
+			config = append(config, "vm_memory_high_watermark.relative           = 0.6")
+		}
+	} else {
+		config = append(config, "vm_memory_high_watermark.relative           = 0.6")
+	}
 
 	// Proxy mode: RabbitMQ listens on localhost only, proxy handles client connections.
 	// The plain TCP backend listener on localhost is always required so the proxy
