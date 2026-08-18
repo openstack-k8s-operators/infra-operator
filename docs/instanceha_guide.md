@@ -1425,6 +1425,79 @@ InstanceHA is cell-unaware -- it queries the Nova API (which fans out to all cel
 - **Cell-specific maintenance**: Use Nova's host disable (`openstack compute service set --disable`) before taking a cell offline for maintenance. InstanceHA ignores disabled hosts.
 - **Cross-cell evacuation**: When a host in cell-1 is fenced, Nova's scheduler may place evacuated VMs in cell-2 or cell-3. This is normal -- the scheduler respects its own placement rules. InstanceHA does not control which cell receives evacuated VMs.
 
+### Evacuating VMs with Encrypted Volumes (Barbican)
+
+When compute hosts run instances that use LUKS-encrypted volumes (via Barbican), InstanceHA needs permission to retrieve the encryption keys during evacuation. Without this, the evacuate API call succeeds but the rebuilt instance cannot attach its volumes -- the instance lands in `ERROR` state on the destination host.
+
+The issue is that Nova's evacuate workflow must decrypt the volume key stored in Barbican to re-attach the volume on the new host. By default, only the volume owner's project and admins can access secrets. The InstanceHA service user (or whichever identity InstanceHA authenticates with) needs an explicit Barbican role grant.
+
+**Step 1: Create a Barbican reader role and assign it**
+
+```bash
+# Create the role (if it does not already exist)
+openstack role create key-manager:secret-reader
+
+# Grant it to the InstanceHA user on the service project
+openstack role add --user <instanceha_user> --project service key-manager:secret-reader
+```
+
+Replace `<instanceha_user>` with the actual username InstanceHA uses to authenticate (the one in `clouds.yaml`). If InstanceHA uses an Application Credential, the underlying user must hold this role.
+
+**Step 2: Configure Barbican's policy to honor the role**
+
+Edit the `OpenStackControlPlane` CR to add a custom Barbican policy that allows `key-manager:secret-reader` to read and decrypt secrets:
+
+```bash
+oc edit oscp <controlplane-name>
+```
+
+Add the following under the Barbican section:
+
+```yaml
+  apiVersion: barbican.openstack.org/v1beta1
+  kind: Barbican
+  spec:
+    customServiceConfig: |
+      [oslo_policy]
+      policy_file = /etc/barbican/policy.yaml
+    defaultConfigOverwrite:
+      policy.yaml: |
+        "secret:get": "role:admin or rule:secret_project_admin or rule:secret_acl_read or role:key-manager:secret-reader"
+        "secret:decrypt": "rule:secret_project_admin or rule:secret_acl_read or role:key-manager:secret-reader"
+```
+
+This grants the `key-manager:secret-reader` role read and decrypt access to secrets, which is the minimum needed for Nova to retrieve volume encryption keys during evacuation. The existing admin and project-level rules are preserved.
+
+After applying the policy change, Barbican pods will restart. No InstanceHA restart is needed -- the permissions take effect on the next evacuation that involves an encrypted volume.
+
+> **Note:** Without this configuration, evacuations of instances with encrypted volumes will fail with a Barbican 403 (Forbidden) error. The `InstanceEvacuationFailed` K8s event will reference a volume attach error. Instances without encrypted volumes are unaffected.
+
+### Nova `resume_guests_state_on_host_boot` Setting
+
+Nova's `resume_guests_state_on_host_boot` option (in `nova.conf [DEFAULT]`) controls whether the `nova-compute` service automatically starts instances when the compute service starts up. When set to `True`, Nova inspects each instance's `vm_state` in the database and resumes any instance that was previously `ACTIVE`.
+
+**This setting must remain `False` (the default) in all InstanceHA deployments.**
+
+When InstanceHA evacuates VMs from a failed host, it rebuilds them on healthy hosts via the Nova evacuate API. The failed host is fenced (powered off), and its compute service is marked `forced_down` and `disabled`. When the host eventually recovers and its `nova-compute` service starts:
+
+- **With `resume_guests_state_on_host_boot = False` (default, safe):** Nova does not attempt to start any instances locally. InstanceHA's recovery logic detects the host is back, re-enables the service, and unlocks servers. No conflict occurs.
+
+- **With `resume_guests_state_on_host_boot = True` (dangerous):** Nova attempts to resume instances that were previously `ACTIVE` on this host -- but those instances have already been evacuated and are running on other hosts. This creates a **split-brain scenario** where the same instance runs on two hosts simultaneously. With shared storage (Ceph/RBD), both copies write to the same volume, risking **data corruption**.
+
+While there are safeguards in the compute service startup sequence to clean up evacuated instances before the resume logic runs, these depend on correct timing and complete state propagation -- conditions that are not guaranteed after a hard power-off. Setting `resume_guests_state_on_host_boot = False` eliminates the risk entirely.
+
+**Verifying the setting:**
+
+```bash
+# Check the current value on compute nodes
+ssh compute-0 "grep -r resume_guests_state_on_host_boot /etc/nova/"
+
+# Or via EDPM (if using OpenStack dataplane operator)
+# The default is False -- only verify if you suspect it was explicitly changed
+```
+
+**If you need auto-start for planned reboots**, handle it through orchestration (Ansible playbooks, EDPM services) rather than the Nova config flag, since the flag cannot distinguish between a planned reboot and a crash recovery after InstanceHA evacuation.
+
 ### Checking InstanceHA Health
 
 The agent exposes three HTTP endpoints on port 8080:
