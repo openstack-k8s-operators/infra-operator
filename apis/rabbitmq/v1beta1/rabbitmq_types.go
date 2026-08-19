@@ -273,6 +273,13 @@ type RabbitMqSpecCore struct {
 	// from K8s external secret stores.
 	// +kubebuilder:validation:Optional
 	SecretBackend *DeprecatedSecretBackendSpec `json:"secretBackend,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^\d+\.\d+(\.\d+)?$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Test - DNM
+	Test *string `json:"test,omitempty"`
+
 }
 
 // RabbitmqClusterSecretReference contains reference to a secret
