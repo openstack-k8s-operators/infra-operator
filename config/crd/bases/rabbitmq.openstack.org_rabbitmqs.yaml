@@ -1832,6 +1832,10 @@ spec:
                 format: int64
                 minimum: 0
                 type: integer
+              test:
+                description: Test - DNM
+                pattern: ^\d+\.\d+(\.\d+)?$
+                type: string
               tls:
                 description: TLS-related configuration for the RabbitMQ cluster.
                 properties:
