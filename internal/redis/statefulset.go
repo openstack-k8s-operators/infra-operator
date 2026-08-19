@@ -27,36 +27,15 @@ func StatefulSet(
 	}
 	ls := labels.GetLabels(r, "redis", matchls)
 
-	livenessProbe := &corev1.Probe{
-		// TODO might need tuning
-		TimeoutSeconds:      5,
-		PeriodSeconds:       3,
-		InitialDelaySeconds: 3,
-	}
-	readinessProbe := &corev1.Probe{
-		// TODO might need tuning
-		TimeoutSeconds:      5,
-		PeriodSeconds:       5,
-		InitialDelaySeconds: 5,
-	}
 	sentinelLivenessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
-		InitialDelaySeconds: 3,
+		InitialDelaySeconds: 40,
 	}
 	sentinelReadinessProbe := &corev1.Probe{
-		// TODO might need tuning
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
-		InitialDelaySeconds: 5,
-	}
-
-	livenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
-	}
-	readinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(6379)},
+		InitialDelaySeconds: 40,
 	}
 	sentinelLivenessProbe.TCPSocket = &corev1.TCPSocketAction{
 		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
@@ -78,6 +57,9 @@ func StatefulSet(
 	}, {
 		Name:  "CONFIG_HASH",
 		Value: configHash,
+	}, {
+		Name:  "REPLICAS",
+		Value: strconv.Itoa(int(*r.Spec.Replicas)),
 	}}
 
 	sts := &appsv1.StatefulSet{
@@ -115,6 +97,7 @@ func StatefulSet(
 										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
 									},
 								},
+								InitialDelaySeconds: 40,
 							},
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
@@ -122,6 +105,7 @@ func StatefulSet(
 										Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "readiness"},
 									},
 								},
+								InitialDelaySeconds: 40,
 							},
 						}, {
 							Image:   r.Spec.ContainerImage,
