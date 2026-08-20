@@ -9,6 +9,7 @@ import (
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
+	"github.com/openstack-k8s-operators/lib-common/modules/users"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -155,7 +156,7 @@ func BuildProxySidecarContainer(instance *rabbitmqv1beta1.RabbitMq, IPv6Enabled 
 			FailureThreshold:    3,
 		},
 		SecurityContext: func() *corev1.SecurityContext {
-			sc := pod.RestrictiveSecurityContext(999, 999)
+			sc := pod.RestrictiveSecurityContext(users.RabbitmqUID, users.RabbitmqGID)
 			sc.ReadOnlyRootFilesystem = ptr.To(false)
 			return sc
 		}(),

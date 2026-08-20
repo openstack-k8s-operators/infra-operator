@@ -21,6 +21,7 @@ import (
 	. "github.com/onsi/gomega" //revive:disable:dot-imports
 
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/users"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -52,9 +53,9 @@ func TestStatefulSetSecurityContext(t *testing.T) {
 	g.Expect(redisContainer.Name).To(Equal("redis"))
 	g.Expect(redisContainer.SecurityContext).NotTo(BeNil())
 	g.Expect(redisContainer.SecurityContext.RunAsUser).NotTo(BeNil())
-	g.Expect(*redisContainer.SecurityContext.RunAsUser).To(Equal(RedisUID))
+	g.Expect(*redisContainer.SecurityContext.RunAsUser).To(Equal(users.RedisUID))
 	g.Expect(redisContainer.SecurityContext.RunAsGroup).NotTo(BeNil())
-	g.Expect(*redisContainer.SecurityContext.RunAsGroup).To(Equal(RedisUID))
+	g.Expect(*redisContainer.SecurityContext.RunAsGroup).To(Equal(users.RedisGID))
 	g.Expect(redisContainer.SecurityContext.RunAsNonRoot).NotTo(BeNil())
 	g.Expect(*redisContainer.SecurityContext.RunAsNonRoot).To(BeTrue())
 
@@ -63,9 +64,9 @@ func TestStatefulSetSecurityContext(t *testing.T) {
 	g.Expect(sentinelContainer.Name).To(Equal("sentinel"))
 	g.Expect(sentinelContainer.SecurityContext).NotTo(BeNil())
 	g.Expect(sentinelContainer.SecurityContext.RunAsUser).NotTo(BeNil())
-	g.Expect(*sentinelContainer.SecurityContext.RunAsUser).To(Equal(RedisUID))
+	g.Expect(*sentinelContainer.SecurityContext.RunAsUser).To(Equal(users.RedisUID))
 	g.Expect(sentinelContainer.SecurityContext.RunAsGroup).NotTo(BeNil())
-	g.Expect(*sentinelContainer.SecurityContext.RunAsGroup).To(Equal(RedisUID))
+	g.Expect(*sentinelContainer.SecurityContext.RunAsGroup).To(Equal(users.RedisGID))
 	g.Expect(sentinelContainer.SecurityContext.RunAsNonRoot).NotTo(BeNil())
 	g.Expect(*sentinelContainer.SecurityContext.RunAsNonRoot).To(BeTrue())
 

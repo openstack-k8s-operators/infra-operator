@@ -21,7 +21,4 @@ const (
 	MemcachedPort int32 = 11211
 	// MemcachedTLSPort -
 	MemcachedTLSPort int32 = 11212
-	// MemcachedUID -
-	// https://github.com/openstack/kolla/blob/master/kolla/common/users.py
-	MemcachedUID int64 = 42457
 )

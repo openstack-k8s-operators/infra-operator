@@ -11,6 +11,7 @@ import (
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
+	"github.com/openstack-k8s-operators/lib-common/modules/users"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -102,7 +103,7 @@ func StatefulSet(
 					ServiceAccountName:           r.RbacResourceName(),
 					AutomountServiceAccountToken: ptr.To(false),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup: ptr.To(RedisUID),
+						FSGroup: ptr.To(users.RedisGID),
 					},
 					Containers: []corev1.Container{
 						{
@@ -110,7 +111,7 @@ func StatefulSet(
 							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_redis_replication.sh"},
 							Name:    "redis",
 							SecurityContext: func() *corev1.SecurityContext {
-								sc := pod.RestrictiveSecurityContext(RedisUID, RedisUID)
+								sc := pod.RestrictiveSecurityContext(users.RedisUID, users.RedisGID)
 								sc.ReadOnlyRootFilesystem = ptr.To(false)
 								return sc
 							}(),
@@ -128,7 +129,7 @@ func StatefulSet(
 							Command: []string{"/usr/bin/dumb-init", "--", "/var/lib/operator-scripts/start_sentinel.sh"},
 							Name:    "sentinel",
 							SecurityContext: func() *corev1.SecurityContext {
-								sc := pod.RestrictiveSecurityContext(RedisUID, RedisUID)
+								sc := pod.RestrictiveSecurityContext(users.RedisUID, users.RedisGID)
 								sc.ReadOnlyRootFilesystem = ptr.To(false)
 								return sc
 							}(),
