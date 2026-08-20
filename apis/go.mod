@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/onsi/gomega v1.42.1
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20260813160234-fdcb3ee3699d
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20260818072803-e18950de3098
 	k8s.io/api v0.33.13
 	k8s.io/apiextensions-apiserver v0.33.13
 	k8s.io/apimachinery v0.33.13
@@ -37,7 +37,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/onsi/ginkgo/v2 v2.32.1 // indirect
 	github.com/openshift/api v3.9.0+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
