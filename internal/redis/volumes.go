@@ -40,38 +40,6 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 
 	vols := []corev1.Volume{
 		{
-			Name: "kolla-config",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: fmt.Sprintf("%s-config-data", r.Name),
-					},
-					Items: []corev1.KeyToPath{
-						{
-							Key:  "config.json",
-							Path: "config.json",
-						},
-					},
-				},
-			},
-		},
-		{
-			Name: "kolla-config-sentinel",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: fmt.Sprintf("%s-config-data", r.Name),
-					},
-					Items: []corev1.KeyToPath{
-						{
-							Key:  "config-sentinel.json",
-							Path: "config.json",
-						},
-					},
-				},
-			},
-		},
-		{
 			Name: "generated-config-data",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
@@ -172,10 +140,6 @@ func getRedisVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 		MountPath: "/var/lib/operator-scripts",
 		ReadOnly:  true,
 		Name:      "operator-scripts",
-	}, {
-		MountPath: "/var/lib/kolla/config_files",
-		ReadOnly:  true,
-		Name:      "kolla-config",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
@@ -193,10 +157,6 @@ func getSentinelVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 		MountPath: "/var/lib/operator-scripts",
 		ReadOnly:  true,
 		Name:      "operator-scripts",
-	}, {
-		MountPath: "/var/lib/kolla/config_files",
-		ReadOnly:  true,
-		Name:      "kolla-config-sentinel",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm

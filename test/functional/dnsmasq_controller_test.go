@@ -111,9 +111,10 @@ var _ = Describe("DNSMasq controller", func() {
 				condition.RoleReadyCondition,
 				corev1.ConditionTrue,
 			)
+			// dnsmasq runs under the default restricted-v2 SCC (random UID),
+			// so its Role carries no securitycontextconstraints "use" grant.
 			role := th.GetRole(dnsMasqRoleName)
-			Expect(role.Rules).To(HaveLen(1))
-			Expect(role.Rules[0].Resources).To(Equal([]string{"securitycontextconstraints"}))
+			Expect(role.Rules).To(BeEmpty())
 
 			th.ExpectCondition(
 				dnsMasqName,
