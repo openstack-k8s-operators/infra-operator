@@ -7,6 +7,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
+	"github.com/openstack-k8s-operators/lib-common/modules/users"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,14 +68,14 @@ func StatefulSet(
 					ServiceAccountName:           m.RbacResourceName(),
 					AutomountServiceAccountToken: ptr.To(false),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup: ptr.To(MemcachedUID),
+						FSGroup: ptr.To(users.MemcachedGID),
 					},
 					Containers: []corev1.Container{{
 						Image:   m.Spec.ContainerImage,
 						Name:    "memcached",
 						Command: []string{"/usr/bin/dumb-init", "--", "bash", "-c", "source /etc/sysconfig/memcached && exec /usr/bin/memcached -p ${PORT} -u ${USER} -m ${CACHESIZE} -c ${MAXCONN} $OPTIONS"},
 						SecurityContext: func() *corev1.SecurityContext {
-							sc := pod.RestrictiveSecurityContext(MemcachedUID, MemcachedUID)
+							sc := pod.RestrictiveSecurityContext(users.MemcachedUID, users.MemcachedGID)
 							sc.ReadOnlyRootFilesystem = ptr.To(false)
 							return sc
 						}(),

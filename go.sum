@@ -122,6 +122,8 @@ github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20260818072803
 github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20260818072803-e18950de3098/go.mod h1:3QvDBBsMZyTKsl39o/ytP/npPtcC/tSDv8U3nIdo31c=
 github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20260818072803-e18950de3098 h1:JhbLR4n161arcIjyziOcP3RXASQJF9uMqDLpU2pS/dA=
 github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20260818072803-e18950de3098/go.mod h1:tT5uXteekJ3lRgFO5/C3i6Q5A7dj40SDy6XbOJhnRuw=
+github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20260818072803-e18950de3098 h1:TBd/xrXgaTg4n+t55Kw6cf6RPVS42wNBy6yEJBiRXAs=
+github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20260818072803-e18950de3098/go.mod h1:jmVVRfwuFQ3fHLIOAkUrtLgOwEL6j45POzS3PBJuwyM=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=

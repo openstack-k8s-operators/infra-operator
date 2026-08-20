@@ -9,6 +9,7 @@ import (
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pod"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/serviceaccount"
+	"github.com/openstack-k8s-operators/lib-common/modules/users"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -57,9 +58,9 @@ func StatefulSet(
 
 	// Build the main RabbitMQ container.
 	// Explicitly set Command to bypass the kolla entrypoint (kolla_start tries
-	// sudo which fails as UID 999). The cluster-operator uses the official
+	// sudo which fails as a non-root UID). The cluster-operator uses the official
 	// RabbitMQ image where the default entrypoint works, but OpenStack uses
-	// kolla-based images that require this override.
+	// s2i/tcib images that require this override.
 	rabbitmqContainer := corev1.Container{
 		Name:           "rabbitmq",
 		Image:          r.Spec.ContainerImage,
@@ -70,7 +71,7 @@ func StatefulSet(
 		ReadinessProbe: readinessProbe,
 		Lifecycle:      buildLifecycle(r),
 		SecurityContext: func() *corev1.SecurityContext {
-			sc := pod.RestrictiveSecurityContext(999, 999)
+			sc := pod.RestrictiveSecurityContext(users.RabbitmqUID, users.RabbitmqGID)
 			sc.ReadOnlyRootFilesystem = ptr.To(false)
 			return sc
 		}(),
@@ -172,9 +173,9 @@ func StatefulSet(
 					Containers:                    containers,
 					Volumes:                       append(volumes, serviceaccount.KubeAPIAccessVolume()),
 					SecurityContext: &corev1.PodSecurityContext{
-						FSGroup:             ptr.To(int64(999)),
+						FSGroup:             ptr.To(users.RabbitmqGID),
 						FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
-						RunAsUser:           ptr.To(int64(999)),
+						RunAsUser:           ptr.To(users.RabbitmqUID),
 					},
 				},
 			},
