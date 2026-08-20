@@ -1,0 +1,249 @@
+---
+# Lab only: enforce Galera pod spread across workers and move co-located members off crowded nodes.
+#
+# Step 0 (preventive, default enabled): patches the infra-operator Topology CR referenced by the
+#   Galera CR to use whenUnsatisfiable: DoNotSchedule instead of ScheduleAnyway. This makes the
+#   spread constraint a hard rule — the scheduler will leave pods Pending rather than silently
+#   co-locate replicas on the same worker (which caused full-cluster data loss in the 2-node
+#   failure scenario; see docs/PODREMEDIATOR_PHASE1_GAPS.md §C.11 and the Galera E2E DR report).
+#   Disable with: -e galera_topology_enforce_doschedule=false
+#
+# Step 1 (reactive, default dry-run): if two+ STS members are already on the same worker, cordon
+#   that worker, delete the highest-ordinal PVC+pod to force rescheduling via Galera SST, then
+#   uncordon. Destroys data for that ordinal; Galera re-SSTs from a surviving member.
+#   Execute with: -e galera_rebalance_execute=true
+#
+# Examples:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/playbook-galera-rebalance-workers-lab.yml -b \
+#     -e oc_cmd=/home/zuul/bin/oc
+#     (topology CR patched to DoNotSchedule; placement checked in dry-run)
+#
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/playbook-galera-rebalance-workers-lab.yml -b \
+#     -e oc_cmd=/home/zuul/bin/oc -e galera_rebalance_execute=true
+#     (topology CR patched; co-located pods moved)
+#
+# Optional: -e galera_rebalance_max_rounds=8 (default 5)
+# Optional: -e e2e_statefulset_name=openstack-cell1-galera -e galera_pvc_prefix=mysql-db-openstack-cell1-galera
+# Optional: -e galera_cr_name=openstack -e galera_topology_namespace=openstack
+# See test-kit/podremediator/docs/GALERA_TOPOLOGY_SPREAD_AND_PODREMEDIATOR_LAB.md §6.
+
+- name: Galera lab – rebalance one colocated member onto another worker
+  hosts: controllers
+  gather_facts: false
+  vars:
+    _gr_ns: "{{ e2e_workload_namespace | default('openstack') }}"
+    _gr_sts: "{{ e2e_statefulset_name | default('openstack-galera') }}"
+    _gr_pfx: "{{ galera_pvc_prefix | default('mysql-db-openstack-galera') }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    galera_rebalance_execute: false
+    galera_rebalance_wait_timeout_s: 600
+    galera_rebalance_max_rounds: 5
+    # Step 0: enforce DoNotSchedule on the infra-operator Topology CR.
+    # Set to false to skip the patch (e.g. if Topology CR is managed externally).
+    galera_topology_enforce_doschedule: true
+    galera_cr_name: "{{ e2e_galera_cr_name | default('openstack') }}"
+    galera_topology_namespace: "{{ e2e_workload_namespace | default('openstack') }}"
+  tasks:
+    - name: Get API server from kubeconfig
+      ansible.builtin.shell: |
+        awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+      register: kubeconfig_server_rb
+      changed_when: false
+      failed_when: false
+
+    - name: Set API server fact for oc login
+      ansible.builtin.set_fact:
+        oc_api_server_auto: "{{ (kubeconfig_server_rb.stdout | trim) if (kubeconfig_server_rb.stdout is defined and kubeconfig_server_rb.stdout | trim | length > 0) else '' }}"
+
+    - name: OC login
+      ansible.builtin.shell: |
+        SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+        if [[ -n "$SERVER" ]]; then
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        else
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # Step 0: patch the infra-operator Topology CR to whenUnsatisfiable: DoNotSchedule
+    # -------------------------------------------------------------------------
+
+    - name: Step 0 – Get Topology CR name from Galera CR spec.topologyRef
+      ansible.builtin.shell: |
+        {{ oc_bin }} get galera {{ galera_cr_name }} -n {{ galera_topology_namespace }} \
+          -o jsonpath='{.spec.topologyRef.name}' 2>/dev/null || true
+      register: galera_topology_cr_name
+      changed_when: false
+      failed_when: false
+      when: galera_topology_enforce_doschedule | default(true) | bool
+
+    - name: Step 0 – Show discovered Topology CR
+      ansible.builtin.debug:
+        msg: >-
+          Galera CR '{{ galera_cr_name }}' references Topology CR
+          '{{ galera_topology_cr_name.stdout | trim }}' in namespace '{{ galera_topology_namespace }}'.
+          {% if not (galera_topology_cr_name.stdout | trim) %}
+          WARNING: no topologyRef found — skipping DoNotSchedule patch.
+          {% endif %}
+      when: galera_topology_enforce_doschedule | default(true) | bool
+
+    - name: Step 0 – Patch Topology CR to whenUnsatisfiable DoNotSchedule
+      ansible.builtin.shell: |
+        set -euo pipefail
+        TOPO="{{ galera_topology_cr_name.stdout | trim }}"
+        NS="{{ galera_topology_namespace }}"
+        OC="{{ oc_bin }}"
+
+        CURRENT="$($OC get topology "$TOPO" -n "$NS" \
+          -o jsonpath='{.spec.topologySpreadConstraints[0].whenUnsatisfiable}' 2>/dev/null || true)"
+        echo "Current whenUnsatisfiable: ${CURRENT:-<not set>}"
+
+        if [[ "${CURRENT:-}" == "DoNotSchedule" ]]; then
+          echo "Already DoNotSchedule — no change needed."
+          exit 0
+        fi
+
+        # Preserve existing topologySpreadConstraints structure; only change whenUnsatisfiable.
+        # We use a strategic merge that replaces the first (and typically only) constraint entry.
+        MAXSKEW="$($OC get topology "$TOPO" -n "$NS" \
+          -o jsonpath='{.spec.topologySpreadConstraints[0].maxSkew}' 2>/dev/null || echo 1)"
+        TOPKEY="$($OC get topology "$TOPO" -n "$NS" \
+          -o jsonpath='{.spec.topologySpreadConstraints[0].topologyKey}' 2>/dev/null || echo 'kubernetes.io/hostname')"
+
+        $OC patch topology "$TOPO" -n "$NS" --type=merge -p \
+          "{\"spec\":{\"topologySpreadConstraints\":[{\"maxSkew\":${MAXSKEW},\"topologyKey\":\"${TOPKEY}\",\"whenUnsatisfiable\":\"DoNotSchedule\"}]}}"
+        echo "Patched Topology CR '$TOPO': whenUnsatisfiable set to DoNotSchedule (maxSkew=${MAXSKEW}, topologyKey=${TOPKEY})."
+        echo "Galera pods will now be kept Pending rather than co-located on a single worker."
+      args:
+        executable: /bin/bash
+      register: topology_patch_out
+      changed_when: "'Patched' in topology_patch_out.stdout"
+      when:
+        - galera_topology_enforce_doschedule | default(true) | bool
+        - galera_topology_cr_name.stdout | trim | length > 0
+
+    - name: Step 0 – Show topology patch result
+      ansible.builtin.debug:
+        msg: "{{ topology_patch_out.stdout_lines | default(['(skipped — no Topology CR found or patch disabled)']) }}"
+      when: galera_topology_enforce_doschedule | default(true) | bool
+
+    # -------------------------------------------------------------------------
+    # Step 1: reactive rebalance — move co-located members to separate workers
+    # -------------------------------------------------------------------------
+
+    - name: Plan or execute rebalance rounds (highest ordinal on most crowded worker per round)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        OC="{{ oc_bin }}"
+        NS="{{ _gr_ns }}"
+        STS="{{ _gr_sts }}"
+        PFX="{{ _gr_pfx }}"
+        EX={{ 1 if galera_rebalance_execute | default(false) | bool else 0 }}
+        WAIT={{ galera_rebalance_wait_timeout_s | int }}
+        ROUNDS={{ galera_rebalance_max_rounds | default(5) | int }}
+
+        REPL="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+        if ! [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Cannot read spec.replicas for STS $STS in $NS (got '$REPL')"
+          exit 1
+        fi
+
+        for ((round=1; round<=ROUNDS; round++)); do
+          unset cnt 2>/dev/null || true
+          declare -A cnt
+          for i in $(seq 0 $((REPL - 1))); do
+            p="${STS}-$i"
+            n="$($OC get pod -n "$NS" "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+            [[ -z "$n" ]] && continue
+            c=${cnt[$n]:-0}
+            cnt[$n]=$((c + 1))
+          done
+          maxc=0
+          crowded=""
+          for n in "${!cnt[@]}"; do
+            c=${cnt[$n]}
+            if [[ "$c" -gt "$maxc" ]]; then
+              maxc=$c
+              crowded="$n"
+            fi
+          done
+          unset cnt
+
+          if [[ "$maxc" -le 1 ]]; then
+            echo "OK: at most one ${STS} member per worker (max on a node=$maxc, after round $((round-1)))."
+            exit 0
+          fi
+
+          pick=-1
+          for i in $(seq 0 $((REPL - 1))); do
+            p="${STS}-$i"
+            n="$($OC get pod -n "$NS" "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+            [[ "$n" == "$crowded" ]] || continue
+            [[ "$i" -gt "$pick" ]] && pick=$i
+          done
+
+          if [[ "$pick" -lt 0 ]]; then
+            echo "Could not pick an ordinal on crowded node=$crowded"
+            exit 1
+          fi
+
+          PVC="${PFX}-${pick}"
+          POD="${STS}-${pick}"
+          echo "--- Round $round / max $ROUNDS ---"
+          echo "Crowded worker: $crowded (${maxc} members)"
+          echo "PLAN: oc adm cordon $crowded"
+          echo "      oc delete pvc $PVC -n $NS ; oc delete pod $POD -n $NS"
+          echo "      oc wait pod/$POD -n $NS --for=condition=Ready --timeout=\${WAIT}s"
+          echo "      oc adm uncordon $crowded"
+
+          if [[ "$EX" -eq 0 ]]; then
+            echo ""
+            echo "(dry-run only; add -e galera_rebalance_execute=true to run up to $ROUNDS rounds)"
+            exit 0
+          fi
+
+          $OC adm cordon "$crowded"
+          $OC delete pvc "$PVC" -n "$NS" --wait=false 2>/dev/null || true
+          $OC delete pod "$POD" -n "$NS" --wait=false 2>/dev/null || true
+          $OC wait --for=condition=Ready "pod/$POD" -n "$NS" --timeout="${WAIT}s" || {
+            echo "WARN: pod did not become Ready within ${WAIT}s; uncordon anyway"
+          }
+          $OC adm uncordon "$crowded"
+          echo "DONE round $round: ordinal $pick moved off $crowded"
+        done
+
+        declare -A cnt2
+        for i in $(seq 0 $((REPL - 1))); do
+          p="${STS}-$i"
+          n="$($OC get pod -n "$NS" "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)"
+          [[ -z "$n" ]] && continue
+          c=${cnt2[$n]:-0}
+          cnt2[$n]=$((c + 1))
+        done
+        maxc=0
+        for n in "${!cnt2[@]}"; do
+          c=${cnt2[$n]}
+          [[ "$c" -gt "$maxc" ]] && maxc=$c
+        done
+        unset cnt2
+        if [[ "$maxc" -le 1 ]]; then
+          echo "OK: spread complete after $ROUNDS rounds."
+          exit 0
+        fi
+        echo "WARN: still colocated (max $maxc members on one worker) after $ROUNDS rounds — check free workers / scheduling." >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      register: galera_rebalance_out
+      changed_when: galera_rebalance_execute | default(false) | bool
+
+    - name: Show rebalance output
+      ansible.builtin.debug:
+        msg: "{{ galera_rebalance_out.stdout_lines | default([]) }}"

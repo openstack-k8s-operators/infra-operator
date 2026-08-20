@@ -1,0 +1,43 @@
+---
+# Clear wsrep_desync and wsrep_reject_queries on ordinals in e2e_galera_wsrep_spread_desync_ordinals (same defaults as spread).
+# Run after victim pick (and on failure paths via playbook rescue where wired).
+
+- name: Lab – clear wsrep_desync on Galera ordinals
+  ansible.builtin.shell: |
+    set -euo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_sts_name | default('openstack-galera') }}"
+    CTR="{{ e2e_galera_mysql_container | default('galera') }}"
+    DESYNC_ORDS="{{ e2e_galera_wsrep_spread_desync_ordinals | default('1,2') | trim }}"
+
+    echo "=== Galera lab: wsrep spread cleanup (desync + reject_queries) $(date -Iseconds) ==="
+    for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+      o="$(echo "$tok" | tr -d '[:space:]')"
+      [[ -n "$o" ]] || continue
+      POD="${STS}-${o}"
+      ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      if [[ "$ph" != "Running" ]]; then
+        echo "Skip $POD (phase=${ph:-missing})"
+        continue
+      fi
+      if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        echo "Skip $POD (mysql unreachable)"
+        continue
+      fi
+      echo "wsrep_reject_queries=NONE on $POD"
+      $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SET GLOBAL wsrep_reject_queries = NONE" 2>/dev/null || true
+      echo "wsrep_desync=OFF on $POD"
+      $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SET GLOBAL wsrep_desync = OFF" 2>/dev/null || \
+        $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SET GLOBAL wsrep_desync = 0" 2>/dev/null || true
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: galera_wsrep_spread_cleanup_out
+  changed_when: true
+  failed_when: false
+
+- name: Show wsrep_desync cleanup output
+  ansible.builtin.debug:
+    msg: "{{ galera_wsrep_spread_cleanup_out.stdout_lines | default([]) }}"

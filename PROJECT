@@ -144,6 +144,15 @@ resources:
     namespaced: true
   controller: true
   domain: openstack.org
+  group: remediation
+  kind: PodRemediator
+  path: github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: openstack.org
   group: rabbitmq
   kind: RabbitMq
   path: github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1

@@ -1,0 +1,16 @@
+apiVersion: remediation.openstack.org/v1beta1
+kind: PodRemediator
+metadata:
+  name: podremediator-sample
+  labels:
+    app.kubernetes.io/name: podremediator
+    app.kubernetes.io/instance: podremediator-sample
+    app.kubernetes.io/part-of: infra-operator
+spec:
+  # Namespaces to watch for pods with local PVCs. Empty means the CR's namespace only.
+  namespaces: []
+  # PVC remediation is enabled when you apply the CR (default). To disable:
+  # disabled: true
+  # Optional disruption budget: skip PVC deletion while NotReady node count exceeds this (0 = unlimited).
+  # Example for 3-member Galera: 1 avoids stripping volumes during multi-node incidents.
+  # maxUnhealthyNodes: 1
