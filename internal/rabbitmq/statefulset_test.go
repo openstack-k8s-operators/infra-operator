@@ -15,10 +15,12 @@ limitations under the License.
 package rabbitmq
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -141,6 +143,75 @@ func TestBuildWipeDataInitContainer_DifferentVersions(t *testing.T) {
 	}
 	if strings.Contains(c1.Args[1], ".operator-wipe-4.3") {
 		t.Error("4.2 container should not reference 4.3 marker")
+	}
+}
+
+func TestStatefulSet_PreStopHook(t *testing.T) {
+	tests := []struct {
+		name        string
+		gracePeriod *int64
+		wantQuorum  int64
+		wantMirror  int64
+		wantDrain   int64
+	}{
+		{"default (nil) uses 60s", nil, 10, 10, 30},
+		{"explicit 60s", ptr.To(int64(60)), 10, 10, 30},
+		{"explicit 120s", ptr.To(int64(120)), 20, 20, 60},
+		{"explicit 600s", ptr.To(int64(600)), 100, 100, 300},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestRabbitMq("test-mq")
+			r.Spec.TerminationGracePeriodSeconds = tt.gracePeriod
+			sts := StatefulSet(r, "hash", nil, nil, "4.2", false, ProxyConfig{})
+
+			lifecycle := sts.Spec.Template.Spec.Containers[0].Lifecycle
+			if lifecycle == nil || lifecycle.PreStop == nil || lifecycle.PreStop.Exec == nil {
+				t.Fatal("PreStop exec hook must be set")
+			}
+			cmd := lifecycle.PreStop.Exec.Command
+			if len(cmd) != 3 || cmd[0] != "/bin/bash" || cmd[1] != "-c" {
+				t.Fatalf("unexpected command structure: %v", cmd)
+			}
+			script := cmd[2]
+
+			wantQuorum := fmt.Sprintf("await_online_quorum_plus_one -t %d", tt.wantQuorum)
+			if !strings.Contains(script, wantQuorum) {
+				t.Errorf("script missing %q:\n%s", wantQuorum, script)
+			}
+			wantMirror := fmt.Sprintf("await_online_synchronized_mirror -t %d", tt.wantMirror)
+			if !strings.Contains(script, wantMirror) {
+				t.Errorf("script missing %q:\n%s", wantMirror, script)
+			}
+			wantDrain := fmt.Sprintf("drain -t %d", tt.wantDrain)
+			if !strings.Contains(script, wantDrain) {
+				t.Errorf("script missing %q:\n%s", wantDrain, script)
+			}
+			if !strings.Contains(script, "skipPreStopChecks") {
+				t.Error("script missing skipPreStopChecks guard")
+			}
+			if !strings.Contains(script, "rabbit_nodes:list_running()") {
+				t.Error("script missing runtime node count check")
+			}
+		})
+	}
+}
+
+func TestStatefulSet_UpdateStrategy(t *testing.T) {
+	r := newTestRabbitMq("test-mq")
+	sts := StatefulSet(r, "hash", nil, nil, "4.2", false, ProxyConfig{})
+
+	if sts.Spec.UpdateStrategy.Type != appsv1.RollingUpdateStatefulSetStrategyType {
+		t.Errorf("UpdateStrategy.Type = %q, want %q",
+			sts.Spec.UpdateStrategy.Type, appsv1.RollingUpdateStatefulSetStrategyType)
+	}
+	if sts.Spec.UpdateStrategy.RollingUpdate == nil {
+		t.Fatal("UpdateStrategy.RollingUpdate must be set")
+	}
+	if *sts.Spec.UpdateStrategy.RollingUpdate.Partition != 0 {
+		t.Errorf("Partition = %d, want 0",
+			*sts.Spec.UpdateStrategy.RollingUpdate.Partition)
 	}
 }
 
