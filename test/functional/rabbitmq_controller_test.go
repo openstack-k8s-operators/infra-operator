@@ -1596,21 +1596,23 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("a 3.x to 4.x upgrade with Quorum queue type", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
-			// Set CurrentVersion to 3.9 to simulate existing 3.x cluster
+			// Set CurrentVersion to 3.9 and QueueType to Mirrored to simulate existing 3.x cluster
 			Eventually(func(g Gomega) {
 				instance := &rabbitmqv1.RabbitMq{}
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
 				instance.Status.CurrentVersion = "3.9"
+				instance.Status.QueueType = rabbitmqv1.QueueTypeMirrored
 				g.Expect(th.K8sClient.Status().Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 		})
 
-		It("should set ProxyRequired for 3.x to 4.x upgrade with Quorum", func() {
+		It("should set ProxyRequired for 3.x to 4.x upgrade when migrating from Mirrored to Quorum", func() {
 			// Set TargetVersion and QueueType
 			Eventually(func(g Gomega) {
 				instance := &rabbitmqv1.RabbitMq{}
@@ -1633,6 +1635,52 @@ var _ = Describe("RabbitMQ Controller", func() {
 				instance := GetRabbitMQ(rabbitmqName)
 				g.Expect(instance.Status.CurrentVersion).To(Equal("4.2"))
 				g.Expect(instance.Status.ProxyRequired).To(Equal("True"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+	})
+
+	When("a 3.x to 4.x upgrade on a cluster already using Quorum queues", func() {
+		BeforeEach(func() {
+			spec := GetDefaultRabbitMQSpec()
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Set CurrentVersion to 3.9 but keep QueueType as Quorum
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Status.CurrentVersion = "3.9"
+				instance.Status.QueueType = rabbitmqv1.QueueTypeQuorum
+				g.Expect(th.K8sClient.Status().Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should NOT set ProxyRequired for 3.x to 4.x upgrade when already on Quorum", func() {
+			// Set TargetVersion to trigger the 3.x→4.x upgrade
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Spec.TargetVersion = ptr.To("4.2")
+				instance.Spec.QueueType = ptr.To(rabbitmqv1.QueueTypeQuorum)
+				g.Expect(th.K8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for upgrade to reach WaitingForCluster
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				g.Expect(string(instance.Status.UpgradePhase)).To(Equal(string(rabbitmqv1.UpgradePhaseWaitingForCluster)))
+			}, timeout, interval).Should(Succeed())
+
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// ProxyRequired should NOT be set — no Mirrored→Quorum migration needed
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				g.Expect(instance.Status.CurrentVersion).To(Equal("4.2"))
+				g.Expect(instance.Status.ProxyRequired).ToNot(Equal("True"))
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -1880,17 +1928,19 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("a 3.x to 4.x upgrade includes proxy sidecar in StatefulSet", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
-			// Set CurrentVersion to 3.9 and QueueType to Quorum
+			// Set CurrentVersion to 3.9 and QueueType to Mirrored to simulate a
+			// pre-upgrade cluster that needs Mirrored→Quorum migration
 			Eventually(func(g Gomega) {
 				instance := &rabbitmqv1.RabbitMq{}
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
 				instance.Status.CurrentVersion = "3.9"
-				instance.Status.QueueType = rabbitmqv1.QueueTypeQuorum
+				instance.Status.QueueType = rabbitmqv1.QueueTypeMirrored
 				g.Expect(th.K8sClient.Status().Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 		})
@@ -2081,27 +2131,30 @@ var _ = Describe("RabbitMQ Controller", func() {
 	When("a version upgrade completes the full state machine lifecycle", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
-			// Set CurrentVersion to 3.9 and QueueType to Quorum
+			// Set CurrentVersion to 3.9 and QueueType to Mirrored to simulate pre-upgrade state
 			Eventually(func(g Gomega) {
 				instance := &rabbitmqv1.RabbitMq{}
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
 				instance.Status.CurrentVersion = "3.9"
-				instance.Status.QueueType = rabbitmqv1.QueueTypeQuorum
+				instance.Status.QueueType = rabbitmqv1.QueueTypeMirrored
 				g.Expect(th.K8sClient.Status().Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 		})
 
 		It("should transition through all upgrade phases and reach clean state", func() {
-			// Set TargetVersion to trigger upgrade
+			// Set TargetVersion and QueueType to Quorum to trigger upgrade
+			// (simulates what the webhook does: Mirrored + 4.x → Quorum)
 			Eventually(func(g Gomega) {
 				instance := &rabbitmqv1.RabbitMq{}
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
 				instance.Spec.TargetVersion = ptr.To("4.2")
+				instance.Spec.QueueType = ptr.To(rabbitmqv1.QueueTypeQuorum)
 				g.Expect(th.K8sClient.Update(ctx, instance)).Should(Succeed())
 			}, timeout, interval).Should(Succeed())
 
