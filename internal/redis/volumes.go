@@ -46,6 +46,12 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 			},
 		},
 		{
+			Name: "redis-data",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
 			Name: "config-data",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
@@ -140,6 +146,9 @@ func getRedisVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 		MountPath: "/var/lib/operator-scripts",
 		ReadOnly:  true,
 		Name:      "operator-scripts",
+	}, {
+		MountPath: "/var/lib/redis",
+		Name:      "redis-data",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
@@ -157,6 +166,9 @@ func getSentinelVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 		MountPath: "/var/lib/operator-scripts",
 		ReadOnly:  true,
 		Name:      "operator-scripts",
+	}, {
+		MountPath: "/var/lib/redis",
+		Name:      "redis-data",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
