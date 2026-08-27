@@ -50,6 +50,11 @@ func Deployment(
 	envVars["POD_NAME"] = env.DownwardAPI("metadata.name")
 	envVars["POD_NAMESPACE"] = env.DownwardAPI("metadata.namespace")
 	envVars["INSTANCEHA_CR_NAME"] = env.SetValue(instance.Name)
+	// Point the config loader at the /secrets mounts (see instancehaPodVolumeMounts):
+	// the defaults live under cloud-admin's 0700 home, which the random restricted-v2
+	// UID cannot traverse.
+	envVars["CLOUDS_CONFIG_PATH"] = env.SetValue("/secrets/clouds.yaml")
+	envVars["SECURE_CONFIG_PATH"] = env.SetValue("/secrets/secure.yaml")
 	if instance.Spec.InstanceHaHeartbeatPort > 0 {
 		envVars["HEARTBEAT_PORT"] = env.SetValue(fmt.Sprintf("%d", instance.Spec.InstanceHaHeartbeatPort))
 	}
@@ -259,14 +264,21 @@ func instancehaPorts(instance *instancehav1.InstanceHa) []corev1.ContainerPort {
 func instancehaPodVolumeMounts() []corev1.VolumeMount {
 	return []corev1.VolumeMount{
 		{
+			// Mounted under /secrets (not cloud-admin's home) so the file is
+			// reachable by the random, admission-assigned UID: the image's
+			// /home/cloud-admin is mode 0700 and only traversable by uid 42401,
+			// whereas /secrets is world-traversable. The Python side is pointed
+			// here via the CLOUDS_CONFIG_PATH env var.
 			Name:      "openstack-config",
-			MountPath: "/home/cloud-admin/.config/openstack/clouds.yaml",
+			MountPath: "/secrets/clouds.yaml",
 			SubPath:   "clouds.yaml",
 			ReadOnly:  true,
 		},
 		{
+			// See openstack-config above: kept out of cloud-admin's 0700 home so
+			// the random UID can read it. Pointed to via SECURE_CONFIG_PATH.
 			Name:      "openstack-config-secret",
-			MountPath: "/home/cloud-admin/.config/openstack/secure.yaml",
+			MountPath: "/secrets/secure.yaml",
 			SubPath:   "secure.yaml",
 			ReadOnly:  true,
 		},
