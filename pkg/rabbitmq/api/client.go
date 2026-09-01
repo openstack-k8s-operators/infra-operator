@@ -92,9 +92,14 @@ func NewClient(baseURL, username, password string, tlsEnabled bool, caCert []byt
 			return nil, fmt.Errorf("failed to parse CA certificate PEM data")
 		}
 
+		// Pin TLS 1.3 as the minimum. Do NOT lower this to TLS 1.2: only TLS 1.3
+		// carries the hybrid post-quantum key exchange (X25519MLKEM768), which the
+		// Go stdlib negotiates by default. Do NOT set CurvePreferences here —
+		// leaving it unset keeps the post-quantum-capable default; a classical-only
+		// list would silently disable PQ key exchange.
 		httpClient.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
+				MinVersion: tls.VersionTLS13,
 				RootCAs:    caCertPool,
 			},
 		}
