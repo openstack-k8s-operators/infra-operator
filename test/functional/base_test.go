@@ -1516,7 +1516,7 @@ func GetDefaultInstanceHaSpec() map[string]any {
 	return map[string]any{
 		"containerImage": "test-instanceha-image:latest",
 		"metricsTLS": map[string]any{
-			"minTLSVersion": "1.2",
+			"minTLSVersion": "1.3",
 			"cipherSuites":  "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA",
 		},
 	}
