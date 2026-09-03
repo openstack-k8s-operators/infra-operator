@@ -2,6 +2,9 @@ name: Lints
 
 on: [pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   check-go-mod-replace-lines:
     name: check for replace lines in go.mod files
