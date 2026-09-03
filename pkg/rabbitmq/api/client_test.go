@@ -88,6 +88,34 @@ func TestNewClient_NoCACert_TLSEnabled(t *testing.T) {
 	if client == nil {
 		t.Fatal("Expected client to be created")
 	}
+
+	// A TLS-enabled client must still pin TLS 1.3 even without a custom CA,
+	// falling back to the system trust store (RootCAs nil).
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.httpClient.Transport)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set for a TLS-enabled client")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Errorf("expected MinVersion TLS 1.3 (%d), got %d", tls.VersionTLS13, transport.TLSClientConfig.MinVersion)
+	}
+	if transport.TLSClientConfig.RootCAs != nil {
+		t.Error("expected RootCAs to be nil (system trust store) when no CA cert is supplied")
+	}
+}
+
+// TestNewClient_NoTLS verifies a client created without TLS retains the default
+// transport behavior (no custom TLS config is installed).
+func TestNewClient_NoTLS(t *testing.T) {
+	client, err := NewClient("http://localhost:15672", "user", "pass", false, nil)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if client.httpClient.Transport != nil {
+		t.Errorf("expected default transport (nil) for a non-TLS client, got %T", client.httpClient.Transport)
+	}
 }
 
 // TestNewClient_TLSConfig verifies the TLS client configuration used for
