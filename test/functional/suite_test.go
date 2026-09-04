@@ -48,12 +48,14 @@ import (
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 
 	instanceha_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/instanceha"
 	memcached_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/memcached"
 	network_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/network"
 	rabbitmq_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
 	redis_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/redis"
+	remediation_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 
 	webhookinstancehav1beta1 "github.com/openstack-k8s-operators/infra-operator/internal/webhook/instanceha/v1beta1"
 	webhookmemcachedv1beta1 "github.com/openstack-k8s-operators/infra-operator/internal/webhook/memcached/v1beta1"
@@ -171,6 +173,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	err = topologyv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
+	err = remediationv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
 	err = ocp_configv1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = apiextensionsv1.AddToScheme(scheme.Scheme)
@@ -269,6 +273,14 @@ var _ = BeforeSuite(func() {
 		Kclient: kclient,
 	}
 	err = bgpReconciler.SetupWithManager(context.Background(), k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&remediation_ctrl.PodRemediatorReconciler{
+		Client:         k8sManager.GetClient(),
+		Scheme:         k8sManager.GetScheme(),
+		Kclient:        kclient,
+		DynamicClient:  dynClient,
+	}).SetupWithManager(context.Background(), k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&rabbitmq_ctrl.TransportURLReconciler{
