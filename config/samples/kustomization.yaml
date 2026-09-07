@@ -10,6 +10,7 @@ resources:
 - network_v1beta1_ipset.yaml
 - network_v1beta1_reservation.yaml
 - network_v1beta1_bgpconfiguration.yaml
+- remediation_v1beta1_podremediator.yaml
 - topology_v1beta1_topology.yaml
 - rabbitmq_v1beta1_rabbitmq.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
