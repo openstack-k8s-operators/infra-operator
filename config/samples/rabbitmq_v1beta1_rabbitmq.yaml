@@ -5,4 +5,5 @@ metadata:
 spec:
   replicas: 1
   secret: osp-secret
-  storageClass: local-storage
+  persistence:
+    storageClassName: local-storage
