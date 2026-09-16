@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -59,6 +60,37 @@ func TestStatefulSet_WithoutDataWipe(t *testing.T) {
 	}
 	if initContainers[0].Name != "setup-container" {
 		t.Errorf("init container name = %q, want %q", initContainers[0].Name, "setup-container")
+	}
+}
+
+func hasEnvVar(container corev1.Container, name string) bool {
+	for _, e := range container.Env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStatefulSet_PluginsDirSetForVersion4(t *testing.T) {
+	r := newTestRabbitMq("test-mq")
+	sts := StatefulSet(r, "hash123", nil, nil, "4.2", false, ProxyConfig{})
+
+	rabbitContainer := sts.Spec.Template.Spec.Containers[0]
+	if !hasEnvVar(rabbitContainer, "RABBITMQ_PLUGINS_DIR") {
+		t.Error("RABBITMQ_PLUGINS_DIR should be set for RabbitMQ 4.x")
+	}
+}
+
+func TestStatefulSet_PluginsDirNotSetForVersion3(t *testing.T) {
+	r := newTestRabbitMq("test-mq")
+	// 3.x images do not ship the /usr/lib/rabbitmq/plugins symlink, so the
+	// env var must not be set or the node cannot find its plugins.
+	sts := StatefulSet(r, "hash123", nil, nil, "3.9", false, ProxyConfig{})
+
+	rabbitContainer := sts.Spec.Template.Spec.Containers[0]
+	if hasEnvVar(rabbitContainer, "RABBITMQ_PLUGINS_DIR") {
+		t.Error("RABBITMQ_PLUGINS_DIR must not be set for RabbitMQ 3.x")
 	}
 }
 
