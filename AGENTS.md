@@ -90,6 +90,7 @@ their purpose changes, update this table to match.
 | `internal/redis/` | Redis resource builders (statefulset, service, volumes) |
 | `internal/rabbitmq/` | RabbitMQ resource builders |
 | `internal/instanceha/` | InstanceHA resource builders |
+| `internal/tlsprofile/` | Reads the cluster-wide TLS security profile ConfigMap published by openstack-operator and renders it into each service's native config syntax |
 | `internal/webhook/` | Webhook implementations organized by API group |
 | `templates/` | Config files and scripts mounted into pods via `OPERATOR_TEMPLATES` env var. Subdirs: `instanceha/`, `memcached/`, `redis/` |
 | `config/crd,rbac,manager,webhook/` | Generated Kubernetes manifests (CRDs, RBAC, deployment, webhooks) |
