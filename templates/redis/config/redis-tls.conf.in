@@ -7,3 +7,12 @@ tls-key-file /var/lib/config-data/tls/private/redis.key
 tls-ca-cert-file /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 tls-replication yes
 tls-auth-clients optional
+{{- if index . "redisTLSProtocols" }}
+tls-protocols "{{ index . "redisTLSProtocols" }}"
+{{- end }}
+{{- if index . "redisTLSCiphers" }}
+tls-ciphers {{ index . "redisTLSCiphers" }}
+{{- end }}
+{{- if index . "redisTLSCipherSuites" }}
+tls-ciphersuites {{ index . "redisTLSCipherSuites" }}
+{{- end }}
