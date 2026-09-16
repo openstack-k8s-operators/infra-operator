@@ -55,6 +55,7 @@ import (
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	redis "github.com/openstack-k8s-operators/infra-operator/internal/redis"
+	"github.com/openstack-k8s-operators/infra-operator/internal/tlsprofile"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 
 	"github.com/openstack-k8s-operators/lib-common/modules/common/clusterdns"
@@ -477,7 +478,20 @@ func (r *Reconciler) generateConfigMaps(
 	instance *redisv1.Redis,
 	envVars *map[string]env.Setter,
 ) error {
-	templateParameters := make(map[string]any)
+	// Apply the cluster-wide TLS profile, if the openstack-operator published
+	// one. The redis-tls.conf.in and sentinel-tls.conf.in templates omit the
+	// corresponding directives when these are empty, leaving Redis on its own
+	// defaults.
+	profile, err := tlsprofile.Get(ctx, h, instance.Namespace)
+	if err != nil {
+		util.LogErrorForObject(h, err, "Unable to read the cluster TLS profile", instance)
+		return err
+	}
+	templateParameters := map[string]any{
+		"redisTLSProtocols":    profile.RedisProtocols(),
+		"redisTLSCiphers":      profile.RedisCiphers(),
+		"redisTLSCipherSuites": profile.RedisCipherSuites(),
+	}
 	customData := make(map[string]string)
 
 	cms := []util.Template{
@@ -501,7 +515,7 @@ func (r *Reconciler) generateConfigMaps(
 		},
 	}
 
-	err := configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
+	err = configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
 	if err != nil {
 		util.LogErrorForObject(h, err, "Unable to retrieve or create config maps", instance)
 		return err
@@ -568,7 +582,42 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&topologyv1.Topology{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForTLSProfile),
+			builder.WithPredicates(tlsprofile.Predicate()),
+		).
 		Complete(r)
+}
+
+// findObjectsForTLSProfile - returns a reconcile request for every Redis CR in
+// the namespace of the cluster TLS profile ConfigMap. Unlike the other watched
+// inputs the profile is not referenced from the spec, so there is no field
+// index to select on: every CR in the namespace renders its config from it.
+func (r *Reconciler) findObjectsForTLSProfile(ctx context.Context, src client.Object) []reconcile.Request {
+	Log := r.GetLogger(ctx)
+
+	crList := &redisv1.RedisList{}
+	if err := r.List(ctx, crList, &client.ListOptions{Namespace: src.GetNamespace()}); err != nil {
+		Log.Error(err, fmt.Sprintf("listing %s in %s", crList.GroupVersionKind().Kind, src.GetNamespace()))
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(crList.Items))
+	for _, item := range crList.Items {
+		Log.Info(fmt.Sprintf("TLS profile %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
+
+		requests = append(requests,
+			reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      item.GetName(),
+					Namespace: item.GetNamespace(),
+				},
+			},
+		)
+	}
+
+	return requests
 }
 
 // findObjectsForSrc - returns a reconcile request if the object is referenced by a Redis CR
