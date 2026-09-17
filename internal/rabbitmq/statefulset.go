@@ -52,7 +52,7 @@ func StatefulSet(
 	}
 
 	// Build container environment variables
-	containerEnv := buildContainerEnv(r, envVars)
+	containerEnv := buildContainerEnv(r, envVars, targetVersion)
 
 	readinessProbe := buildReadinessProbe(r)
 
@@ -238,7 +238,7 @@ func StatefulSet(
 
 // buildContainerEnv builds the environment variables for the RabbitMQ container
 // matching the old rabbitmq-cluster-operator layout
-func buildContainerEnv(r *rabbitmqv1.RabbitMq, additionalEnv []corev1.EnvVar) []corev1.EnvVar {
+func buildContainerEnv(r *rabbitmqv1.RabbitMq, additionalEnv []corev1.EnvVar, rabbitmqVersion string) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{
 			Name: "MY_POD_NAME",
@@ -308,6 +308,21 @@ func buildContainerEnv(r *rabbitmqv1.RabbitMq, additionalEnv []corev1.EnvVar) []
 			Value: ".$(K8S_SERVICE_NAME).$(MY_POD_NAMESPACE)",
 		},
 	)
+
+	// Pin the plugins directory to a single path for RabbitMQ 4.x+ only.
+	// Those images ship /usr/lib/rabbitmq/plugins as a symlink to the
+	// versioned lib/rabbitmq_server-<version>/plugins directory, so the
+	// default (which scans both) discovers every plugin twice and logs a
+	// "duplicate plugins" warning at startup. Older 3.x images do not have
+	// this symlink — the path does not exist there — so setting it would
+	// leave RabbitMQ unable to find any plugin and prevent the node from
+	// starting.
+	if IsVersion4OrLater(rabbitmqVersion) {
+		env = append(env, corev1.EnvVar{
+			Name:  "RABBITMQ_PLUGINS_DIR",
+			Value: "/usr/lib/rabbitmq/plugins",
+		})
+	}
 
 	return env
 }
