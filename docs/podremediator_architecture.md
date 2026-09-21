@@ -65,6 +65,7 @@ with the following safety layers (all active):
 
 1. **k8s quorum gate** — `AvailableReplicas >= floor(Replicas/2)+1` before any consent.
 2. **wsrep gate** — live `wsrep_cluster_size` queried via pod exec; fail-open if exec fails.
+   *(Follow-up: align with the RabbitMQ gate, which now fails closed — see §7b design note.)*
 3. **Seqno-aware ordering** — the pod with the highest seqno (most up-to-date data) receives
    consent last; among the rest, lowest-ordinal first. One PVC per reconcile.
 4. **Status observability** — `Galera.status.pvcRemediation` reflects in-flight handshake
@@ -438,29 +439,45 @@ Also update `zz_generated.deepcopy.go` (same pattern as `GaleraStatus`).
 
 2. List PVCs with MatchingLabels{"app.kubernetes.io/name": instance.Name}.
    Build candidates (pvc-stuck-on-node set, safe-to-delete not yet set) and
-   newRemediationStatus (all annotated PVCs) in one pass.
+   newRemediationStatus (all annotated PVCs) in one pass. Exclude candidates whose
+   name has no valid numeric ordinal suffix (never treat a malformed name as ordinal 0).
    Set instance.Status.PVCRemediation = newMap (nil when empty).
 
-3. If no candidates: return nil.
+3. Concurrency guard: if ANY stuck PVC already has safe-to-delete=true, return nil
+   without granting further consent. PodRemediator deletes one member at a time;
+   granting a second consent concurrently could delete two members and break quorum.
+   Resume only after the consented PVC is deleted (drops out of the list) or its
+   remediation annotations are cleared.
 
-4. Sort candidates: lowest ordinal first.
+4. If no candidates: return nil.
+
+5. Sort candidates: lowest ordinal first.
    No seqno ordering — RabbitMQ Raft handles state sync; all surviving nodes are
    equally authoritative from the leader's perspective.
 
-5. Safety gate (k8s): use instance.Status.ReadyCount (already set from
+6. Safety gate 1 (k8s): use instance.Status.ReadyCount (already set from
    sts.Status.ReadyReplicas by the main reconcile loop — no extra STS fetch needed).
    Check ReadyCount >= floor(*instance.Spec.Replicas/2)+1.
-   Defer consent if below quorum.
+   Defer consent (return nil) if below quorum.
 
-6. Optional gate (RabbitMQ-level, fail-open): exec into a ready pod:
+7. Safety gate 2 (RabbitMQ-level, FAIL-CLOSED): exec into a ready pod:
      rabbitmqctl cluster_status --formatter=json
    JSON has "running_nodes": [...]; check len >= quorum.
-   If exec fails or r.config == nil: log V(1), skip gate (fail-open).
-   This gate mirrors the wsrep gate in the Galera implementation.
+   The exec is bounded by a 15s context timeout.
+   If the pod list fails, no ready pod is available, or rabbitmqctl errors, RETURN THE
+   ERROR (do not grant consent) — Reconcile requeues (RequeueAfter 30s). A destructive
+   PVC deletion must never be authorized while live quorum is unknown. (r.config == nil,
+   the unit-test/envtest guard, still returns nil early at step 1.)
 
-7. Patch first candidate: set safe-to-delete=true. Update status.ConsentGranted=true.
+8. Patch first candidate: set safe-to-delete=true. Update status.ConsentGranted=true.
    One PVC per reconcile.
 ```
+
+> **Design note (fail-closed):** an earlier revision failed *open* on exec/list errors,
+> mirroring the Galera wsrep gate. CodeRabbit (PR #677) flagged this as a High-severity
+> availability risk: a delete-authorization gate must never read "cannot verify" as
+> "safe." RabbitMQ now fails closed. The Galera/mariadb-operator wsrep gate (§1.4 gate 2)
+> still fails open and should be aligned in a follow-up for consistency.
 
 ### PVC watch wiring
 

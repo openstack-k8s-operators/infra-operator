@@ -50,8 +50,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
-	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
@@ -1029,9 +1029,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 
 	// PVC remediation handshake with PodRemediator (optional feature).
 	// Auto-detects PodRemediator via REST mapper; silent no-op if not installed.
-	// Errors do not abort the core reconcile.
+	// Consent is fail-closed: when live quorum cannot be confirmed the check returns an
+	// error. We do not fail the CR, but we requeue so the handshake is retried instead of
+	// stalling until an unrelated watch event fires.
 	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, helper); err != nil {
-		Log.Error(err, "PVC remediation check failed; skipping this cycle, core reconcile continues")
+		Log.Info("PVC remediation consent deferred; requeuing", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
 
 	// Mark ObservedGeneration only after the full reconciliation succeeds.
@@ -1710,16 +1713,20 @@ func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) 
 	}}
 }
 
-// pvcOrdinal extracts the numeric ordinal suffix from a RabbitMQ StatefulSet PVC name.
+// rmqPVCOrdinal extracts the numeric ordinal suffix from a RabbitMQ StatefulSet PVC name.
 // PVC names follow the pattern "persistence-<sts-name>-<ordinal>".
-// Returns 0 on parse failure, which keeps ordering stable.
-func rmqPVCOrdinal(name string) int {
-	parts := strings.Split(name, "-")
-	if len(parts) == 0 {
-		return 0
+// Returns (ordinal, true) when the suffix is a valid integer; (0, false) otherwise so
+// callers can exclude malformed names rather than silently treating them as ordinal 0.
+func rmqPVCOrdinal(name string) (int, bool) {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 || idx == len(name)-1 {
+		return 0, false
 	}
-	n, _ := strconv.Atoi(parts[len(parts)-1])
-	return n
+	n, err := strconv.Atoi(name[idx+1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // rmqFindReadyPod returns the first pod that is Running with all containers Ready.
@@ -1763,7 +1770,10 @@ func (r *Reconciler) rmqClusterSize(ctx context.Context, pod *corev1.Pod) (int, 
 		return 0, err
 	}
 	var stdout bytes.Buffer
-	if err := exec.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &stdout}); err != nil {
+	// Bound the exec so a stalled rabbitmqctl cannot pin a reconcile worker indefinitely.
+	execCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := exec.StreamWithContext(execCtx, remotecommand.StreamOptions{Stdout: &stdout}); err != nil {
 		return 0, err
 	}
 
@@ -1786,7 +1796,15 @@ func (r *Reconciler) rmqClusterSize(ctx context.Context, pod *corev1.Pod) (int, 
 //
 // Safety gates:
 //  1. k8s gate: Status.ReadyCount >= floor(Replicas/2)+1 (already set by the main loop)
-//  2. rabbitmqctl gate (fail-open): live running_nodes count >= quorum via pod exec
+//  2. rabbitmqctl gate (fail-closed): live running_nodes count >= quorum via pod exec.
+//     If the live view cannot be obtained (pod list/exec error), consent is NOT granted
+//     and an error is returned so the reconcile requeues — authorizing a destructive PVC
+//     deletion while live quorum is unknown could collapse the cluster.
+//
+// Concurrency: at most one PVC may hold consent at a time. If any stuck PVC already has
+// safe-to-delete=true, no further consent is granted until that PVC is deleted (drops out
+// of the list) or its remediation annotations are cleared. This prevents PodRemediator
+// from deleting two members before either PVC is gone.
 //
 // Status: instance.Status.PVCRemediation is updated on every call; nil when healthy.
 // Auto-detection: skipped silently if PodRemediator CRD is not installed (REST mapper).
@@ -1837,6 +1855,12 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		}
 		newRemediationStatus[pvc.Name] = entry
 		if !entry.ConsentGranted {
+			// Exclude PVCs whose name has no valid ordinal suffix: they must not be
+			// ordered as ordinal 0 and win consent ahead of well-formed PVCs.
+			if _, ok := rmqPVCOrdinal(pvc.Name); !ok {
+				Log.Info("Skipping stuck PVC with unparseable ordinal suffix", "pvc", pvc.Name)
+				continue
+			}
 			candidates = append(candidates, pvc)
 		}
 	}
@@ -1847,14 +1871,28 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		instance.Status.PVCRemediation = newRemediationStatus
 	}
 
+	// Concurrency guard: never grant a second consent while one is outstanding.
+	// PodRemediator deletes one member at a time; concurrent consent could delete
+	// two members and break quorum.
+	for name, entry := range newRemediationStatus {
+		if entry.ConsentGranted {
+			Log.Info("A stuck PVC already holds safe-to-delete consent; deferring further consent",
+				"pvc", name)
+			return nil
+		}
+	}
+
 	if len(candidates) == 0 {
 		return nil
 	}
 
 	// Sort candidates: lowest ordinal first. No seqno ordering — RabbitMQ Raft
-	// ensures all surviving nodes are equally authoritative.
+	// ensures all surviving nodes are equally authoritative. All candidates have a
+	// valid ordinal (malformed names were excluded above).
 	sort.SliceStable(candidates, func(i, j int) bool {
-		return rmqPVCOrdinal(candidates[i].Name) < rmqPVCOrdinal(candidates[j].Name)
+		oi, _ := rmqPVCOrdinal(candidates[i].Name)
+		oj, _ := rmqPVCOrdinal(candidates[j].Name)
+		return oi < oj
 	})
 
 	// Safety gate 1 (k8s): use ReadyCount already set from sts.Status.ReadyReplicas.
@@ -1866,21 +1904,32 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		return nil
 	}
 
-	// Safety gate 2 (rabbitmqctl, fail-open): verify live cluster view.
+	// Safety gate 2 (rabbitmqctl, fail-closed): verify the live cluster view before
+	// authorizing a destructive PVC deletion. If the live quorum cannot be confirmed
+	// (pod list error, no ready pod to exec into, or rabbitmqctl error) we return an
+	// error so the reconcile requeues WITHOUT granting consent — never fail open.
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(instance.Namespace),
 		client.MatchingLabels{"app.kubernetes.io/name": instance.Name},
-	); err == nil {
-		if readyPod := rmqFindReadyPod(podList.Items); readyPod != nil {
-			if clusterSize, err := r.rmqClusterSize(ctx, readyPod); err != nil {
-				Log.Info("rabbitmqctl gate skipped (fail-open)", "error", err, "pod", readyPod.Name)
-			} else if int32(clusterSize) < quorum {
-				Log.Info("rabbitmqctl running_nodes below quorum; deferring consent",
-					"runningNodes", clusterSize, "quorum", quorum)
-				return nil
-			}
-		}
+	); err != nil {
+		Log.Error(err, "Failed to list RabbitMq pods for live-quorum check; deferring consent")
+		return err
+	}
+	readyPod := rmqFindReadyPod(podList.Items)
+	if readyPod == nil {
+		Log.Info("No ready RabbitMq pod available to verify live quorum; deferring consent")
+		return fmt.Errorf("no ready RabbitMq pod to verify live cluster quorum")
+	}
+	clusterSize, err := r.rmqClusterSize(ctx, readyPod)
+	if err != nil {
+		Log.Error(err, "rabbitmqctl live-quorum check failed; deferring consent", "pod", readyPod.Name)
+		return err
+	}
+	if clusterSize < int(quorum) {
+		Log.Info("rabbitmqctl running_nodes below quorum; deferring consent",
+			"runningNodes", clusterSize, "quorum", quorum)
+		return nil
 	}
 
 	// Grant consent to first candidate. One per reconcile.
