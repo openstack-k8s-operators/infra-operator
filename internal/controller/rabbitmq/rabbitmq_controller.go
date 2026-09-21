@@ -18,10 +18,13 @@ limitations under the License.
 package rabbitmq
 
 import (
-	"bytes"
 	"context"
+	cryptotls "crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,7 +41,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -113,9 +115,6 @@ type Reconciler struct {
 
 // Required to cleanup old rabbitmq-cluster-operator RabbitmqCluster CRs during migration
 // +kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters,verbs=get;list;watch;update;patch;delete
-
-// Required for PodRemediator PVC consent handshake
-// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 
 // Required for direct StatefulSet management
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
@@ -1729,10 +1728,16 @@ func rmqPVCOrdinal(name string) (int, bool) {
 	return n, true
 }
 
-// rmqFindReadyPod returns the first pod that is Running with all containers Ready.
-func rmqFindReadyPod(pods []corev1.Pod) *corev1.Pod {
+// rmqFindReadyPod returns the first pod that is Running with all containers Ready
+// and is NOT scheduled on one of the excluded (stuck/unhealthy) nodes. A pod on a
+// partitioned node can keep reporting Ready for the node-monitor grace period, so
+// querying it would return a stale cluster view; skip such pods when probing.
+func rmqFindReadyPod(pods []corev1.Pod, excludeNodes map[string]bool) *corev1.Pod {
 	for i := range pods {
 		pod := &pods[i]
+		if excludeNodes[pod.Spec.NodeName] {
+			continue
+		}
 		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 {
 			continue
 		}
@@ -1750,40 +1755,107 @@ func rmqFindReadyPod(pods []corev1.Pod) *corev1.Pod {
 	return nil
 }
 
-// rmqClusterSize queries the number of running RabbitMQ nodes via rabbitmqctl exec.
-// Returns the count of running_nodes from rabbitmqctl cluster_status --formatter=json,
-// or an error if exec fails or the output cannot be parsed.
-func (r *Reconciler) rmqClusterSize(ctx context.Context, pod *corev1.Pod) (int, error) {
-	execURL := r.Kclient.CoreV1().RESTClient().Post().
-		Resource("pods").Name(pod.Name).Namespace(pod.Namespace).
-		SubResource("exec").
-		Param("container", "rabbitmq").
-		Param("command", "rabbitmqctl").
-		Param("command", "cluster_status").
-		Param("command", "--formatter=json").
-		Param("stdout", "true").
-		Param("stderr", "false").
-		URL()
+// rmqMgmtCreds holds what is needed to reach the RabbitMQ management HTTP API.
+type rmqMgmtCreds struct {
+	username string
+	password string
+	tls      bool   // management endpoint is TLS (spec.tls.secretName set)
+	caPEM    []byte // CA bundle to verify the endpoint (spec.tls.caSecretName), may be empty
+}
 
-	exec, err := remotecommand.NewSPDYExecutor(r.config, "POST", execURL)
+// rmqLoadMgmtCreds reads the default-user secret (username/password) and, when TLS is
+// enabled, the CA secret used to verify the RabbitMQ management HTTP API endpoint.
+func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (*rmqMgmtCreds, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      fmt.Sprintf("%s-default-user", instance.Name),
+		Namespace: instance.Namespace,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("read default-user secret: %w", err)
+	}
+	user := string(secret.Data["username"])
+	pass := string(secret.Data["password"])
+	if user == "" || pass == "" {
+		return nil, fmt.Errorf("default-user secret %s-default-user missing username/password", instance.Name)
+	}
+	creds := &rmqMgmtCreds{username: user, password: pass}
+	if instance.Spec.TLS.SecretName != "" {
+		creds.tls = true
+		if instance.Spec.TLS.CaSecretName != "" {
+			caSecret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      instance.Spec.TLS.CaSecretName,
+				Namespace: instance.Namespace,
+			}, caSecret); err != nil {
+				return nil, fmt.Errorf("read CA secret %s: %w", instance.Spec.TLS.CaSecretName, err)
+			}
+			creds.caPEM = caSecret.Data["ca.crt"]
+		}
+	}
+	return creds, nil
+}
+
+// rmqRunningNodes queries the RabbitMQ management HTTP API (GET /api/nodes) on the given
+// pod and returns the number of cluster nodes reporting running=true. This replaces the
+// former rabbitmqctl pod-exec probe so the operator needs no pods/exec privilege.
+func (r *Reconciler) rmqRunningNodes(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (int, error) {
+	scheme, port := "http", rabbitmq.ManagementPort
+	transport := &http.Transport{}
+	if creds.tls {
+		scheme, port = "https", rabbitmq.ManagementTLSPort
+		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12}
+		if len(creds.caPEM) > 0 {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(creds.caPEM) {
+				return 0, fmt.Errorf("failed to parse RabbitMQ CA certificate")
+			}
+			tlsCfg.RootCAs = pool
+		} else {
+			// No CA available to verify the endpoint. This is an internal, cluster-local
+			// health probe (not user data), so skip verification rather than fail the
+			// safety gate. Provide spec.tls.caSecretName to enable verification.
+			tlsCfg.InsecureSkipVerify = true
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+
+	// Address the pod by its StatefulSet FQDN so a configured TLS SAN can match.
+	host := fmt.Sprintf("%s.%s-nodes.%s.svc", pod.Name, instance.Name, instance.Namespace)
+	url := fmt.Sprintf("%s://%s:%d/api/nodes?columns=running", scheme, host, port)
+
+	// Bound the request so a stalled endpoint cannot pin a reconcile worker indefinitely.
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
-	var stdout bytes.Buffer
-	// Bound the exec so a stalled rabbitmqctl cannot pin a reconcile worker indefinitely.
-	execCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	if err := exec.StreamWithContext(execCtx, remotecommand.StreamOptions{Stdout: &stdout}); err != nil {
+	req.SetBasicAuth(creds.username, creds.password)
+
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
 		return 0, err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return 0, fmt.Errorf("management API %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
 
-	var result struct {
-		RunningNodes []string `json:"running_nodes"`
+	var nodes []struct {
+		Running bool `json:"running"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return 0, fmt.Errorf("parse rabbitmqctl output: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		return 0, fmt.Errorf("parse management API nodes: %w", err)
 	}
-	return len(result.RunningNodes), nil
+	running := 0
+	for _, n := range nodes {
+		if n.Running {
+			running++
+		}
+	}
+	return running, nil
 }
 
 // CheckForStuckPVCRequiringRemediation evaluates whether the RabbitMq cluster can
@@ -1796,10 +1868,11 @@ func (r *Reconciler) rmqClusterSize(ctx context.Context, pod *corev1.Pod) (int, 
 //
 // Safety gates:
 //  1. k8s gate: Status.ReadyCount >= floor(Replicas/2)+1 (already set by the main loop)
-//  2. rabbitmqctl gate (fail-closed): live running_nodes count >= quorum via pod exec.
-//     If the live view cannot be obtained (pod list/exec error), consent is NOT granted
-//     and an error is returned so the reconcile requeues — authorizing a destructive PVC
-//     deletion while live quorum is unknown could collapse the cluster.
+//  2. management-API gate (fail-closed): live running-nodes count >= quorum via the
+//     RabbitMQ management HTTP API (GET /api/nodes). If the live view cannot be obtained
+//     (secret/pod list/HTTP error), consent is NOT granted and an error is returned so the
+//     reconcile requeues — authorizing a destructive PVC deletion while live quorum is
+//     unknown could collapse the cluster. Uses no pods/exec privilege.
 //
 // Concurrency: at most one PVC may hold consent at a time. If any stuck PVC already has
 // safe-to-delete=true, no further consent is granted until that PVC is deleted (drops out
@@ -1904,10 +1977,23 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		return nil
 	}
 
-	// Safety gate 2 (rabbitmqctl, fail-closed): verify the live cluster view before
-	// authorizing a destructive PVC deletion. If the live quorum cannot be confirmed
-	// (pod list error, no ready pod to exec into, or rabbitmqctl error) we return an
-	// error so the reconcile requeues WITHOUT granting consent — never fail open.
+	// Safety gate 2 (management HTTP API, fail-closed): verify the live cluster view
+	// before authorizing a destructive PVC deletion. If live quorum cannot be confirmed
+	// (secret/pod list error, no ready pod to probe, or HTTP error) we return an error so
+	// the reconcile requeues WITHOUT granting consent — never fail open.
+	creds, err := r.rmqLoadMgmtCreds(ctx, instance)
+	if err != nil {
+		Log.Error(err, "Failed to load RabbitMq management credentials; deferring consent")
+		return err
+	}
+	// Exclude pods on stuck/unhealthy nodes: such a pod can still report Ready during the
+	// node-monitor grace period and would give a stale cluster view.
+	stuckNodes := make(map[string]bool)
+	for _, entry := range newRemediationStatus {
+		if entry.StuckNode != "" {
+			stuckNodes[entry.StuckNode] = true
+		}
+	}
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(instance.Namespace),
@@ -1916,19 +2002,19 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Error(err, "Failed to list RabbitMq pods for live-quorum check; deferring consent")
 		return err
 	}
-	readyPod := rmqFindReadyPod(podList.Items)
+	readyPod := rmqFindReadyPod(podList.Items, stuckNodes)
 	if readyPod == nil {
-		Log.Info("No ready RabbitMq pod available to verify live quorum; deferring consent")
+		Log.Info("No ready RabbitMq pod off the stuck node(s) to verify live quorum; deferring consent")
 		return fmt.Errorf("no ready RabbitMq pod to verify live cluster quorum")
 	}
-	clusterSize, err := r.rmqClusterSize(ctx, readyPod)
+	runningNodes, err := r.rmqRunningNodes(ctx, instance, readyPod, creds)
 	if err != nil {
-		Log.Error(err, "rabbitmqctl live-quorum check failed; deferring consent", "pod", readyPod.Name)
+		Log.Error(err, "RabbitMq management API live-quorum check failed; deferring consent", "pod", readyPod.Name)
 		return err
 	}
-	if clusterSize < int(quorum) {
-		Log.Info("rabbitmqctl running_nodes below quorum; deferring consent",
-			"runningNodes", clusterSize, "quorum", quorum)
+	if runningNodes < int(quorum) {
+		Log.Info("RabbitMq running nodes below quorum; deferring consent",
+			"runningNodes", runningNodes, "quorum", quorum)
 		return nil
 	}
 
