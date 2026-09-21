@@ -18,15 +18,15 @@ package functional_test
 
 import (
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	corev1 "k8s.io/api/core/v1"
 
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 
-	remediation_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
+	remediation_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -329,7 +329,7 @@ var _ = Describe("PodRemediator controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
-It("should clean up both pvc-stuck-on-node and safe-to-delete on CR deletion", func() {
+		It("should clean up both pvc-stuck-on-node and safe-to-delete on CR deletion", func() {
 			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
 
 			pvc := &corev1.PersistentVolumeClaim{}
