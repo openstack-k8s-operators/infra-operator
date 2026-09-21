@@ -91,7 +91,12 @@ var _ = Describe("PodRemediator controller", func() {
 			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
 			prName.Name = pr.GetName()
 			prName.Namespace = pr.GetNamespace()
-			_ = GetPodRemediator(prName)
+			// Wait for the controller to persist its finalizer so deletion
+			// actually exercises reconcileDelete instead of removing the CR outright.
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance.Finalizers).ToNot(BeEmpty())
+			}, timeout, interval).Should(Succeed())
 			th.DeleteInstance(pr)
 		})
 
@@ -342,10 +347,16 @@ var _ = Describe("PodRemediator controller", func() {
 			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
 			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
 
-			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			// Disabled=true keeps the CR inert (no Path B deletion) so the PVC survives
+			// and we can assert that reconcileDelete removes the annotations on CR deletion.
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(true, nil))
 			prName.Name = pr.GetName()
 			prName.Namespace = pr.GetNamespace()
-			_ = GetPodRemediator(prName)
+			// Wait for the finalizer so deleting the CR actually exercises reconcileDelete.
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance.Finalizers).ToNot(BeEmpty())
+			}, timeout, interval).Should(Succeed())
 			th.DeleteInstance(pr)
 
 			Eventually(func(g Gomega) {
