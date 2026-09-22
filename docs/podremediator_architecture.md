@@ -39,7 +39,7 @@ manual PVC deletion until a dedicated mechanism exists.
 3. **Signal-based integration** — the app operator signals readiness via
    `remediation.openstack.org/safe-to-delete=true` on the PVC.
 4. **Alignment with NHC/SNR** — the controller waits for NHC to create a
-   `SelfNodeRemediation` CR before starting any handshake.
+   `SelfNodeRemediation` CR with confirmed fencing before starting any handshake.
 
 ### 1.3 BGP Controller — Reference Pattern
 
@@ -89,7 +89,7 @@ with the following safety layers (all active):
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `namespaces` | `[]string` | (empty = CR namespace only) | Namespaces to watch for local PVCs. |
-| `disabled` | `bool` | `false` | Skip annotation and deletion; monitoring only. |
+| `disabled` | `bool` | `false` | Stop annotation and deletion; clear pending consent. |
 | `consentPollInterval` | `*metav1.Duration` | `"2m"` | Requeue interval for Path C (waiting for consent). Overrides `PODREMEDIATOR_CONSENT_POLL_INTERVAL`. |
 | `periodicPollInterval` | `*metav1.Duration` | `"5m"` | Safety-net requeue for idle states (catches restart-recovery case). Overrides `PODREMEDIATOR_PERIODIC_POLL_INTERVAL`. |
 
@@ -140,93 +140,57 @@ re-created during an active fault.
 
 ```mermaid
 flowchart TD
-    S1{"NHC + SNR\npresent?"} -->|No| E1["InputReady=False\nReady=False\nperiodic requeue"]
-    S1 -->|Yes| S2
-
-    S2{"spec.disabled?"} -->|Yes| E2["Ready=True\n(disabled)\nperiodic requeue"]
-    S2 -->|No| S3
-
-    S3["Build rawUnhealthyNodes\n(NodeReady != True)"]
-    S3 --> S4{"rawUnhealthy\nempty?"}
-
-    S4 -->|Yes| E3["cleanupStaleAnnotations\nReady=True\nperiodic requeue"]
-    S4 -->|No| S5
-
-    S5["Build snrGatedNodes\n(rawUnhealthy ∩ activeSNR CRs)"]
-    S5 --> S6["Per-namespace PVC scan"]
-
-    S6 --> PA
-    S6 --> PB
-    S6 --> PC
-    S6 --> PD
-
-    PA["Path A\nNode recovered\n→ remove both annotations"]
-    PB["Path B\nConsent granted\n→ force-delete pod\n→ delete PVC"]
-    PC["Path C\nWaiting for consent\n→ count++\n→ requeue in consentPoll"]
-    PD["Path D\nNew fault (SNR-gated)\n→ annotate pvc-stuck-on-node"]
-
-    PA & PB & PC & PD --> S7{"hadError?"}
-    S7 -->|Yes| E4["Ready=False\nrequeue (error)"]
-    S7 -->|No| S8{"waitingForConsent\n> 0?"}
-    S8 -->|Yes| E5["Ready=True\nN PVCs waiting\nrequeue in consentPoll"]
-    S8 -->|No| E6["Ready=True\nrequeue in periodicPoll"]
-
-    style PA fill:#e8f5e9,stroke:#388e3c
-    style PB fill:#fce4ec,stroke:#c62828
-    style PC fill:#fff3e0,stroke:#f57c00
-    style PD fill:#e3f2fd,stroke:#1565c0
-    style E1 fill:#ffebee,stroke:#b71c1c
-    style E4 fill:#ffebee,stroke:#b71c1c
+    V["Validate watched namespaces"] --> D{"Disabled?"}
+    D -->|Yes| C["Clear pending annotations and consent"]
+    C --> N{"NHC + SNR configured?"}
+    D -->|No| N
+    N -->|No| E["Ready=False; periodic retry"]
+    N -->|Yes| M{"Disabled?"}
+    M -->|Yes| I["Ready=True; periodic retry"]
+    M -->|No| S["Read nodes and confirmed SNR phases; scan watched PVCs"]
+    S --> A["Path A: recovered node; clear both annotations"]
+    S --> B["Path B: fencing + consent + exclusive PV locality; delete pod and PVC"]
+    S --> W["Path C: wait for fencing or workload consent"]
+    S --> P["Path D: fenced unhealthy node; start fresh handshake"]
 ```
 
-**Step 1 — NHC/SNR check**  
-Dynamic client lists `nodehealthchecks` and `selfnoderemediationtemplates`. Missing or
-empty → `InputReady=False`, `Ready=False`; periodic requeue.
+Namespace entries must be valid, non-empty Kubernetes namespace names. An empty
+list defaults to the CR's own namespace; an empty string is rejected at admission
+and by the controller before any PVC list, including during finalizer cleanup.
 
-**Step 2 — Disabled check**  
-`spec.disabled=true` → `Ready=True`; periodic requeue.
+Disabled mode cancels all pending handshakes in the watched namespaces, even when
+NHC/SNR dependencies are unavailable. Cleanup failures return an error and retry.
+Re-enabling starts a fresh handshake and requires new workload consent.
 
-**Step 3 — Build rawUnhealthyNodes**  
-List all Nodes. A node is unhealthy when NodeReady condition status is not `True`
-(covers `False` and `Unknown`). A node with **no NodeReady condition at all** (e.g. just
-joined the cluster) is treated as **healthy** (returns `false`). This set is used for
-Paths A/B/C (in-flight management — not disrupted by SNR CR expiry after fencing).
+The controller lists Nodes and active `SelfNodeRemediation` objects. Only
+`status.phase: Reboot-Completed` or `Fencing-Completed` confirms fencing. SNR sets
+`Reboot-Completed` after its safe reboot deadline and before removing workloads;
+`Fencing-Completed` follows that removal. A missing phase, unknown phase, deleting
+SNR, or missing SNR never authorizes deletion. Merely observing an elapsed
+`timeAssumedRebooted` is insufficient. See the
+[SNR controller](https://github.com/medik8s/self-node-remediation/blob/main/internal/controller/selfnoderemediation_controller.go).
 
-**Step 4 — All nodes healthy**  
-`rawUnhealthyNodes` empty → `cleanupStaleAnnotations` (removes both annotations from any
-PVC that still carries them), `Ready=True`; periodic requeue.
+Every reconcile scans existing handshakes, including when all remaining Nodes are
+healthy. A missing Node does not imply recovery.
 
-**Step 5 — Build snrGatedNodes**  
-`getNodesWithActiveSNR`: list `selfnoderemediations`, extract node name from annotation
-`remediation.medik8s.io/node-name` (label fallback; logs and skips if neither present).
-If the list call itself **fails** (API error), returns a wrapped error causing an
-immediate error-requeue with no status update. Intersection of result with
-`rawUnhealthyNodes` = `snrGatedNodes`. Nodes without SNR are logged and excluded from
-Path D only. When `snrGatedNodes` is empty (all unhealthy nodes are pre-NHC or
-post-fencing), **no early exit** — the PVC loop still runs so Paths A/B/C can complete
-in-flight handshakes.
+- **Path A — node recovered:** when the annotated node exists and is healthy,
+  remove both annotations so the next fault requires fresh consent.
+- **Path B — consent granted:** require confirmed fencing, `safe-to-delete=true`,
+  and a bound local PV exclusively pinned to the annotated node. Force-delete
+  pods referencing the PVC on that node (or not yet scheduled), then delete the
+  PVC. Existing handshakes can complete after the Node object disappears, provided
+  the SNR still supplies fencing confirmation.
+- **Path C — waiting:** retain the handshake while fencing or consent is missing.
+  If an SNR expires or is removed while its node is still unhealthy, deletion
+  pauses until fencing can be confirmed again. PVC annotation events trigger
+  reconciliation; polling also detects SNR phase changes.
+- **Path D — new fault:** only annotate a local PVC after fencing is confirmed for
+  its unhealthy node. Strip pre-existing consent in the same patch.
 
-**Step 6 — Per-namespace PVC scan**
-
-- **Path A — node recovered**: PVC has `pvc-stuck-on-node` but named node is no longer
-  in `rawUnhealthyNodes`. Remove both annotations. App operator must re-consent next fault.
-
-- **Path B — consent granted**: PVC has `pvc-stuck-on-node`, node still in
-  `rawUnhealthyNodes`, `safe-to-delete=true`. Call `deletePodsForPVC`
-  (force-delete, gracePeriod=0, **regardless of pod phase** — even `Terminating` or
-  `Pending` pods referencing the PVC are force-deleted to release the
-  `pvc-protection` finalizer) then delete PVC.
-
-- **Path C — waiting**: PVC has `pvc-stuck-on-node`, node still unhealthy, no consent.
-  Increment `waitingForConsent`; PVC watch (`AnnotationChangedPredicate`) triggers on
-  app-operator response; periodic requeue provides liveness if event is missed.
-
-- **Path D — new fault (SNR-gated)**: PVC unbound or no `pvc-stuck-on-node`, bound PV
-  passes `isLocalPV`, PV node is in `snrGatedNodes`. Annotate PVC with `pvc-stuck-on-node`.
-
-**Step 7 — Status**  
-`hadError=true` → `Ready=False`, requeue (error). `waitingForConsent>0` → `Ready=True`
-with count, requeue after `consentPoll`. Otherwise → `Ready=True`, requeue after `periodicPoll`.
+Annotation patches use optimistic concurrency so a concurrent consent change
+cannot be silently overwritten. Scan or cleanup failures return an error;
+otherwise pending handshakes use `consentPollInterval` and idle scans use
+`periodicPollInterval`. Polling continues while waiting for SNR status.
 
 ### 3.4 Poll Interval Resolution
 
@@ -239,11 +203,14 @@ effectiveInterval(spec.X, r.X, DefaultX):
 
 ### 3.5 Local PV Detection
 
-**`isLocalPV(pv)`** returns `true` when `spec.nodeAffinity.Required` is set and:
-- `spec.local` is non-nil (Kubernetes local volume), **or**
-- `spec.csi` or `spec.hostPath` is set **and** `pvHasLocalTopologyKey(pv)` is true.
+**`isLocalPV(pv)`** accepts local, CSI, and HostPath volumes only when their
+required node affinity exclusively identifies one node. Every OR selector term
+must pin the same node using a known topology key with `operator: In` and exactly
+one non-empty value. `NotIn`, multiple values, conflicting keys, and unpinned or
+other-node alternatives are rejected. Additional AND constraints may narrow the
+selection but cannot broaden it.
 
-**`pvHasLocalTopologyKey(pv)`** checks required node affinity for a known key:
+**`getLocalPVNodeName(pv)`** applies those checks using these known keys:
 
 | Key | Driver |
 |-----|--------|
@@ -253,9 +220,9 @@ effectiveInterval(spec.X, r.X, DefaultX):
 
 Zone-affinity volumes (Cinder: `topology.cinder.csi.openstack.org/zone`) are excluded.
 
-**`getLocalPVNodeName(pv)`** scans the same keys and returns the first matching value.
-Returns `""` and logs an `Info` message (not Error) if no key matches — PVC is silently
-skipped. Add missing keys to `localPVNodeTopologyKeys` to support new local CSI drivers.
+If exclusive node pinning cannot be established, `getLocalPVNodeName` returns `""`
+and remediation is skipped. Add supported keys to `localPVNodeTopologyKeys` when
+integrating another local CSI driver.
 
 ### 3.6 Watches
 
@@ -329,16 +296,13 @@ and deletion.
 
 ## 6. Design Risks — Accepted Phase 1 Trade-offs
 
-### 6.1 SNR timing gap (residual after F8)
+### 6.1 SNR fencing compatibility
 
-Path D annotates PVCs after NHC creates an SNR CR but before SNR confirms fencing is
-complete. Annotation is benign; actual deletion (Path B) requires explicit app-operator
-consent. An app operator that grants consent before fencing is confirmed could trigger
-premature deletion — lower risk for local storage since the node is rebooted or isolated
-shortly after SNR fires.
-
-**Phase 2:** Inspect `SelfNodeRemediation.status.phase` to confirm fencing succeeded
-before annotating PVCs.
+Annotation and deletion both require an active SNR in `Reboot-Completed` or
+`Fencing-Completed`. Unknown status formats fail closed. Removing the SNR before
+an in-flight handshake completes pauses deletion; existing annotations alone do
+not prove fencing. Validate the installed SNR version and lifecycle in lab E2E
+before rollout.
 
 ### 6.2 New local CSI drivers not in the topology key allowlist
 
@@ -390,7 +354,7 @@ production is:
 | P1 | Fix F12 — annotation-patch failure requeue | ✅ Done |
 | P2 | Kubernetes Events on annotation/deletion | Open |
 | P2 | `status.lastRemediation` / `status.remediatedPVCs` on PodRemediator | Open |
-| P3 | SNR phase check (wait for fencing complete) | Open |
+| P0 | SNR phase check before annotation and deletion | ✅ Done |
 
 ### For Galera (in addition to all RabbitMQ items)
 
@@ -406,7 +370,7 @@ production is:
 
 ## 7b. RabbitMQ consent implementation design
 
-> **Status: ✅ Implemented** — `rabbitmqs.rabbitmq.openstack.org` consent is done in this PR.
+> **Scope:** `rabbitmqs.rabbitmq.openstack.org` consent is implemented in the stacked PR #684, outside this foundation PR.
 > The upstream `rabbitmqclusters.rabbitmq.com` (rabbitmq-cluster-operator) is out of scope for Phase 1.
 
 The RabbitMQ operator is **in this repo** (`infra-operator`). No external operator needed.

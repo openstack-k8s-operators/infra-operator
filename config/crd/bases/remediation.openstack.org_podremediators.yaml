@@ -63,13 +63,17 @@ spec:
               disabled:
                 default: false
                 description: |-
-                  Disabled allows disabling automated PVC deletion (monitoring only), matching spec.disabled in Instance HA.
+                  Disabled stops annotation and deletion and clears pending remediation consent.
                   Default false: applying the CR enables PVC remediation when NHC/SNR are present; set disabled to true to turn it off.
                 type: boolean
               namespaces:
-                description: Namespaces to watch for pods with local PVCs. Empty means
-                  the CR's namespace only.
+                description: |-
+                  Namespaces to watch for pods with local PVCs. An empty list means the CR's namespace only.
+                  Each entry must be a valid, non-empty Kubernetes namespace name.
                 items:
+                  maxLength: 63
+                  minLength: 1
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                   type: string
                 type: array
               periodicPollInterval:

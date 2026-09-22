@@ -1186,7 +1186,9 @@ func CreateSNRTemplate(ns string) {
 	})
 }
 
-func CreateSelfNodeRemediation(ns string, nodeName string) {
+// CreateSelfNodeRemediation defaults to a fenced node; pass an explicit phase
+// (including an empty string) to exercise an incomplete remediation.
+func CreateSelfNodeRemediation(ns string, nodeName string, phases ...string) *unstructured.Unstructured {
 	snr := &unstructured.Unstructured{}
 	snr.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation",
@@ -1196,7 +1198,15 @@ func CreateSelfNodeRemediation(ns string, nodeName string) {
 	snr.SetAnnotations(map[string]string{
 		"remediation.medik8s.io/node-name": nodeName,
 	})
+	phase := "Fencing-Completed"
+	if len(phases) > 0 {
+		phase = phases[0]
+	}
+	if phase != "" {
+		Expect(unstructured.SetNestedField(snr.Object, phase, "status", "phase")).To(Succeed())
+	}
 	Expect(k8sClient.Create(ctx, snr)).To(Succeed())
+	return snr
 }
 
 func CreateNodeWithReadyCondition(name string, ready bool) *corev1.Node {

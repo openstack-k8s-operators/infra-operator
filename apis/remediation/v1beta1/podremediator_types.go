@@ -24,12 +24,16 @@ import (
 // PodRemediatorSpec defines the desired state of PodRemediator
 type PodRemediatorSpec struct {
 	// +kubebuilder:validation:Optional
-	// Namespaces to watch for pods with local PVCs. Empty means the CR's namespace only.
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// Namespaces to watch for pods with local PVCs. An empty list means the CR's namespace only.
+	// Each entry must be a valid, non-empty Kubernetes namespace name.
 	Namespaces []string `json:"namespaces,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
-	// Disabled allows disabling automated PVC deletion (monitoring only), matching spec.disabled in Instance HA.
+	// Disabled stops annotation and deletion and clears pending remediation consent.
 	// Default false: applying the CR enables PVC remediation when NHC/SNR are present; set disabled to true to turn it off.
 	Disabled bool `json:"disabled,omitempty"`
 

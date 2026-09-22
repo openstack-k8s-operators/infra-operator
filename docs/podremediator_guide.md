@@ -24,7 +24,7 @@ flowchart TD
     B["NHC detects failure\n→ creates SelfNodeRemediation CR"]
     B --> C
 
-    C["PodRemediator\ndetects unhealthy node + active SNR"]
+    C["PodRemediator\ndetects unhealthy node + confirmed SNR fencing"]
     C -->|Phase 1| D
 
     D["Annotates stuck PVC\npvc-stuck-on-node=&lt;node&gt;"]
@@ -66,15 +66,20 @@ next independent fault.
 ### Dependency on NHC and SNR
 
 PodRemediator **requires** Node Health Check (NHC) and Self Node Remediation (SNR):
-- It will not annotate PVCs until NHC has created a `SelfNodeRemediation` CR for
-  the unhealthy node. This prevents action during transient NotReady windows (e.g.
-  kubelet restart, brief network partition).
+- Annotation and deletion require an active `SelfNodeRemediation` CR for the node
+  in phase `Reboot-Completed` or `Fencing-Completed`. An SNR object alone does not
+  prove fencing. Missing, deleting, or unknown-status SNRs block deletion, even
+  when the workload operator has consented.
+- If the failed Node object disappears, existing handshakes can still complete
+  with confirmed fencing and consent. If the SNR disappears first, they wait.
 - Without NHC/SNR installed the CR stays `Ready=False` with reason `NHC/SNRNotFound`.
 
 ### Local PV Detection
 
 PodRemediator only acts on **node-local** PVCs — volumes whose PV is pinned to a
-specific node via topology affinity. Supported storage types:
+specific node via topology affinity. Every affinity alternative must select the
+same node with a singleton `In` expression on a supported key. Ambiguous or
+multi-node affinity is skipped. Supported storage types:
 
 | Storage | Topology key |
 |---------|-------------|
@@ -257,7 +262,7 @@ All outputs should show healthy / at-least-one-row results before running an E2E
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `namespaces` | `[]string` | (empty = CR namespace only) | Namespaces to watch for local PVCs. |
-| `disabled` | `bool` | `false` | Disables annotation and deletion; controller still monitors. Set to `true` for maintenance windows. |
+| `disabled` | `bool` | `false` | Stops annotation and deletion and clears pending consent. Set to `true` for maintenance windows. |
 | `consentPollInterval` | `metav1.Duration` | `"2m"` | How often to retry Path C (annotated PVC waiting for app-operator consent). Lower = faster response, higher = less API load. |
 | `periodicPollInterval` | `metav1.Duration` | `"5m"` | Safety-net requeue for all idle states. Ensures the controller catches pre-existing unhealthy nodes after an operator pod restart (when no node-transition event fires). |
 
@@ -318,7 +323,10 @@ spec:
 ```
 
 Use during maintenance windows. The controller still requires NHC/SNR and reports
-`Ready=True` with a disabled message. Re-enable by setting `disabled: false`.
+`Ready=True` with a disabled message when those dependencies are available.
+Disabling clears both remediation annotations from watched PVCs, including
+consent, even when NHC/SNR are unavailable. Cleanup failures retry. Re-enable by
+setting `disabled: false`; the application operator must grant fresh consent.
 
 ### Watch multiple namespaces
 
@@ -329,6 +337,9 @@ spec:
     - openstack-cell1
     - my-app
 ```
+
+Each namespace entry must be a valid, non-empty Kubernetes namespace name.
+An empty list watches only the CR's namespace; `namespaces: [""]` is rejected.
 
 ### What the application operator must do
 

@@ -18,7 +18,7 @@ package v1beta1
 
 const (
 	// PVCStuckOnNodeAnnotation is set by PodRemediator on a PVC when the PVC
-	// is bound to a local PV on an unhealthy node (NotReady + active SNR).
+	// is bound to a local PV on an unhealthy node after SNR confirms fencing.
 	// Value is the node name. This signals the application operator to evaluate
 	// whether it is safe to delete the PVC.
 	//
@@ -28,7 +28,7 @@ const (
 
 	// SafeToDeleteAnnotation is set by the application operator (e.g. mariadb-operator)
 	// on a PVC to authorize PodRemediator to delete it. Consent is per fault-event:
-	// PodRemediator removes this annotation on node recovery so the app operator must
-	// re-evaluate for each new fault.
+	// PodRemediator removes this annotation on node recovery or disable so the app operator must
+	// re-evaluate for each new fault. Deletion also requires current SNR fencing confirmation.
 	SafeToDeleteAnnotation = "remediation.openstack.org/safe-to-delete"
 )

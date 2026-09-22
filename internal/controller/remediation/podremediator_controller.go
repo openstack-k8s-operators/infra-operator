@@ -26,8 +26,10 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -260,10 +262,36 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling PodRemediator delete")
 
+	namespaces, err := watchedNamespaces(instance)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.cleanupAnnotations(ctx, namespaces); err != nil {
+		return ctrl.Result{}, err
+	}
+	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
+	return ctrl.Result{}, nil
+}
+
+// watchedNamespaces rejects invalid entries before any list operation.
+// InNamespace("") means all namespaces, never the CR's namespace.
+func watchedNamespaces(instance *remediationv1.PodRemediator) ([]string, error) {
 	namespaces := instance.Spec.Namespaces
 	if len(namespaces) == 0 {
 		namespaces = []string{instance.Namespace}
 	}
+	for _, ns := range namespaces {
+		if problems := validation.IsDNS1123Label(ns); len(problems) != 0 {
+			return nil, fmt.Errorf("invalid watched namespace %q: %v", ns, problems)
+		}
+	}
+	return namespaces, nil
+}
+
+// cleanupAnnotations cancels pending handshakes on disable or CR deletion.
+// Failures must be retried so consent cannot survive a maintenance window.
+func (r *PodRemediatorReconciler) cleanupAnnotations(ctx context.Context, namespaces []string) error {
+	Log := r.GetLogger(ctx)
 	cleanupFailed := false
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
@@ -286,18 +314,16 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 			oldPVC := pvc.DeepCopy()
 			delete(pvc.Annotations, remediationv1.PVCStuckOnNodeAnnotation)
 			delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
-			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "remove remediation annotations during CR delete", "pvc", client.ObjectKeyFromObject(pvc))
+			if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil && !k8s_errors.IsNotFound(err) {
+				Log.Error(err, "remove remediation annotations", "pvc", client.ObjectKeyFromObject(pvc))
 				cleanupFailed = true
 			}
 		}
 	}
 	if cleanupFailed {
-		return ctrl.Result{}, fmt.Errorf("annotation cleanup had errors during CR delete; requeueing to retry before removing finalizer")
+		return fmt.Errorf("annotation cleanup had errors; requeueing to retry")
 	}
-
-	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // checkNHCAndSNR returns true if at least one NodeHealthCheck and one SelfNodeRemediationTemplate exist
@@ -326,11 +352,11 @@ func (r *PodRemediatorReconciler) checkNHCAndSNR(ctx context.Context) (bool, err
 	return true, nil
 }
 
-// getNodesWithActiveSNR returns the set of node names for which NHC has already created a
-// SelfNodeRemediation CR (meaning NHC has committed to remediating those nodes).
-// Using this set prevents PodRemediator from acting during the window between a node going
-// NotReady and NHC deciding to remediate it (transient kubelet restarts, brief partitions).
-func (r *PodRemediatorReconciler) getNodesWithActiveSNR(ctx context.Context, Log logr.Logger) (map[string]bool, error) {
+// getNodesWithFencedSNR returns only nodes whose active SNR has crossed the reboot
+// safety barrier. CR existence (or an elapsed timestamp alone) is not fencing proof.
+// In medik8s/self-node-remediation, waitForNodeRebooted advances to Reboot-Completed
+// before SNR removes workloads; Fencing-Completed follows that cleanup.
+func (r *PodRemediatorReconciler) getNodesWithFencedSNR(ctx context.Context, Log logr.Logger) (map[string]bool, error) {
 	snrList, err := r.DynamicClient.Resource(gvrSelfNodeRemediation).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if meta.IsNoMatchError(err) || k8s_errors.IsNotFound(err) {
@@ -340,6 +366,11 @@ func (r *PodRemediatorReconciler) getNodesWithActiveSNR(ctx context.Context, Log
 	}
 	nodes := make(map[string]bool, len(snrList.Items))
 	for _, snr := range snrList.Items {
+		phase, _, err := unstructured.NestedString(snr.Object, "status", "phase")
+		if err != nil || snr.GetDeletionTimestamp() != nil ||
+			(phase != "Reboot-Completed" && phase != "Fencing-Completed") {
+			continue
+		}
 		// NHC names the SNR CR with a random suffix (e.g. worker-0-6lwkb); the
 		// authoritative node name is in the medik8s annotation.
 		if nodeName, ok := snr.GetAnnotations()["remediation.medik8s.io/node-name"]; ok && nodeName != "" {
@@ -389,48 +420,6 @@ func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *cor
 	return nil
 }
 
-// cleanupStaleAnnotations removes pvc-stuck-on-node and safe-to-delete from PVCs whose
-// stuck node has truly recovered (exists and is Ready). Only called when rawUnhealthyNodes is
-// empty (all nodes healthy); in all other cases stale-annotation cleanup is handled by Path A
-// in the main PVC loop, which also uses rawUnhealthyNodes as the recovery gate.
-// A PVC stuck on a node that no longer exists (deleted/scaled-out) is left annotated rather
-// than treated as recovered, so an in-flight handshake is not silently aborted.
-func (r *PodRemediatorReconciler) cleanupStaleAnnotations(ctx context.Context, namespaces []string, allNodeNames map[string]bool, Log logr.Logger) {
-	for _, ns := range namespaces {
-		pvcList := &corev1.PersistentVolumeClaimList{}
-		if err := r.List(ctx, pvcList, client.InNamespace(ns)); err != nil {
-			Log.Error(err, "list PVCs for stale-annotation cleanup", "namespace", ns)
-			continue
-		}
-		for i := range pvcList.Items {
-			pvc := &pvcList.Items[i]
-			if pvc.Annotations == nil {
-				continue
-			}
-			stuckOnNode := pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation]
-			// Also scrub an orphaned safe-to-delete (present without pvc-stuck-on-node):
-			// stale consent must never survive to be honored against a future fault.
-			if stuckOnNode == "" && pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "" {
-				continue
-			}
-			// Keep annotations if the stuck node object no longer exists: do not fabricate a
-			// recovery for a node that will never return.
-			if stuckOnNode != "" && !allNodeNames[stuckOnNode] {
-				Log.Info("Stuck node no longer exists; keeping annotations", "pvc", client.ObjectKeyFromObject(pvc), "node", stuckOnNode)
-				continue
-			}
-			oldPVC := pvc.DeepCopy()
-			delete(pvc.Annotations, remediationv1.PVCStuckOnNodeAnnotation)
-			delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
-			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
-				Log.Error(err, "remove stale remediation annotations (all nodes healthy)", "pvc", client.ObjectKeyFromObject(pvc), "node", stuckOnNode)
-			} else {
-				Log.Info("All nodes healthy; removed stale annotations", "pvc", client.ObjectKeyFromObject(pvc), "node", stuckOnNode)
-			}
-		}
-	}
-}
-
 // effectiveInterval returns the CR-spec value if set, otherwise the reconciler
 // field (from env var), otherwise the hardcoded default.
 func effectiveInterval(specVal *metav1.Duration, reconcilerVal time.Duration, defaultVal time.Duration) time.Duration {
@@ -449,6 +438,22 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	// Resolve effective poll intervals: CR spec > env-var reconciler field > hardcoded default.
 	consentPoll := effectiveInterval(instance.Spec.ConsentPollInterval, r.ConsentPollInterval, DefaultConsentPollInterval)
 	periodicPoll := effectiveInterval(instance.Spec.PeriodicPollInterval, r.PeriodicPollInterval, DefaultPeriodicPollInterval)
+
+	namespaces, err := watchedNamespaces(instance)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, condition.ErrorReason, condition.SeverityError, "%s", err))
+		return ctrl.Result{}, err
+	}
+	// Cancel consent even if dependencies disappear during maintenance. This also
+	// covers recovery and a subsequent failure while remediation is disabled.
+	if instance.Spec.Disabled {
+		if err := r.cleanupAnnotations(ctx, namespaces); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning, "%s", err))
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Validate intervals: reject zero or negative values to prevent tight requeue loops.
 	const minInterval = time.Second
@@ -487,16 +492,8 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrl.Result{RequeueAfter: periodicPoll}, nil
 	}
 
-	// 2) Determine namespaces to watch (CR namespace if not specified)
-	namespaces := instance.Spec.Namespaces
-	if len(namespaces) == 0 {
-		namespaces = []string{instance.Namespace}
-	}
-
-	// 3) Build rawUnhealthyNodes: all nodes currently NotReady, regardless of SNR state.
-	// This is the authoritative set for Path A (cleanup) and Path B (deletion): a PVC
-	// annotation should only be removed when the node is truly back to Ready, not just
-	// because its SNR CR expired while the node is still down.
+	// A missing node is not recovered, but its pending handshake must still run
+	// when all remaining nodes are healthy.
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list nodes: %w", err)
@@ -511,44 +508,22 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		}
 	}
 
-	if len(rawUnhealthyNodes) == 0 {
-		// All nodes are truly healthy: clean up any stale annotations from previous fault cycles.
-		r.cleanupStaleAnnotations(ctx, namespaces, allNodeNames, Log)
-		instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "No unhealthy nodes; monitoring")
-		// Periodic safety-net: requeue so a restarted operator re-evaluates node health
-		// rather than waiting for a node transition event that may never arrive.
-		return ctrl.Result{RequeueAfter: periodicPoll}, nil
-	}
-
-	// 4) Build snrGatedNodes: subset of rawUnhealthyNodes that have an active SNR CR.
-	// Used exclusively for Path D (new annotations): only annotate PVCs when NHC has
-	// committed to remediation. Nodes in rawUnhealthyNodes but not snrGatedNodes are
-	// either transient (pre-NHC window) or post-fencing; either way, no new annotations
-	// should be started but existing in-flight handshakes (Paths A/B/C) must continue.
-	snrNodes, err := r.getNodesWithActiveSNR(ctx, Log)
+	// Require live fencing evidence for annotation AND deletion. Missing/expired
+	// SNRs leave handshakes pending; annotations cannot stand in for fencing proof.
+	snrNodes, err := r.getNodesWithFencedSNR(ctx, Log)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("list SelfNodeRemediation CRs: %w", err)
 	}
-	snrGatedNodes := make(map[string]bool)
-	for nodeName := range rawUnhealthyNodes {
-		if snrNodes[nodeName] {
-			snrGatedNodes[nodeName] = true
-		} else {
-			Log.Info("Unhealthy node has no SelfNodeRemediation CR yet; new annotations paused", "node", nodeName)
-		}
-	}
-
 	unhealthyNames := make([]string, 0, len(rawUnhealthyNodes))
 	for name := range rawUnhealthyNodes {
 		unhealthyNames = append(unhealthyNames, name)
 	}
-	Log.Info("Unhealthy nodes detected, scanning PVCs", "nodes", unhealthyNames, "snrActive", len(snrGatedNodes))
+	Log.V(1).Info("Scanning PVCs", "unhealthyNodes", unhealthyNames, "fencedNodes", len(snrNodes))
 
-	// 5) Scan namespaces: drive in-flight handshakes (Paths A/B/C) and detect new stuck
-	// PVCs (Path D, SNR-gated). Paths A/B/C use rawUnhealthyNodes so they are not
-	// disrupted by SNR lifecycle changes (expiry after fencing, etc.).
+	// Always scan existing handshakes, including PVCs whose Node was removed.
 	hadError := false
 	waitingForConsent := 0
+	waitingForFencing := 0
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
 		if err := r.List(ctx, pvcList, client.InNamespace(ns)); err != nil {
@@ -577,8 +552,9 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					oldPVC := pvc.DeepCopy()
 					delete(pvc.Annotations, remediationv1.PVCStuckOnNodeAnnotation)
 					delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
-					if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil && !k8s_errors.IsNotFound(err) {
+					if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil && !k8s_errors.IsNotFound(err) {
 						Log.Error(err, "remove remediation annotations (node recovered)", "pvc", pvcKey, "node", stuckOnNode)
+						hadError = true
 					} else {
 						Log.Info("Node recovered; removed remediation annotations", "pvc", pvcKey, "node", stuckOnNode)
 					}
@@ -588,11 +564,12 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					Log.Info("Stuck node no longer exists; keeping annotations instead of treating as recovery", "pvc", pvcKey, "node", stuckOnNode)
 				}
 
-				// Path B: node still unhealthy and app operator consented — delete PVC.
-				// Uses rawUnhealthyNodes (not snrGatedNodes) so deletion proceeds even if the
-				// SNR CR expired post-fencing while the node is still NotReady.
-				// The app operator implicitly accepts pod force-deletion by granting safe-to-delete
-				// (see remediationv1.PVCStuckOnNodeAnnotation contract comment above).
+				// Path B requires both current fencing evidence and workload consent,
+				// even when the node object no longer exists.
+				if !snrNodes[stuckOnNode] {
+					waitingForFencing++
+					continue
+				}
 				if pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" {
 					// Re-validate provenance on the DELETING path: the safe-to-delete
 					// annotation alone is not trusted. The PVC's bound PV must still be
@@ -643,9 +620,16 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				continue
 			}
 
-			// Path D: new local PVC on a node under active SNR remediation — start the handshake.
-			// Gated on snrGatedNodes (not rawUnhealthyNodes): we only annotate when NHC has
-			// committed, to avoid acting during transient NotReady windows.
+			if len(rawUnhealthyNodes) == 0 && pvc.Annotations[remediationv1.SafeToDeleteAnnotation] != "" {
+				oldPVC := pvc.DeepCopy()
+				delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
+				if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil && !k8s_errors.IsNotFound(err) {
+					hadError = true
+					Log.Error(err, "remove orphaned consent", "pvc", pvcKey)
+				}
+			}
+
+			// Path D: start a new handshake only after SNR confirms fencing.
 			if pvc.Spec.VolumeName == "" {
 				continue
 			}
@@ -665,7 +649,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			if nodeName == "" {
 				continue
 			}
-			if !snrGatedNodes[nodeName] {
+			if !snrNodes[nodeName] || !rawUnhealthyNodes[nodeName] {
 				continue
 			}
 			oldPVC := pvc.DeepCopy()
@@ -678,7 +662,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			// safe-to-delete left over from a previous fault (or forged) must never be honored
 			// as consent for this newly-started handshake.
 			delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
-			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil {
+			if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil {
 				Log.Error(err, "annotate PVC with pvc-stuck-on-node", "pvc", pvcKey)
 				hadError = true
 				continue
@@ -692,6 +676,12 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning,
 			"Partial scan: errors listing PVCs or fetching PVs; will retry"))
 		return ctrl.Result{}, fmt.Errorf("partial scan errors during PVC remediation; requeueing")
+	}
+
+	if waitingForFencing > 0 {
+		instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
+			"%d PVC(s) waiting for SNR fencing confirmation; %d waiting for consent", waitingForFencing, waitingForConsent)
+		return ctrl.Result{RequeueAfter: consentPoll}, nil
 	}
 
 	if waitingForConsent > 0 {
@@ -715,38 +705,8 @@ func isNodeUnhealthy(node *corev1.Node) bool {
 }
 
 func isLocalPV(pv *corev1.PersistentVolume) bool {
-	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
-		return false
-	}
-	if pv.Spec.Local != nil {
-		return true
-	}
-	// For CSI and HostPath, require a known node-pinning topology key.
-	// Zone-affinity CSI volumes (e.g. Cinder: topology.cinder.csi.openstack.org/zone)
-	// are reattachable across nodes and must not be treated as node-local.
-	if pv.Spec.CSI != nil || pv.Spec.HostPath != nil {
-		return pvHasLocalTopologyKey(pv)
-	}
-	return false
-}
-
-// pvHasLocalTopologyKey returns true when the PV's required node affinity contains at least one
-// expression keyed by a known node-pinning topology key (hostname or LVMS/TopoLVM node key).
-// Add new keys to localPVNodeTopologyKeys when supporting additional local CSI drivers.
-func pvHasLocalTopologyKey(pv *corev1.PersistentVolume) bool {
-	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
-		return false
-	}
-	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
-		for _, expr := range term.MatchExpressions {
-			for _, key := range localPVNodeTopologyKeys {
-				if expr.Key == key {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return (pv.Spec.Local != nil || pv.Spec.CSI != nil || pv.Spec.HostPath != nil) &&
+		getLocalPVNodeName(pv, logr.Discard()) != ""
 }
 
 // Known topology keys that carry the node name for local/CSI volumes (e.g. LVMS/TopoLVM).
@@ -757,29 +717,35 @@ var localPVNodeTopologyKeys = []string{
 	"topology.lvms.io/node",    // LVMS variant
 }
 
-// getLocalPVNodeName returns the node name from the PV's required node affinity using only
-// the known topology keys from localPVNodeTopologyKeys. Returns "" if not found.
-//
-// Note: isLocalPV returns true for spec.local PVs without checking the topology key, so a
-// spec.local PV with a non-standard affinity key will return "" here and be silently skipped.
-// In practice spec.local PVs use kubernetes.io/hostname; if you see unexpected skips, add
-// the relevant key to localPVNodeTopologyKeys.
+// getLocalPVNodeName accepts only affinity that exclusively pins every OR term
+// to the same node. Expressions within a term are ANDed. Ambiguous topology
+// expressions fail closed even if another expression could narrow the selection.
 func getLocalPVNodeName(pv *corev1.PersistentVolume, Log logr.Logger) string {
 	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return ""
 	}
+	nodeName := ""
 	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		termNode := ""
 		for _, expr := range term.MatchExpressions {
 			for _, key := range localPVNodeTopologyKeys {
-				if expr.Key == key && len(expr.Values) > 0 {
-					return expr.Values[0]
+				if expr.Key != key {
+					continue
 				}
+				if expr.Operator != corev1.NodeSelectorOpIn || len(expr.Values) != 1 || expr.Values[0] == "" {
+					return ""
+				}
+				if termNode != "" && termNode != expr.Values[0] {
+					return ""
+				}
+				termNode = expr.Values[0]
 			}
 		}
+		if termNode == "" || (nodeName != "" && nodeName != termNode) {
+			Log.V(1).Info("PV is not exclusively pinned to one known node; skipping", "pv", pv.Name)
+			return ""
+		}
+		nodeName = termNode
 	}
-	// No known topology key found. Log a warning so operators can diagnose unexpected skips
-	// and add the missing key to localPVNodeTopologyKeys.
-	Log.Info("PV has no known node-pinning topology key; skipping (add key to localPVNodeTopologyKeys if needed)",
-		"pv", pv.Name, "knownKeys", localPVNodeTopologyKeys)
-	return ""
+	return nodeName
 }
