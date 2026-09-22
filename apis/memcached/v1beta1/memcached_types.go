@@ -75,6 +75,11 @@ type MemcachedSpecCore struct {
 	MaxConn int32 `json:"maxConn"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:default:={"-vv"}
+	// ExtraOptions contains additional command-line options passed to memcached.
+	ExtraOptions []string `json:"extraOptions,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	// TopologyRef to apply the Topology defined by the associated CR referenced
 	// by name
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`

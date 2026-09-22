@@ -62,6 +62,13 @@ spec:
                 description: Maximum number of connections accepted by Memcached
                 format: int32
                 type: integer
+              extraOptions:
+                default:
+                - -vv
+                description: ExtraOptions contains additional command-line options passed to memcached.
+                items:
+                  type: string
+                type: array
               nodeSelector:
                 additionalProperties:
                   type: string

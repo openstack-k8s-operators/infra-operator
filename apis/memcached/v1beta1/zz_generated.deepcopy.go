@@ -152,6 +152,11 @@ func (in *MemcachedSpecCore) DeepCopyInto(out *MemcachedSpecCore) {
 		}
 	}
 	in.TLS.DeepCopyInto(&out.TLS)
+	if in.ExtraOptions != nil {
+		in, out := &in.ExtraOptions, &out.ExtraOptions
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.TopologyRef != nil {
 		in, out := &in.TopologyRef, &out.TopologyRef
 		*out = new(topologyv1beta1.TopoRef)

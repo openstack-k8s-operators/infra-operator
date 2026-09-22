@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
@@ -514,6 +515,7 @@ func (r *Reconciler) generateConfigMaps(
 		"memcachedPort":       memcachedPort,
 		"memcachedCacheSize":  instance.Spec.CacheSize,
 		"memcachedMaxConn":    instance.Spec.MaxConn,
+		"memcachedExtraOptions": strings.Join(instance.Spec.ExtraOptions, " "),
 	}
 
 	cms := []util.Template{

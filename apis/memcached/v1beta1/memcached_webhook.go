@@ -66,7 +66,9 @@ func (spec *MemcachedSpec) Default() {
 
 // Default - common defaults go here (for the OpenStackControlplane which uses this one)
 func (spec *MemcachedSpecCore) Default() {
-	// nothing here
+	if spec.ExtraOptions == nil {
+		spec.ExtraOptions = []string{"-vv"}
+	}
 }
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
