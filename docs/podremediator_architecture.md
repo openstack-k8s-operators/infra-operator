@@ -90,7 +90,7 @@ with the following safety layers (all active):
 |-------|------|---------|-------------|
 | `namespaces` | `[]string` | (empty = CR namespace only) | Namespaces to watch for local PVCs. |
 | `disabled` | `bool` | `false` | Stop annotation and deletion; clear pending consent. |
-| `consentPollInterval` | `*metav1.Duration` | `"2m"` | Requeue interval for Path C (waiting for consent). Overrides `PODREMEDIATOR_CONSENT_POLL_INTERVAL`. |
+| `consentPollInterval` | `*metav1.Duration` | `"2m"` | Fallback requeue interval while waiting for fencing or consent. Overrides `PODREMEDIATOR_CONSENT_POLL_INTERVAL`. |
 | `periodicPollInterval` | `*metav1.Duration` | `"5m"` | Safety-net requeue for idle states (catches restart-recovery case). Overrides `PODREMEDIATOR_PERIODIC_POLL_INTERVAL`. |
 
 ### 2.2 Status Conditions
@@ -183,14 +183,15 @@ healthy. A missing Node does not imply recovery.
 - **Path C — waiting:** retain the handshake while fencing or consent is missing.
   If an SNR expires or is removed while its node is still unhealthy, deletion
   pauses until fencing can be confirmed again. PVC annotation events trigger
-  reconciliation; polling also detects SNR phase changes.
+  reconciliation, as do SNR phase changes.
 - **Path D — new fault:** only annotate a local PVC after fencing is confirmed for
   its unhealthy node. Strip pre-existing consent in the same patch.
 
 Annotation patches use optimistic concurrency so a concurrent consent change
 cannot be silently overwritten. Scan or cleanup failures return an error;
-otherwise pending handshakes use `consentPollInterval` and idle scans use
-`periodicPollInterval`. Polling continues while waiting for SNR status.
+otherwise PVCs waiting for fencing (including those not yet annotated) or consent
+use `consentPollInterval`; idle scans use `periodicPollInterval`. Polling remains
+a fallback if an SNR or PVC event is missed.
 
 ### 3.4 Poll Interval Resolution
 
@@ -231,6 +232,14 @@ integrating another local CSI driver.
 | `PodRemediator` (For) | — | — |
 | `Node` | `enqueuePodRemediatorsClusterWide` — lists all PodRemediator CRs cluster-wide | `nodeReadyChangedPredicate` — fires only when NodeReady status transitions (not kubelet heartbeats) |
 | `PVC` | `enqueuePodRemediatorsForNamespace` — lists only CRs whose watched namespaces include the PVC's namespace | `Or(GenerationChangedPredicate{}, AnnotationChangedPredicate{})` |
+
+| `SelfNodeRemediation` | `enqueuePodRemediatorsClusterWide` | Creation, deletion, phase, node-name annotation/label, or deletion timestamp changes |
+
+The SNR watch uses a separate dynamic informer and does not block controller
+startup waiting for its cache to sync. If the optional SNR CRD is absent, the
+informer retries in the background and connects when the API becomes available.
+Watch events only trigger a scan; annotation and deletion still require live
+fencing evidence and application consent as described above.
 
 **Namespace matching in `enqueuePodRemediatorsForNamespace`:** a CR matches if
 `pvcNamespace ∈ spec.namespaces`, OR if `spec.namespaces` is empty and the CR's own

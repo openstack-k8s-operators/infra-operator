@@ -17,6 +17,8 @@ limitations under the License.
 package functional_test
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
@@ -177,14 +179,15 @@ var _ = Describe("PodRemediator controller", func() {
 			CreateBoundPVC(namespace, pvcName, pvName)
 		})
 
-		It("waits for fencing before annotating a PVC", func() {
+		It("reacts to SNR fencing without waiting for the polling interval", func() {
 			snr := &unstructured.Unstructured{}
 			snr.SetGroupVersionKind(schema.GroupVersionKind{Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation"})
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: nodeName + "-snr"}, snr)).To(Succeed())
 			Expect(unstructured.SetNestedField(snr.Object, "Pre-Reboot-Completed", "status", "phase")).To(Succeed())
 			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
 			spec := GetPodRemediatorSpec(false, nil)
-			spec["periodicPollInterval"] = "1s"
+			spec["periodicPollInterval"] = "1h"
+			spec["consentPollInterval"] = "1h"
 			pr := CreatePodRemediator(namespace, spec)
 			DeferCleanup(th.DeleteInstance, pr)
 			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
@@ -199,7 +202,7 @@ var _ = Describe("PodRemediator controller", func() {
 				pvc := &corev1.PersistentVolumeClaim{}
 				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
 				g.Expect(pvc.Annotations).To(HaveKeyWithValue(remediationv1.PVCStuckOnNodeAnnotation, nodeName))
-			}, timeout, interval).Should(Succeed())
+			}, 10*time.Second, interval).Should(Succeed())
 		})
 
 		It("requires confirmed fencing even for an already consented PVC", func() {

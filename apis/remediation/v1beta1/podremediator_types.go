@@ -38,9 +38,9 @@ type PodRemediatorSpec struct {
 	Disabled bool `json:"disabled,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// ConsentPollInterval controls how often the controller re-checks PVCs that are
-	// annotated with pvc-stuck-on-node but waiting for app-operator safe-to-delete
-	// consent (Path C). Lower values reduce recovery latency; higher values reduce
+	// ConsentPollInterval controls how often the controller re-checks PVCs waiting
+	// for SNR fencing confirmation or app-operator safe-to-delete consent.
+	// Lower values reduce recovery latency; higher values reduce
 	// API load. Overrides the PODREMEDIATOR_CONSENT_POLL_INTERVAL env var.
 	// Format: Go duration string, e.g. "2m", "90s". Default: "2m".
 	ConsentPollInterval *metav1.Duration `json:"consentPollInterval,omitempty"`

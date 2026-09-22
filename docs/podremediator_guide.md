@@ -263,8 +263,12 @@ All outputs should show healthy / at-least-one-row results before running an E2E
 |-------|------|---------|-------------|
 | `namespaces` | `[]string` | (empty = CR namespace only) | Namespaces to watch for local PVCs. |
 | `disabled` | `bool` | `false` | Stops annotation and deletion and clears pending consent. Set to `true` for maintenance windows. |
-| `consentPollInterval` | `metav1.Duration` | `"2m"` | How often to retry Path C (annotated PVC waiting for app-operator consent). Lower = faster response, higher = less API load. |
+| `consentPollInterval` | `metav1.Duration` | `"2m"` | Fallback retry interval for PVCs waiting for fencing or app-operator consent. Lower = faster response, higher = less API load. |
 | `periodicPollInterval` | `metav1.Duration` | `"5m"` | Safety-net requeue for all idle states. Ensures the controller catches pre-existing unhealthy nodes after an operator pod restart (when no node-transition event fires). |
+
+SNR phase changes trigger reconciliation without waiting for a poll. The SNR
+watch is optional and reconnects if its CRD is installed after operator startup.
+Polling remains a fallback during watch interruptions.
 
 ### Operator-wide environment variables
 

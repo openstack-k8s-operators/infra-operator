@@ -82,8 +82,8 @@ type PodRemediatorReconciler struct {
 	Kclient       kubernetes.Interface
 	DynamicClient dynamic.Interface
 
-	// ConsentPollInterval controls how often the controller re-checks PVCs that
-	// are in Path C (annotated but waiting for app-operator safe-to-delete consent).
+	// ConsentPollInterval controls how often the controller re-checks PVCs
+	// waiting for fencing or app-operator safe-to-delete consent.
 	// Configurable via PODREMEDIATOR_CONSENT_POLL_INTERVAL env var (e.g. "2m").
 	// Default: DefaultConsentPollInterval (2 minutes).
 	ConsentPollInterval time.Duration
@@ -210,6 +210,7 @@ func (r *PodRemediatorReconciler) SetupWithManager(ctx context.Context, mgr ctrl
 		// CRs that actually watch the PVC's namespace.
 		Watches(&corev1.PersistentVolumeClaim{}, pvcFN, builder.WithPredicates(
 			predicate.Or(predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
+		WatchesRawSource(&snrSource{reconciler: r}).
 		Complete(r)
 }
 
@@ -649,7 +650,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			if nodeName == "" {
 				continue
 			}
-			if !snrNodes[nodeName] || !rawUnhealthyNodes[nodeName] {
+			if !rawUnhealthyNodes[nodeName] {
+				continue
+			}
+			if !snrNodes[nodeName] {
+				waitingForFencing++
 				continue
 			}
 			oldPVC := pvc.DeepCopy()

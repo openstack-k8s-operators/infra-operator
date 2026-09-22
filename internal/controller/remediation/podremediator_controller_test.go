@@ -201,6 +201,37 @@ func TestFencingRequiredForDeletion(t *testing.T) {
 	}
 }
 
+func TestUnannotatedPVCWaitingForFencingUsesConsentPoll(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	pr.Spec.ConsentPollInterval = &metav1.Duration{Duration: 17 * time.Second}
+	pvc := &corev1.PersistentVolumeClaim{}
+	key := client.ObjectKey{Namespace: "test", Name: "claim"}
+	if err := r.Get(ctx, key, pvc); err != nil {
+		t.Fatal(err)
+	}
+	pvc.Annotations = nil
+	if err := r.Update(ctx, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Delete(ctx, "worker-0-snr", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := r.reconcileNormal(ctx, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 17*time.Second {
+		t.Fatalf("waiting for fencing requeued after %s, want consent poll", result.RequeueAfter)
+	}
+	if err := r.Get(ctx, key, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if len(pvc.Annotations) != 0 {
+		t.Fatalf("PVC annotated before fencing: %v", pvc.Annotations)
+	}
+}
+
 func TestWatchedNamespaces(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
