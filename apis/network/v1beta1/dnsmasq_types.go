@@ -35,7 +35,7 @@ const (
 	// Container image fall-back defaults
 
 	// DNSMasqContainerImage is the fall-back container image for DNSMasq
-	DNSMasqContainerImage = "quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified"
+	DNSMasqContainerImage = "quay.io/openstack-s2i-containers/openstack-neutron-server:master-latest"
 )
 
 // DNSMasqOption defines allowed options for dnsmasq

@@ -5,7 +5,7 @@ metadata:
 spec:
   caBundleSecretName: combined-ca-bundle
   #disabled: "False"
-  #containerImage: "quay.io/podified-antelope-centos9/openstack-openstackclient:current-podified"
+  #containerImage: "quay.io/openstack-s2i-containers/openstack-openstackclient:master-latest"
   #networkAttachments: ['internalapi']
   #openStackCloud: "default"
   #openStackConfigMap:

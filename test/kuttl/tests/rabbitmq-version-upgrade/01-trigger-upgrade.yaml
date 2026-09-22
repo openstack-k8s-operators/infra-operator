@@ -7,5 +7,5 @@ commands:
 - script: |
     set -e
     oc patch rabbitmq.rabbitmq.openstack.org rabbitmq-upgrade -n $NAMESPACE \
-      --type merge -p '{"spec":{"targetVersion":"4.2","containerImage":"quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"}}'
+      --type merge -p '{"spec":{"targetVersion":"4.2","containerImage":"quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"}}'
     echo "PASS: Patched targetVersion to 4.2"
