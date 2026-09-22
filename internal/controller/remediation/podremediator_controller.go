@@ -274,7 +274,13 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 		}
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
-			if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
+			if pvc.Annotations == nil {
+				continue
+			}
+			// Clean up both keys, including an orphaned safe-to-delete with no
+			// pvc-stuck-on-node, so no stale consent is left behind after CR removal.
+			if pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" &&
+				pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "" {
 				continue
 			}
 			oldPVC := pvc.DeepCopy()
@@ -350,11 +356,13 @@ func (r *PodRemediatorReconciler) getNodesWithActiveSNR(ctx context.Context, Log
 	return nodes, nil
 }
 
-// deletePodsForPVC force-deletes (gracePeriod=0) all pods in the same namespace that reference
-// the PVC. This releases the kubernetes.io/pvc-protection finalizer so the PVC can terminate.
-// Force deletion is safe here because SNR guarantees the node is fenced before PodRemediator
-// acts; the app operator implicitly consents to pod force-deletion by setting safe-to-delete.
-func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, Log logr.Logger) error {
+// deletePodsForPVC force-deletes (gracePeriod=0) pods in the same namespace that reference the
+// PVC AND are scheduled on stuckOnNode. This releases the kubernetes.io/pvc-protection finalizer
+// so the PVC can terminate. Force deletion is safe only for pods on the fenced node (SNR
+// guarantees it is fenced; the app operator implicitly consents to their force-deletion by
+// setting safe-to-delete). A pod referencing the claim from any other node is left untouched:
+// force-killing a pod on a live node is never justified by this handshake.
+func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, stuckOnNode string, Log logr.Logger) error {
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList, client.InNamespace(pvc.Namespace)); err != nil {
 		return fmt.Errorf("list pods for PVC %s: %w", pvc.Name, err)
@@ -364,6 +372,12 @@ func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *cor
 		pod := &podList.Items[i]
 		for _, vol := range pod.Spec.Volumes {
 			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
+				if pod.Spec.NodeName != "" && pod.Spec.NodeName != stuckOnNode {
+					// Defense-in-depth: never force-delete a pod running on a live node.
+					Log.Info("Skipping force-delete: pod referencing PVC is not on the stuck node",
+						"pod", pod.Name, "pvc", pvc.Name, "podNode", pod.Spec.NodeName, "stuckOnNode", stuckOnNode)
+					break
+				}
 				Log.Info("Force-deleting pod referencing PVC to release pvc-protection finalizer", "pod", pod.Name, "pvc", pvc.Name)
 				if err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil && !k8s_errors.IsNotFound(err) {
 					return fmt.Errorf("force-delete pod %s: %w", pod.Name, err)
@@ -376,11 +390,12 @@ func (r *PodRemediatorReconciler) deletePodsForPVC(ctx context.Context, pvc *cor
 }
 
 // cleanupStaleAnnotations removes pvc-stuck-on-node and safe-to-delete from PVCs whose
-// stuck node is NOT in rawUnhealthyNodes (i.e. the node has truly recovered to Ready).
-// Only called when rawUnhealthyNodes is empty (all nodes healthy); in all other cases
-// stale-annotation cleanup is handled by Path A in the main PVC loop, which also uses
-// rawUnhealthyNodes as the recovery gate.
-func (r *PodRemediatorReconciler) cleanupStaleAnnotations(ctx context.Context, namespaces []string, Log logr.Logger) {
+// stuck node has truly recovered (exists and is Ready). Only called when rawUnhealthyNodes is
+// empty (all nodes healthy); in all other cases stale-annotation cleanup is handled by Path A
+// in the main PVC loop, which also uses rawUnhealthyNodes as the recovery gate.
+// A PVC stuck on a node that no longer exists (deleted/scaled-out) is left annotated rather
+// than treated as recovered, so an in-flight handshake is not silently aborted.
+func (r *PodRemediatorReconciler) cleanupStaleAnnotations(ctx context.Context, namespaces []string, allNodeNames map[string]bool, Log logr.Logger) {
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
 		if err := r.List(ctx, pvcList, client.InNamespace(ns)); err != nil {
@@ -389,10 +404,21 @@ func (r *PodRemediatorReconciler) cleanupStaleAnnotations(ctx context.Context, n
 		}
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
-			if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
+			if pvc.Annotations == nil {
 				continue
 			}
 			stuckOnNode := pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation]
+			// Also scrub an orphaned safe-to-delete (present without pvc-stuck-on-node):
+			// stale consent must never survive to be honored against a future fault.
+			if stuckOnNode == "" && pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "" {
+				continue
+			}
+			// Keep annotations if the stuck node object no longer exists: do not fabricate a
+			// recovery for a node that will never return.
+			if stuckOnNode != "" && !allNodeNames[stuckOnNode] {
+				Log.Info("Stuck node no longer exists; keeping annotations", "pvc", client.ObjectKeyFromObject(pvc), "node", stuckOnNode)
+				continue
+			}
 			oldPVC := pvc.DeepCopy()
 			delete(pvc.Annotations, remediationv1.PVCStuckOnNodeAnnotation)
 			delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
@@ -476,8 +502,10 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrl.Result{}, fmt.Errorf("list nodes: %w", err)
 	}
 	rawUnhealthyNodes := make(map[string]bool)
+	allNodeNames := make(map[string]bool, len(nodeList.Items))
 	for i := range nodeList.Items {
 		n := &nodeList.Items[i]
+		allNodeNames[n.Name] = true
 		if isNodeUnhealthy(n) {
 			rawUnhealthyNodes[n.Name] = true
 		}
@@ -485,7 +513,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 
 	if len(rawUnhealthyNodes) == 0 {
 		// All nodes are truly healthy: clean up any stale annotations from previous fault cycles.
-		r.cleanupStaleAnnotations(ctx, namespaces, Log)
+		r.cleanupStaleAnnotations(ctx, namespaces, allNodeNames, Log)
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "No unhealthy nodes; monitoring")
 		// Periodic safety-net: requeue so a restarted operator re-evaluates node health
 		// rather than waiting for a node transition event that may never arrive.
@@ -539,9 +567,13 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			}
 
 			if stuckOnNode != "" {
-				// Path A: the node has truly recovered (back to Ready). Remove both annotations
-				// so the app operator must re-consent on the next independent fault event.
-				if !rawUnhealthyNodes[stuckOnNode] {
+				// Path A: the node has truly recovered (exists AND back to Ready). Remove both
+				// annotations so the app operator must re-consent on the next independent fault.
+				// A node absent from the cluster (deleted/scaled-out) is NOT treated as recovery:
+				// silently stripping the annotations would abort an in-flight handshake and leave
+				// the PVC pinned to a node that will never return. Instead fall through to Path
+				// B/C so the handshake can still complete (delete on consent, else keep waiting).
+				if !rawUnhealthyNodes[stuckOnNode] && allNodeNames[stuckOnNode] {
 					oldPVC := pvc.DeepCopy()
 					delete(pvc.Annotations, remediationv1.PVCStuckOnNodeAnnotation)
 					delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
@@ -552,6 +584,9 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					}
 					continue
 				}
+				if !rawUnhealthyNodes[stuckOnNode] && !allNodeNames[stuckOnNode] {
+					Log.Info("Stuck node no longer exists; keeping annotations instead of treating as recovery", "pvc", pvcKey, "node", stuckOnNode)
+				}
 
 				// Path B: node still unhealthy and app operator consented — delete PVC.
 				// Uses rawUnhealthyNodes (not snrGatedNodes) so deletion proceeds even if the
@@ -559,14 +594,43 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				// The app operator implicitly accepts pod force-deletion by granting safe-to-delete
 				// (see remediationv1.PVCStuckOnNodeAnnotation contract comment above).
 				if pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" {
+					// Re-validate provenance on the DELETING path: the safe-to-delete
+					// annotation alone is not trusted. The PVC's bound PV must still be
+					// node-local AND pinned to the node named in pvc-stuck-on-node.
+					// This rejects a forged pvc-stuck-on-node + safe-to-delete pair on an
+					// unrelated or network-attached PVC, which would otherwise be deleted
+					// (Path D validates locality only on the annotation-WRITING path).
+					if pvc.Spec.VolumeName == "" {
+						Log.Info("Refusing to delete PVC: safe-to-delete set but PVC has no bound PV", "pvc", pvcKey, "node", stuckOnNode)
+						continue
+					}
+					pv := &corev1.PersistentVolume{}
+					if err := r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
+						if k8s_errors.IsNotFound(err) {
+							continue
+						}
+						Log.Error(err, "get PV for delete-path validation", "pv", pvc.Spec.VolumeName, "pvc", pvcKey)
+						hadError = true
+						continue
+					}
+					pvNode := getLocalPVNodeName(pv, Log)
+					if !isLocalPV(pv) || pvNode != stuckOnNode {
+						Log.Info("Refusing to delete PVC: PV is not node-local or not pinned to the stuck node (possible forged annotation)",
+							"pvc", pvcKey, "node", stuckOnNode, "pvNode", pvNode)
+						continue
+					}
 					Log.Info("Deleting PVC (stuck on unhealthy node, safe-to-delete granted)", "pvc", pvcKey, "node", stuckOnNode)
-					if err := r.deletePodsForPVC(ctx, pvc, Log); err != nil {
+					if err := r.deletePodsForPVC(ctx, pvc, stuckOnNode, Log); err != nil {
 						Log.Error(err, "delete pods for PVC", "pvc", pvcKey)
 						hadError = true
 						continue
 					}
 					if err := r.Delete(ctx, pvc); err != nil && !k8s_errors.IsNotFound(err) {
+						// The one destructive operation the controller exists to perform failed;
+						// flag it so the reconcile returns an error and retries with backoff
+						// instead of reporting Ready=True and stalling until the next poll.
 						Log.Error(err, "delete PVC", "pvc", pvcKey)
+						hadError = true
 					}
 					continue
 				}
@@ -609,6 +673,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				pvc.Annotations = make(map[string]string)
 			}
 			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = nodeName
+			// Strip any pre-existing safe-to-delete: consent may only be granted by the app
+			// operator AFTER it observes pvc-stuck-on-node for the current fault. A stale
+			// safe-to-delete left over from a previous fault (or forged) must never be honored
+			// as consent for this newly-started handshake.
+			delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
 			if err := r.Patch(ctx, pvc, client.MergeFrom(oldPVC)); err != nil {
 				Log.Error(err, "annotate PVC with pvc-stuck-on-node", "pvc", pvcKey)
 				hadError = true

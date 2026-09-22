@@ -1280,6 +1280,46 @@ func CreateLocalPV(name string, nodeName string) *corev1.PersistentVolume {
 	return pv
 }
 
+// CreateNonLocalPV creates a network-attached (CSI) PV whose only node affinity is a zone
+// topology key, so isLocalPV must return false. Used to prove Path B refuses to delete a PVC
+// carrying a forged pvc-stuck-on-node annotation when its PV is not node-local.
+func CreateNonLocalPV(name string, nodeName string) *corev1.PersistentVolume {
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "cinder.csi.openstack.org",
+					VolumeHandle: "vol-" + name,
+				},
+			},
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "topology.cinder.csi.openstack.org/zone",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{"nova"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pv)).To(Succeed())
+	return pv
+}
+
 func CreateBoundPVC(ns string, pvcName string, pvName string) *corev1.PersistentVolumeClaim {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1310,6 +1350,38 @@ func CreateBoundPVC(ns string, pvcName string, pvName string) *corev1.Persistent
 		}
 	}, timeout, interval).Should(Succeed())
 	return pvc
+}
+
+// CreatePodForPVC creates a Pod scheduled on nodeName that mounts the given PVC. Used to
+// verify that deletePodsForPVC only force-deletes pods on the stuck node.
+func CreatePodForPVC(ns string, podName string, nodeName string, pvcName string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: ns,
+		},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			Containers: []corev1.Container{
+				{
+					Name:  "c",
+					Image: "busybox",
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvcName,
+						},
+					},
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	return pod
 }
 
 func GetFRRConfiguration(name types.NamespacedName) *frrk8sv1.FRRConfiguration {
