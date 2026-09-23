@@ -63,6 +63,16 @@ type DNSMasqSpecCore struct {
 	Replicas *int32 `json:"replicas"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=true
+	// LogDebug enables dnsmasq debug logging.
+	LogDebug *bool `json:"logDebug,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=true
+	// LogQueries enables logging each DNS query handled by dnsmasq.
+	LogQueries *bool `json:"logQueries,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	// Options allows to customize the dnsmasq instance
 	Options []DNSMasqOption `json:"options,omitempty"`
 

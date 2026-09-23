@@ -93,7 +93,9 @@ func Deployment(
 	// default pidfile under /run would fail under the restricted-v2 SCC's
 	// random, admission-assigned UID (which doesn't own that image path).
 	dnsmasqCmd = append(dnsmasqCmd, "--pid-file=")
-	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
+	if instance.Spec.LogDebug == nil || *instance.Spec.LogDebug {
+		dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
+	}
 	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
 	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
 	dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSTargetPort)))
@@ -104,7 +106,9 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--domain-needed")
 	dnsmasqCmd = append(dnsmasqCmd, "--no-resolv")
 	dnsmasqCmd = append(dnsmasqCmd, "--bogus-priv")
-	dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
+	if instance.Spec.LogQueries == nil || *instance.Spec.LogQueries {
+		dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
+	}
 
 	// append dnsmasqCmd for service container
 	args = append(args, strings.Join(dnsmasqCmd, " "))

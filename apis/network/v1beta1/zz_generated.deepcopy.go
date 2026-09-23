@@ -406,6 +406,16 @@ func (in *DNSMasqSpecCore) DeepCopyInto(out *DNSMasqSpecCore) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.LogDebug != nil {
+		in, out := &in.LogDebug, &out.LogDebug
+		*out = new(bool)
+		**out = **in
+	}
+	if in.LogQueries != nil {
+		in, out := &in.LogQueries, &out.LogQueries
+		*out = new(bool)
+		**out = **in
+	}
 	if in.Options != nil {
 		in, out := &in.Options, &out.Options
 		*out = make([]DNSMasqOption, len(*in))

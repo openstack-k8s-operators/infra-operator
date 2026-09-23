@@ -56,6 +56,15 @@ spec:
                 description: Value of the DNSDataLabelSelectorKey which was set on
                   the configmaps containing hosts information
                 type: string
+              logDebug:
+                default: true
+                description: LogDebug enables dnsmasq debug logging.
+                type: boolean
+              logQueries:
+                default: true
+                description: LogQueries enables logging each DNS query handled by
+                  dnsmasq.
+                type: boolean
               nodeSelector:
                 additionalProperties:
                   type: string
