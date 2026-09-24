@@ -305,7 +305,7 @@ func UpdateRabbitMQClusterToTLS(name types.NamespacedName) {
 
 func GetDefaultRabbitMQClusterSpec(tlsEnabled bool) map[string]any {
 	spec := make(map[string]any)
-	spec["containerImage"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
+	spec["containerImage"] = "quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"
 	spec["replicas"] = 1
 	if tlsEnabled {
 		spec["tls"] = map[string]any{

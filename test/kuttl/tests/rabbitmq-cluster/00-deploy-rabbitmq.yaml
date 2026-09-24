@@ -4,5 +4,5 @@ metadata:
   name: rabbitmq-basic
 spec:
   replicas: 1
-  containerImage: quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified
+  containerImage: quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest
   terminationGracePeriodSeconds: 30

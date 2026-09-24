@@ -37,7 +37,7 @@ const (
 	// Container image fall-back defaults
 
 	// RabbitMqContainerImage is the fall-back container image for RabbitMQ
-	RabbitMqContainerImage = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
+	RabbitMqContainerImage = "quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"
 
 	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
 	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"

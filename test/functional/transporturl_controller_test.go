@@ -206,7 +206,7 @@ var _ = Describe("TransportURL controller", func() {
 
 			// Create RabbitMq CR with podOverride
 			spec := GetDefaultRabbitMQSpec()
-			spec["containerImage"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
+			spec["containerImage"] = "quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"
 			spec["replicas"] = 3
 			spec["queueType"] = "Quorum"
 			spec["podOverride"] = map[string]any{
@@ -301,7 +301,7 @@ var _ = Describe("TransportURL controller", func() {
 
 			// Create RabbitMq CR with podOverride
 			spec := GetDefaultRabbitMQSpec()
-			spec["containerImage"] = "quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified"
+			spec["containerImage"] = "quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"
 			spec["replicas"] = 3
 			spec["queueType"] = "Quorum"
 			spec["podOverride"] = map[string]any{
