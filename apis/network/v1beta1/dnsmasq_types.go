@@ -40,9 +40,10 @@ const (
 
 // DNSMasqOption defines allowed options for dnsmasq
 type DNSMasqOption struct {
-	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local;local-ttl;dhcp-ttl;max-ttl
-	Key    string   `json:"key"`
-	Values []string `json:"values"`
+	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local;local-ttl;dhcp-ttl;max-ttl;log-queries;log-debug
+	Key string `json:"key"`
+	// +optional
+	Values []string `json:"values,omitempty"`
 }
 
 // DNSMasqSpec defines the desired state of DNSMasq
