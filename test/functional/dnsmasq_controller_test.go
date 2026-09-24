@@ -194,6 +194,12 @@ var _ = Describe("DNSMasq controller", func() {
 
 				g.Expect(container.LivenessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
 				g.Expect(container.ReadinessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
+
+				// the service container runs quiet (no verbose logging), while the
+				// init container validates the config with --log-debug --test
+				g.Expect(container.Args).ToNot(ContainElement(ContainSubstring("--log-debug")))
+				initContainer := depl.Spec.Template.Spec.InitContainers[0]
+				g.Expect(initContainer.Args).To(ContainElement(ContainSubstring("--log-debug --test")))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -330,6 +336,61 @@ var _ = Describe("DNSMasq controller", func() {
 				ContainSubstring("local=/custom.svc/"))
 			Expect(configData.Data[dnsMasqName.Name]).ShouldNot(
 				ContainSubstring(fmt.Sprintf("local=/%s.svc/", namespace)))
+		})
+	})
+
+	When("A DNSMasq is created with log-queries opted in", func() {
+		BeforeEach(func() {
+			spec := GetDefaultDNSMasqSpec()
+			spec["options"] = any([]networkv1.DNSMasqOption{
+				{
+					Key:    "server",
+					Values: []string{"1.1.1.1"},
+				},
+				{
+					// value-less flag: Values omitted entirely
+					Key: "log-queries",
+				},
+			})
+			instance := CreateDNSMasq(namespace, spec)
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+
+			dnsDataCM = types.NamespacedName{
+				Namespace: namespace,
+				Name:      "some-dnsdata",
+			}
+
+			th.CreateConfigMap(dnsDataCM, map[string]any{
+				dnsDataCM.Name: "172.20.0.80 keystone-internal.openstack.svc",
+			})
+			cm := th.GetConfigMap(dnsDataCM)
+			cm.Labels = util.MergeStringMaps(cm.Labels, map[string]string{
+				"dnsmasqhosts": "dnsdata",
+			})
+			Expect(th.K8sClient.Update(ctx, cm)).Should(Succeed())
+
+			DeferCleanup(th.DeleteConfigMap, dnsDataCM)
+			DeferCleanup(th.DeleteInstance, instance)
+		})
+
+		It("renders log-queries as a bare directive in the config", func() {
+			th.ExpectCondition(
+				dnsMasqName,
+				ConditionGetterFunc(DNSMasqConditionGetter),
+				condition.ServiceConfigReadyCondition,
+				corev1.ConditionTrue,
+			)
+
+			configData := th.GetConfigMap(dnsMasqName)
+			Expect(configData).ShouldNot(BeNil())
+			// value-less option renders as a bare directive, no trailing "="
+			Expect(configData.Data[dnsMasqName.Name]).Should(
+				ContainSubstring("log-queries\n"))
+			Expect(configData.Data[dnsMasqName.Name]).ShouldNot(
+				ContainSubstring("log-queries="))
 		})
 	})
 

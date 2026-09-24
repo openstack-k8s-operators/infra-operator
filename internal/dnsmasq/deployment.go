@@ -71,7 +71,6 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
 	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
 	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
-	dnsmasqCmd = append(dnsmasqCmd, "--log-debug")
 	dnsmasqCmd = append(dnsmasqCmd, "--bind-interfaces")
 	dnsmasqCmd = append(dnsmasqCmd, "--listen-address=$(POD_IP)")
 	dnsmasqCmd = append(dnsmasqCmd, "--port "+strconv.Itoa(int(DNSTargetPort)))
@@ -82,13 +81,13 @@ func Deployment(
 	dnsmasqCmd = append(dnsmasqCmd, "--domain-needed")
 	dnsmasqCmd = append(dnsmasqCmd, "--no-resolv")
 	dnsmasqCmd = append(dnsmasqCmd, "--bogus-priv")
-	dnsmasqCmd = append(dnsmasqCmd, "--log-queries")
 
 	// append dnsmasqCmd for service container
 	args = append(args, strings.Join(dnsmasqCmd, " "))
 
-	// append --test for initcontainer check config syntax
-	dnsmasqCmd = append(dnsmasqCmd, "--test")
+	// append --test for initcontainer check config syntax; --log-debug surfaces
+	// more detail if the config check fails (no runtime cost, it only runs once)
+	dnsmasqCmd = append(dnsmasqCmd, "--log-debug", "--test")
 	initArgs = append(initArgs, strings.Join(dnsmasqCmd, " "))
 
 	//
