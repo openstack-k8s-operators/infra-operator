@@ -1,0 +1,782 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package functional_test
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
+	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+
+	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
+	. "github.com/onsi/gomega"    //revive:disable:dot-imports
+
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
+	remediation_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
+	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+var _ = Describe("PodRemediator controller", func() {
+	var prName types.NamespacedName
+
+	DescribeTable("rejects invalid PodRemediator namespace entries at admission", func(namespaces []string) {
+		pr := &remediationv1.PodRemediator{
+			ObjectMeta: metav1.ObjectMeta{Name: uuid.New().String(), Namespace: namespace},
+			Spec:       remediationv1.PodRemediatorSpec{Namespaces: namespaces},
+		}
+		Expect(k8s_errors.IsInvalid(k8sClient.Create(ctx, pr))).To(BeTrue())
+	},
+		Entry("empty entry", []string{""}),
+		Entry("mixed valid and empty entries", []string{"openstack", ""}),
+		Entry("invalid DNS name", []string{"Openstack"}),
+	)
+
+	When("a PodRemediator is created without NHC/SNR in the cluster", func() {
+		BeforeEach(func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+		})
+
+		It("should set Ready condition to False with NHC/SNR required message", func() {
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance).To(Not(BeNil()))
+				ready := instance.Status.Conditions.Get(condition.ReadyCondition)
+				g.Expect(ready).To(Not(BeNil()))
+				g.Expect(ready.Status).To(Equal(corev1.ConditionFalse))
+				g.Expect(string(ready.Reason)).To(Equal(remediation_ctrl.NHCNotFoundReason))
+				g.Expect(ready.Message).To(ContainSubstring("Node Health Check"))
+				g.Expect(ready.Message).To(ContainSubstring("Self Node Remediation"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should set InputReady condition to False", func() {
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance).To(Not(BeNil()))
+				inputReady := instance.Status.Conditions.Get(condition.InputReadyCondition)
+				g.Expect(inputReady).To(Not(BeNil()))
+				g.Expect(inputReady.Status).To(Equal(corev1.ConditionFalse))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a PodRemediator is created with disabled true", func() {
+		BeforeEach(func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(true, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+		})
+
+		It("should still report Ready False when NHC/SNR are missing", func() {
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance).To(Not(BeNil()))
+				g.Expect(instance.Spec.Disabled).To(BeTrue())
+				ready := instance.Status.Conditions.Get(condition.ReadyCondition)
+				g.Expect(ready).To(Not(BeNil()))
+				g.Expect(ready.Status).To(Equal(corev1.ConditionFalse))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a PodRemediator is deleted", func() {
+		BeforeEach(func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			// Wait for the controller to persist its finalizer so deletion
+			// actually exercises reconcileDelete instead of removing the CR outright.
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance.Finalizers).ToNot(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+			th.DeleteInstance(pr)
+		})
+
+		It("should remove the CR after finalizer runs", func() {
+			Eventually(func(g Gomega) {
+				instance := &remediationv1.PodRemediator{}
+				err := k8sClient.Get(ctx, prName, instance)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a PodRemediator has the operator finalizer", func() {
+		BeforeEach(func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+		})
+
+		It("should have the finalizer set on the CR", func() {
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance).To(Not(BeNil()))
+				g.Expect(instance.ObjectMeta.Finalizers).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("NHC/SNR are present and a local PVC is on an unhealthy node", func() {
+		var nodeName string
+		var pvName string
+		var pvcName string
+
+		BeforeEach(func() {
+			CreateMedik8sCRDs()
+			CreateNHCInstance()
+			CreateSNRTemplate(namespace)
+
+			nodeName = "worker-" + uuid.New().String()[:8]
+			pvName = "pv-" + uuid.New().String()[:8]
+			pvcName = "pvc-" + uuid.New().String()[:8]
+
+			CreateNodeWithReadyCondition(nodeName, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+
+			CreateSelfNodeRemediation(namespace, nodeName)
+
+			CreateLocalPV(pvName, nodeName)
+			DeferCleanup(func() {
+				pv := &corev1.PersistentVolume{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
+					_ = k8sClient.Delete(ctx, pv)
+				}
+			})
+
+			CreateBoundPVC(namespace, pvcName, pvName)
+		})
+
+		It("reacts to SNR fencing without waiting for the polling interval", func() {
+			snr := &unstructured.Unstructured{}
+			snr.SetGroupVersionKind(schema.GroupVersionKind{Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation"})
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: nodeName + "-snr"}, snr)).To(Succeed())
+			Expect(unstructured.SetNestedField(snr.Object, "Pre-Reboot-Completed", "status", "phase")).To(Succeed())
+			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
+			spec := GetPodRemediatorSpec(false, nil)
+			spec["periodicPollInterval"] = "1h"
+			spec["consentPollInterval"] = "1h"
+			pr := CreatePodRemediator(namespace, spec)
+			DeferCleanup(th.DeleteInstance, pr)
+			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			Consistently(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.PVCStuckOnNodeAnnotation))
+			}, timeout/5, interval).Should(Succeed())
+			Expect(unstructured.SetNestedField(snr.Object, "Reboot-Completed", "status", "phase")).To(Succeed())
+			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, 10*time.Second, interval).Should(Succeed())
+		})
+
+		It("requires confirmed fencing even for an already consented PVC", func() {
+			snr := &unstructured.Unstructured{}
+			snr.SetGroupVersionKind(schema.GroupVersionKind{Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation"})
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: nodeName + "-snr"}, snr)).To(Succeed())
+			unstructured.RemoveNestedField(snr.Object, "status")
+			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
+			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			pvc.Annotations = map[string]string{remediationv1.PVCStuckOnNodeAnnotation: nodeName, remediationv1.SafeToDeleteAnnotation: "true"}
+			Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+			pod := CreatePodForPVC(namespace, "fencing-"+uuid.New().String()[:8], nodeName, pvcName)
+			spec := GetPodRemediatorSpec(false, nil)
+			spec["consentPollInterval"] = "1s"
+			pr := CreatePodRemediator(namespace, spec)
+			DeferCleanup(th.DeleteInstance, pr)
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{})).To(Succeed())
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+			Expect(unstructured.SetNestedField(snr.Object, "Fencing-Completed", "status", "phase")).To(Succeed())
+			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("requires fresh consent after a disabled maintenance window", func() {
+			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			pvc.Annotations = map[string]string{remediationv1.PVCStuckOnNodeAnnotation: nodeName, remediationv1.SafeToDeleteAnnotation: "true"}
+			Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(true, nil))
+			DeferCleanup(th.DeleteInstance, pr)
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.PVCStuckOnNodeAnnotation))
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+			}, timeout, interval).Should(Succeed())
+			UpdateNodeReadyCondition(nodeName, true)
+			UpdateNodeReadyCondition(nodeName, false)
+			Eventually(func(g Gomega) {
+				instance := &remediationv1.PodRemediator{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pr), instance)).To(Succeed())
+				instance.Spec.Disabled = false
+				g.Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+			}, timeout, interval).Should(Succeed())
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("completes consented remediation after the only unhealthy Node is deleted", func() {
+			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			DeferCleanup(th.DeleteInstance, pr)
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, timeout, interval).Should(Succeed())
+			node := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, &corev1.Node{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should annotate the PVC with pvc-stuck-on-node but not delete it (Phase 1)", func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+		})
+
+		It("should delete the PVC when safe-to-delete is set (Phase 3)", func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, timeout, interval).Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, pvcKey, &corev1.PersistentVolumeClaim{})
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should remove pvc-stuck-on-node when node recovers (Path A)", func() {
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, timeout, interval).Should(Succeed())
+
+			UpdateNodeReadyCondition(nodeName, true)
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.PVCStuckOnNodeAnnotation))
+			}, timeout, interval).Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+		})
+
+		It("should not remove pvc-stuck-on-node when node is still unhealthy but has no active SNR", func() {
+			// Path A must only fire when the node is truly back to Ready (not in rawUnhealthyNodes).
+			// If a node is still NotReady but its SNR CR has expired (e.g. post-fencing, hardware
+			// issue), the annotation must be preserved so the handshake can continue or be
+			// completed once the node finally recovers.
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			// node2: unhealthy but NO SNR CR — simulates post-fencing or pre-NHC-decision state.
+			node2Name := "worker-" + uuid.New().String()[:8]
+			CreateNodeWithReadyCondition(node2Name, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: node2Name}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+
+			// Pre-annotate the PVC as stuck on node2 (which has no SNR).
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = node2Name
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			// Controller: rawUnhealthyNodes={nodeName, node2Name}, snrGatedNodes={nodeName}.
+			// PVC stuckOnNode=node2Name is in rawUnhealthyNodes → NOT Path A → annotation kept.
+			Consistently(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, node2Name))
+			}, timeout/5, interval).Should(Succeed())
+		})
+
+		It("should remove safe-to-delete together with pvc-stuck-on-node on node recovery (Path A)", func() {
+			// Verify that consent granted by the app operator does not carry over to a future
+			// fault on the same node. Both annotations must be cleared when the node recovers.
+			//
+			// Test design: pre-set both annotations on the PVC with node1 already healthy,
+			// and keep node2 unhealthy to exercise cleanup during another fault.
+			// node1 (the PVC's stuck node) not being in
+			// unhealthyNodes triggers Path A, which must remove both annotations.
+			// This avoids races between safe-to-delete being set and Path B firing.
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			// Make the PVC's node (node1) healthy so Path A fires instead of Path B.
+			UpdateNodeReadyCondition(nodeName, true)
+
+			// node2: kept unhealthy so the controller enters the PVC scan loop.
+			node2Name := "worker-" + uuid.New().String()[:8]
+			CreateNodeWithReadyCondition(node2Name, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: node2Name}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+			CreateSelfNodeRemediation(namespace, node2Name)
+
+			// Pre-annotate PVC with both annotations to simulate: node was unhealthy → PodRemediator
+			// set pvc-stuck-on-node → app operator set safe-to-delete → node then recovered.
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = nodeName
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			// Controller: node2 unhealthy → enters PVC loop → PVC has stuckOnNode=node1 but
+			// node1 is healthy → Path A → removes both annotations. PVC must NOT be deleted.
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.PVCStuckOnNodeAnnotation))
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should clean up both pvc-stuck-on-node and safe-to-delete on CR deletion", func() {
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = nodeName
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			// Keep fencing unconfirmed so only the CR finalizer removes the annotations.
+			snr := &unstructured.Unstructured{}
+			snr.SetGroupVersionKind(schema.GroupVersionKind{Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation"})
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: nodeName + "-snr"}, snr)).To(Succeed())
+			unstructured.RemoveNestedField(snr.Object, "status")
+			Expect(k8sClient.Update(ctx, snr)).To(Succeed())
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			// Wait for the finalizer so deleting the CR actually exercises reconcileDelete.
+			Eventually(func(g Gomega) {
+				instance := GetPodRemediator(prName)
+				g.Expect(instance.Finalizers).ToNot(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+			th.DeleteInstance(pr)
+
+			Eventually(func(g Gomega) {
+				instance := &remediationv1.PodRemediator{}
+				err := k8sClient.Get(ctx, prName, instance)
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			pvc = &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.PVCStuckOnNodeAnnotation))
+			Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+		})
+	})
+
+	When("a non-local PVC carries forged stuck + safe-to-delete annotations", func() {
+		var nodeName string
+		var pvName string
+		var pvcName string
+
+		BeforeEach(func() {
+			CreateMedik8sCRDs()
+			CreateNHCInstance()
+			CreateSNRTemplate(namespace)
+
+			nodeName = "worker-" + uuid.New().String()[:8]
+			pvName = "pv-" + uuid.New().String()[:8]
+			pvcName = "pvc-" + uuid.New().String()[:8]
+
+			CreateNodeWithReadyCondition(nodeName, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+			CreateSelfNodeRemediation(namespace, nodeName)
+
+			// Network-attached (CSI, zone-affinity) PV: NOT node-local.
+			CreateNonLocalPV(pvName, nodeName)
+			DeferCleanup(func() {
+				pv := &corev1.PersistentVolume{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
+					_ = k8sClient.Delete(ctx, pv)
+				}
+			})
+
+			CreateBoundPVC(namespace, pvcName, pvName)
+		})
+
+		It("must not delete the PVC when its PV is not node-local (Path B provenance re-check)", func() {
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			// Forge both annotations: stuck on the (real) unhealthy node + consent granted.
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = nodeName
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			// Path B must refuse: the PV is not node-local, so the forged annotations
+			// cannot escalate into a delete.
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, pvcKey, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+		})
+	})
+
+	When("a local PVC already carries a stale safe-to-delete before the handshake starts", func() {
+		var nodeName string
+		var pvName string
+		var pvcName string
+
+		BeforeEach(func() {
+			CreateMedik8sCRDs()
+			CreateNHCInstance()
+			CreateSNRTemplate(namespace)
+
+			nodeName = "worker-" + uuid.New().String()[:8]
+			pvName = "pv-" + uuid.New().String()[:8]
+			pvcName = "pvc-" + uuid.New().String()[:8]
+
+			CreateNodeWithReadyCondition(nodeName, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+			CreateSelfNodeRemediation(namespace, nodeName)
+
+			CreateLocalPV(pvName, nodeName)
+			DeferCleanup(func() {
+				pv := &corev1.PersistentVolume{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
+					_ = k8sClient.Delete(ctx, pv)
+				}
+			})
+
+			CreateBoundPVC(namespace, pvcName, pvName)
+		})
+
+		It("strips the stale safe-to-delete when Path D starts the handshake", func() {
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			// Pre-set ONLY safe-to-delete (no pvc-stuck-on-node): stale/forged consent.
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			// Path D annotates pvc-stuck-on-node AND strips the stale consent in the same patch,
+			// so the PVC must survive (Path B never sees consent for this fresh fault).
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+				g.Expect(pvc.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, pvcKey, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+		})
+	})
+
+	When("a PVC is stuck on a node that no longer exists", func() {
+		var livingNodeName string
+		var ghostNodeName string
+		var pvName string
+		var pvcName string
+
+		BeforeEach(func() {
+			CreateMedik8sCRDs()
+			CreateNHCInstance()
+			CreateSNRTemplate(namespace)
+
+			livingNodeName = "worker-" + uuid.New().String()[:8]
+			ghostNodeName = "ghost-" + uuid.New().String()[:8]
+			pvName = "pv-" + uuid.New().String()[:8]
+			pvcName = "pvc-" + uuid.New().String()[:8]
+
+			// A real unhealthy node so the controller enters the PVC scan loop.
+			CreateNodeWithReadyCondition(livingNodeName, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: livingNodeName}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+			CreateSelfNodeRemediation(namespace, livingNodeName)
+
+			CreateLocalPV(pvName, ghostNodeName)
+			DeferCleanup(func() {
+				pv := &corev1.PersistentVolume{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
+					_ = k8sClient.Delete(ctx, pv)
+				}
+			})
+
+			CreateBoundPVC(namespace, pvcName, pvName)
+		})
+
+		It("keeps pvc-stuck-on-node instead of treating a deleted node as recovery (Path A)", func() {
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+
+			// Pre-annotate the PVC as stuck on a node that never existed in the cluster.
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			if pvc.Annotations == nil {
+				pvc.Annotations = make(map[string]string)
+			}
+			pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] = ghostNodeName
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			// The stuck node is absent from allNodeNames, so Path A must NOT strip the annotation.
+			Consistently(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, ghostNodeName))
+			}, timeout/5, interval).Should(Succeed())
+		})
+	})
+
+	When("a PVC is mounted by pods on more than one node", func() {
+		var nodeName string
+		var otherNodeName string
+		var pvName string
+		var pvcName string
+
+		BeforeEach(func() {
+			CreateMedik8sCRDs()
+			CreateNHCInstance()
+			CreateSNRTemplate(namespace)
+
+			nodeName = "worker-" + uuid.New().String()[:8]
+			otherNodeName = "worker-" + uuid.New().String()[:8]
+			pvName = "pv-" + uuid.New().String()[:8]
+			pvcName = "pvc-" + uuid.New().String()[:8]
+
+			CreateNodeWithReadyCondition(nodeName, false)
+			DeferCleanup(func() {
+				node := &corev1.Node{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node); err == nil {
+					_ = k8sClient.Delete(ctx, node)
+				}
+			})
+			CreateSelfNodeRemediation(namespace, nodeName)
+
+			CreateLocalPV(pvName, nodeName)
+			DeferCleanup(func() {
+				pv := &corev1.PersistentVolume{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
+					_ = k8sClient.Delete(ctx, pv)
+				}
+			})
+
+			CreateBoundPVC(namespace, pvcName, pvName)
+		})
+
+		It("force-deletes only the pod on the stuck node (Path B pod gate)", func() {
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			stuckPodName := "pod-stuck-" + uuid.New().String()[:8]
+			otherPodName := "pod-other-" + uuid.New().String()[:8]
+
+			CreatePodForPVC(namespace, stuckPodName, nodeName, pvcName)
+			otherPod := CreatePodForPVC(namespace, otherPodName, otherNodeName, pvcName)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, otherPod) })
+
+			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false, nil))
+			prName.Name = pr.GetName()
+			prName.Namespace = pr.GetNamespace()
+			DeferCleanup(th.DeleteInstance, pr)
+
+			Eventually(func(g Gomega) {
+				pvc := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+				g.Expect(pvc.Annotations).To(HaveKeyWithValue(
+					remediationv1.PVCStuckOnNodeAnnotation, nodeName))
+			}, timeout, interval).Should(Succeed())
+
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, pvcKey, pvc)).To(Succeed())
+			oldPVC := pvc.DeepCopy()
+			pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+			// The pod on the stuck node is force-deleted; the pod on the other node survives.
+			Eventually(func(g Gomega) {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: stuckPodName, Namespace: namespace}, &corev1.Pod{})
+				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: otherPodName, Namespace: namespace}, &corev1.Pod{})).To(Succeed())
+			}, timeout/5, interval).Should(Succeed())
+		})
+	})
+})
