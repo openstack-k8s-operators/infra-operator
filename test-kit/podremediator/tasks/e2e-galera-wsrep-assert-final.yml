@@ -1,0 +1,68 @@
+---
+# After E2E recovery: assert Galera reports Primary cluster and size matches STS replicas.
+# Fails the play if a reachable Running pod does not report healthy wsrep (operator-level safety net).
+
+- name: Assert Galera wsrep cluster healthy after E2E
+  ansible.builtin.shell: |
+    set -euo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_statefulset_name }}"
+    CTR="{{ mysql_ctr }}"
+    REPL="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}')"
+    if ! [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Cannot read spec.replicas for STS $STS"
+      exit 1
+    fi
+    POD=""
+    for i in $(seq 0 $((REPL - 1))); do
+      P="${STS}-$i"
+      ph=$($OC get pod -n "$NS" "$P" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+      [[ "$ph" == "Running" ]] || continue
+      if $OC exec -n "$NS" "$P" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        POD="$P"
+        break
+      fi
+    done
+    if [[ -z "$POD" ]]; then
+      echo "No Running STS pod accepted mysql for final assert"
+      exit 1
+    fi
+    OUT=$($OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -N -e "
+    SHOW GLOBAL STATUS WHERE Variable_name IN (
+      'wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment','wsrep_connected','wsrep_ready'
+    );
+    ")
+    echo "$OUT"
+    size=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_cluster_size"{print $2}' | tr -d '\r')
+    status=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_cluster_status"{print $2}' | tr -d '\r')
+    state=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_local_state_comment"{print $2}' | tr -d '\r')
+    conn=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_connected"{print $2}' | tr -d '\r')
+    rdy=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_ready"{print $2}' | tr -d '\r')
+    if [[ "$size" != "$REPL" ]]; then
+      echo "FAIL: wsrep_cluster_size=$size want $REPL (STS replicas)"
+      exit 1
+    fi
+    if [[ "$status" != "Primary" ]]; then
+      echo "FAIL: wsrep_cluster_status=$status want Primary"
+      exit 1
+    fi
+    if [[ "$state" != "Synced" ]]; then
+      echo "FAIL: wsrep_local_state_comment=$state want Synced"
+      exit 1
+    fi
+    if [[ "$conn" != "ON" || "$rdy" != "ON" ]]; then
+      echo "FAIL: wsrep_connected=$conn wsrep_ready=$rdy want ON"
+      exit 1
+    fi
+    echo "OK: Galera wsrep healthy on $POD (size=$size Primary Synced)"
+  args:
+    executable: /bin/bash
+  register: galera_wsrep_assert_out
+  changed_when: false
+  vars:
+    mysql_ctr: "{{ e2e_galera_mysql_container | default('galera') }}"
+
+- name: Show Galera final assert result
+  ansible.builtin.debug:
+    msg: "{{ galera_wsrep_assert_out.stdout_lines | default([]) }}"

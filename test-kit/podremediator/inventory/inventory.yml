@@ -1,0 +1,23 @@
+# Inventory for PodRemediator POC runbook.
+# Run from infra-operator repo root. controller0 is reached via had18 (ProxyCommand).
+#
+# Fill in the CHANGEME_* values for your environment before use.
+# Ensure SSH to the jump host works and from there the user can ssh to the controller.
+#
+# If your default SSH keys are not authorized for the controller user, set the key file:
+#   ansible-playbook ... -e "controller_ssh_private_key_file=/path/to/key"
+# or in group_vars/controllers.yml: controller_ssh_private_key_file: "~/.ssh/key_for_controller"
+
+all:
+  children:
+    jump_hosts:
+      hosts:
+        had18:
+          ansible_host: CHANGEME_JUMP_HOST_FQDN
+          ansible_user: CHANGEME_JUMP_HOST_USER
+    controllers:
+      hosts:
+        controller0:
+          ansible_host: CHANGEME_CONTROLLER_HOST
+          ansible_user: CHANGEME_CONTROLLER_USER
+          ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -W %h:%p CHANGEME_JUMP_HOST_USER@CHANGEME_JUMP_HOST_FQDN"'

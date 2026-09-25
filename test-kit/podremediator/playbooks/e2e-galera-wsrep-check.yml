@@ -1,0 +1,127 @@
+---
+# Structured Galera / wsrep checks at E2E milestones (after e2e-galera-wsrep-monitor snapshots).
+# Parent must set: e2e_galera_wsrep_check_mode, e2e_workload_ns, e2e_statefulset_name, oc_bin
+# Optional: wsrep_check_stage_label (log line), e2e_galera_mysql_container, e2e_galera_step_check_mid_lenient
+#
+# Modes:
+#   healthy_full          — wsrep_cluster_size == STS replicas, Primary, local Synced, connected/ready ON
+#   survivors_quorum      — at least one Running pod answers mysql; size >= 2, Primary, Synced, ON/ON
+#                           (fails if two Galera members died on the same node: size 1 — set
+#                           e2e_galera_step_check_mid_lenient=true to only require size >= 1 + mysql OK)
+#   survivors_lenient     — at least one member responds; wsrep_cluster_size >= 1 (informational floor)
+#   recovering            — REPL-1 <= wsrep_cluster_size <= REPL, Primary, local Synced, ON/ON (node back, cluster may still be catching up)
+
+- name: Galera cluster state check (wsrep)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_statefulset_name }}"
+    CTR="{{ mysql_ctr }}"
+    MODE="{{ e2e_galera_wsrep_check_mode }}"
+    LABEL="{{ wsrep_check_stage_label | default('step') }}"
+    LENIENT="{{ 'true' if (e2e_galera_step_check_mid_lenient | default(false) | bool) else 'false' }}"
+    CMP={{ 1 if (e2e_galera_compact_log | default(false) | bool) else 0 }}
+
+    if [[ -z "$STS" ]]; then
+      echo "[$LABEL] SKIP: e2e_statefulset_name empty"
+      exit 0
+    fi
+
+    echo "=== Galera CHECK [$LABEL] mode=$MODE $(date -Iseconds) ==="
+    REPL="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    RDY="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    echo "STS $STS: readyReplicas=${RDY:-?} spec.replicas=${REPL:-?}"
+
+    if ! [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      echo "FAIL: cannot read spec.replicas for STS $STS"
+      exit 1
+    fi
+
+    POD=""
+    for i in $(seq 0 $((REPL - 1))); do
+      P="${STS}-$i"
+      ph=$($OC get pod -n "$NS" "$P" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+      [[ "$ph" == "Running" ]] || continue
+      if $OC exec -n "$NS" "$P" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        POD="$P"
+        break
+      fi
+    done
+
+    if [[ -z "$POD" ]]; then
+      echo "FAIL: no Running STS pod accepted mysql for Galera check"
+      exit 1
+    fi
+
+    OUT=$($OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -N -e "
+    SHOW GLOBAL STATUS WHERE Variable_name IN (
+      'wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment','wsrep_connected','wsrep_ready'
+    );
+    ")
+    if [[ "$CMP" -eq 0 ]]; then
+      echo "$OUT"
+    fi
+    size=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_cluster_size"{print $2}' | tr -d '\r' | tr -d ' ')
+    status=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_cluster_status"{print $2}' | tr -d '\r' | tr -d ' ')
+    state=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_local_state_comment"{print $2}' | tr -d '\r' | tr -d ' ')
+    conn=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_connected"{print $2}' | tr -d '\r' | tr -d ' ')
+    rdy=$(echo "$OUT" | awk -F'\t' '$1=="wsrep_ready"{print $2}' | tr -d '\r' | tr -d ' ')
+
+    if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+      echo "FAIL: wsrep_cluster_size not numeric: '$size'"
+      exit 1
+    fi
+
+    fail() { echo "FAIL: $*"; exit 1; }
+    ok() { echo "CHECK_OK [$LABEL] $* (pod=$POD)"; exit 0; }
+
+    case "$MODE" in
+      healthy_full)
+        [[ "$size" == "$REPL" ]] || fail "wsrep_cluster_size=$size want $REPL (STS replicas)"
+        [[ "$status" == "Primary" ]] || fail "wsrep_cluster_status=$status want Primary"
+        [[ "$state" == "Synced" ]] || fail "wsrep_local_state_comment=$state want Synced"
+        [[ "$conn" == "ON" && "$rdy" == "ON" ]] || fail "wsrep_connected=$conn wsrep_ready=$rdy want ON"
+        ok "healthy_full size=$size Primary Synced"
+        ;;
+      survivors_lenient)
+        [[ "$size" -ge 1 ]] || fail "wsrep_cluster_size=$size want >= 1"
+        ok "survivors_lenient size=$size status=$status state=$state"
+        ;;
+      recovering)
+        min=$((REPL - 1))
+        [[ "$size" -ge "$min" ]] || fail "wsrep_cluster_size=$size want >= $min (REPL-1)"
+        [[ "$size" -le "$REPL" ]] || fail "wsrep_cluster_size=$size want <= $REPL"
+        [[ "$status" == "Primary" ]] || fail "wsrep_cluster_status=$status want Primary"
+        [[ "$state" == "Synced" ]] || fail "wsrep_local_state_comment=$state want Synced"
+        [[ "$conn" == "ON" && "$rdy" == "ON" ]] || fail "wsrep_connected=$conn wsrep_ready=$rdy want ON"
+        ok "recovering size=$size (allowed $min..$REPL) Primary Synced"
+        ;;
+      survivors_quorum)
+        if [[ "$LENIENT" == "true" ]]; then
+          [[ "$size" -ge 1 ]] || fail "wsrep_cluster_size=$size want >= 1 (lenient)"
+          [[ "$conn" == "ON" ]] || fail "wsrep_connected=$conn want ON"
+          ok "survivors_quorum LENIENT size=$size status=$status state=$state"
+        else
+          [[ "$size" -ge 2 ]] || fail "wsrep_cluster_size=$size want >= 2 (lost quorum? two members on dead node? use -e e2e_galera_step_check_mid_lenient=true)"
+          [[ "$status" == "Primary" ]] || fail "wsrep_cluster_status=$status want Primary"
+          [[ "$state" == "Synced" ]] || fail "wsrep_local_state_comment=$state want Synced"
+          [[ "$conn" == "ON" && "$rdy" == "ON" ]] || fail "wsrep_connected=$conn wsrep_ready=$rdy want ON"
+          ok "survivors_quorum size=$size Primary Synced"
+        fi
+        ;;
+      *)
+        echo "FAIL: unknown e2e_galera_wsrep_check_mode=$MODE"
+        exit 1
+        ;;
+    esac
+  args:
+    executable: /bin/bash
+  register: galera_wsrep_check_out
+  changed_when: false
+  vars:
+    mysql_ctr: "{{ e2e_galera_mysql_container | default('galera') }}"
+
+- name: Show Galera cluster check result
+  ansible.builtin.debug:
+    msg: "{{ galera_wsrep_check_out.stdout_lines | default([]) }}"

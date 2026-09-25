@@ -1,0 +1,316 @@
+# E2E PodRemediator – same virsh/remediation flow as the base playbook but targets existing OpenStack
+# Galera (MariaDB operator) in the workload namespace. Independent of the lab StatefulSet (test-podremediator).
+#
+# Exploratory: observe behaviour when a worker hosting a Galera member dies (see
+# docs/STATEFUL_PVC_REMEDIATION_DESIGN.md §1.5.1 (repo root); test baselines and lab layout:
+# test-kit/podremediator/docs/GALERA_E2E_TEST_SCENARIOS.md). Defaults match the common
+# OpenStack layout (Galera CR `openstack`, STS `openstack-galera`, pod `openstack-galera-0`,
+# PVC `mysql-db-openstack-galera-0`). Some installs use `galera-openstack` instead; override
+# `e2e_statefulset_name` / `e2e_test_pod_name` / `e2e_test_pvc_name` if needed.
+#
+# Discover names before running:
+#   oc get galera -n openstack
+#   oc get sts -n openstack | grep -i galera
+#   oc get pvc -n openstack | grep -i galera
+#
+# Prerequisites:
+# - Galera deployed (e.g. namespace `openstack`).
+# - PodRemediator CR must list `openstack` in spec.namespaces (same as RabbitMQ).
+# - Run from had-18 (virsh); inventory same as main E2E playbook.
+#
+# Run when Galera is deployed; no dependency on the bundled lab StatefulSet E2E. Example:
+#   ansible-playbook -i ... test-e2e-podremediator-pvc-remediation-galera.yml -b \
+#     -e oc_cmd=/home/zuul/bin/oc -e e2e_auto_patch_podremediator=true
+#
+# Override pod / PVC / StatefulSet if your install differs, e.g. alternate layout:
+#   -e e2e_statefulset_name=galera-openstack -e e2e_test_pod_name=galera-openstack-0 \
+#   -e e2e_test_pvc_name=mysql-db-galera-openstack-0
+# Or cell Galera:
+#   -e e2e_galera_cr_name=cell1 -e e2e_statefulset_name=openstack-cell1-galera \
+#   -e e2e_test_pod_name=openstack-cell1-galera-0 -e e2e_test_pvc_name=mysql-db-openstack-cell1-galera-0
+#
+# Optional extra-vars (same as main E2E where applicable):
+#   -e e2e_pvc_deleted_timeout_seconds=1200
+#   -e oc_api_server=https://api...:6443
+# Galera wsrep step checks (after each snapshot): enabled by import vars; disable with
+#   -e e2e_galera_wsrep_step_checks=false
+# If two Galera members share the failed node (wsrep size 1 mid-test), use:
+#   -e e2e_galera_step_check_mid_lenient=true
+# Multi-PVC on the same worker: the main E2E still gates on e2e_test_pvc_name only; with
+# e2e_report_all_local_pvcs_on_test_node=true (default below) the playbook discovers every
+# Bound+local PVC on that node and logs each on every poll + after remediation. Override with
+# -e e2e_report_all_local_pvcs_on_test_node=false or add explicit names:
+#   -e 'e2e_watch_extra_pvc_names=["mysql-db-openstack-galera-2"]'
+# Lab only – merge spec.namespaces (operator + workload NS):
+#   -e e2e_auto_patch_podremediator=true
+#
+# Preflight (default on): Galera CR Ready condition, STS readyReplicas, member pods Running.
+# Skip Galera CR check with -e e2e_galera_preflight_cr=false (STS/pods only).
+# Skip all preflight with -e e2e_galera_preflight=false.
+#
+# During the imported E2E, MariaDB / wsrep snapshots run at key steps (see main playbook header).
+# Disable only the final strict assert (keep snapshots): -e e2e_galera_wsrep_assert_final=false
+# Kubernetes Events (oc get events, workload + operator NS) run with each wsrep snapshot by default.
+# Disable event dumps: -e e2e_k8s_events_report=false.
+# Events: by default only lines matching a Galera/remediation-focused regex (see tasks/e2e-galera-wsrep-monitor.yml).
+#   Full tail without filter: -e e2e_k8s_events_relevant_only=false
+#   Custom grep: -e 'e2e_k8s_events_filter_regex=foo|bar'  (empty -e e2e_k8s_events_filter_regex= disables filter)
+#   More matches: -e e2e_k8s_events_max_lines=200  (widen pre-filter window: e2e_k8s_events_fetch_lines=5000)
+#
+# Human-readable timeline file on controller-0 (plain text: stage, wsrep, events): default
+#   e2e_galera_events_log_path=/tmp/galera-e2e-k8s-events.log
+# Disable file output: -e e2e_galera_events_log_path=""
+# Verbose per-pod mysql after the summary table: -e e2e_galera_compact_log=false
+# Ansible noise: run-e2e uses -v by default; full module trace: E2E_ANSIBLE_VERBOSE=-vvv
+# After the run: scp zuul@<controller-host>:/tmp/galera-e2e-k8s-events.log .
+#
+# Line-buffered log:
+#   env PYTHONUNBUFFERED=1 ansible-playbook ...
+#
+# From laptop:
+#   HAD18=<host> SSHPASS=<password> E2E_OC_CMD=/path/to/oc E2E_GALERA=1 ./test-kit/podremediator/scripts/run-e2e.sh
+#
+# Kill a non-ordinal-0 member or the “most advanced” member (wsrep_last_committed):
+#   E2E_EXTRA_ANSIBLE_ARGS='-e e2e_galera_victim_selection=random_member'
+#   E2E_EXTRA_ANSIBLE_ARGS='-e e2e_galera_victim_selection=max_wsrep_last_committed'
+# Lab: force different wsrep_last_committed before max pick (peer wsrep_desync + INSERT churn on churn ordinal), then max victim:
+#   E2E_EXTRA_ANSIBLE_ARGS='-e e2e_galera_victim_selection=max_wsrep_last_committed -e e2e_galera_wsrep_spread_before_fault=true'
+# See test-kit/podremediator/docs/GALERA_E2E_TEST_SCENARIOS.md § “Victim selection”.
+
+---
+- name: Galera E2E – verify PodRemediator watches the OpenStack workload namespace
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack') }}"
+    e2e_operator_ns: "{{ lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators') }}"
+    e2e_galera_sts_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default='openstack-galera') }}"
+    # Same defaults as import_playbook below so timeline init + DR paths apply in this play too.
+    e2e_galera_events_log_path: /tmp/galera-e2e-k8s-events.log
+    e2e_generate_galera_dr_report: true
+    e2e_galera_dr_report_path: /tmp/galera-e2e-dr-report.md
+    # Galera CR name (metadata.name); STS is often galera-<crname>. Do not use lookup(vars,'e2e_galera_cr_name') — recursion.
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+  tasks:
+    - name: Get API server from kubeconfig
+      ansible.builtin.shell: |
+        awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+      register: kubeconfig_server_gl
+      changed_when: false
+      failed_when: false
+
+    - name: Set API server fact for oc login
+      ansible.builtin.set_fact:
+        oc_api_server_auto: "{{ (kubeconfig_server_gl.stdout | trim) if (kubeconfig_server_gl.stdout is defined and kubeconfig_server_gl.stdout | trim | length > 0) else '' }}"
+
+    - name: OC login
+      ansible.builtin.shell: |
+        SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+        if [[ -n "$SERVER" ]]; then
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        else
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Initialize human-readable Galera E2E timeline log on controller
+      ansible.builtin.shell: |
+        set -euo pipefail
+        LOG="{{ e2e_galera_events_log_path }}"
+        [[ -n "$LOG" ]] || exit 0
+        umask 022
+        {
+          echo "================================================================================"
+          echo "Galera PodRemediator E2E — human-readable timeline (wsrep + Kubernetes events)"
+          echo "Started: $(date -Iseconds)  (host: $(hostname -f 2>/dev/null || hostname))"
+          echo "Workload namespace: {{ e2e_workload_ns }}"
+          echo "Operator namespace: {{ e2e_operator_ns }}"
+          echo "================================================================================"
+          echo ""
+        } > "$LOG"
+      args:
+        executable: /bin/bash
+      when: e2e_galera_events_log_path | default('') | length > 0
+
+    - name: Get PodRemediator resource name (for optional patch)
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o jsonpath='{.items[0].metadata.name}'"
+      register: pr_name_gl_patch
+      changed_when: false
+      failed_when: pr_name_gl_patch.stdout | length == 0
+
+    - name: Merge operator + workload namespaces into PodRemediator (lab opt-in)
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.shell: |
+        {{ oc_bin }} patch podremediator "{{ pr_name_gl_patch.stdout }}" -n {{ e2e_operator_ns }} --type=merge \
+          -p {{ {'spec': {'namespaces': [e2e_operator_ns, e2e_workload_ns]}} | to_json | quote }}
+      register: pr_gl_merge_patch
+      changed_when: true
+
+    - name: Show PodRemediator patch result
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.debug:
+        var: pr_gl_merge_patch.stdout_lines
+
+    - name: Check PodRemediator spec.namespaces includes workload namespace
+      ansible.builtin.shell: |
+        set -euo pipefail
+        TARGET="{{ e2e_workload_ns | trim }}"
+        COUNT="$({{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} --no-headers 2>/dev/null | wc -l)"
+        COUNT="${COUNT//[[:space:]]/}"
+        if [[ "${COUNT:-0}" -eq 0 ]]; then echo "No PodRemediator in {{ e2e_operator_ns }}"; exit 2; fi
+        NS_LINE="$({{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o jsonpath='{.items[0].spec.namespaces[*]}' 2>/dev/null || true)"
+        echo "PodRemediator namespaces: ${NS_LINE:-<empty>}"
+        for n in ${NS_LINE:-}; do [[ "$n" == "$TARGET" ]] && exit 0; done
+        exit 1
+      register: pr_gl_ns_check
+      changed_when: false
+      failed_when: pr_gl_ns_check.rc == 2
+      until: pr_gl_ns_check.rc == 0
+      retries: 20
+      delay: 3
+
+    - name: Confirm PodRemediator watches workload namespace (from last check)
+      ansible.builtin.debug:
+        msg: "PodRemediator lists namespace {{ e2e_workload_ns }} — PVC remediation can apply to Galera. Last check stdout: {{ pr_gl_ns_check.stdout_lines | default([]) }}"
+
+    # -------------------------------------------------------------------------
+    # Preflight: Galera CR + STS + pods healthy before node death (exploratory).
+    # -------------------------------------------------------------------------
+    - name: Preflight – Galera CR exists (mariadb.openstack.org)
+      when: e2e_galera_preflight | default(true) | bool and e2e_galera_preflight_cr | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CR="{{ e2e_galera_cr_name | default('openstack') }}"
+        NS="{{ e2e_workload_ns }}"
+        {{ oc_bin }} get galera "$CR" -n "$NS" -o name
+      register: gl_preflight_cr_exists
+      changed_when: false
+
+    - name: Preflight – Galera CR Ready or DeploymentReady condition is True
+      when: e2e_galera_preflight | default(true) | bool and e2e_galera_preflight_cr | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CR="{{ e2e_galera_cr_name | default('openstack') }}"
+        NS="{{ e2e_workload_ns }}"
+        JSON="$({{ oc_bin }} get galera "$CR" -n "$NS" -o json)"
+        echo "$JSON" | python3 -c 'import json,sys
+        d=json.load(sys.stdin)
+        conds=d.get("status",{}).get("conditions") or []
+        ok=False
+        for c in conds:
+          t=c.get("type","")
+          if t in ("Ready","DeploymentReady") and c.get("status")=="True":
+            ok=True
+            print("Galera condition", t, "= True")
+        sys.exit(0 if ok else 1)'
+      register: gl_preflight_cr_ready
+      changed_when: false
+
+    - name: Preflight – StatefulSet readyReplicas equals spec.replicas
+      when: e2e_galera_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        STS="{{ e2e_galera_sts_name }}"
+        DES="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+        RDY="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+        echo "STS $STS: readyReplicas=${RDY:-} spec.replicas=${DES:-}"
+        [[ -n "${DES:-}" && "${RDY:-}" == "${DES:-}" ]]
+      register: gl_preflight_sts
+      changed_when: false
+
+    - name: Preflight – all Galera StatefulSet pods are Running with containers Ready
+      when: e2e_galera_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        STS="{{ e2e_galera_sts_name }}"
+        PREFIX="${STS}-"
+        DES="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}')"
+        LIST="$({{ oc_bin }} get pod -n "$NS" --no-headers 2>/dev/null | awk -v pfx="$PREFIX" '$1 ~ "^" pfx "[0-9]+$" {print $1, $2, $3}')"
+        CNT=$(echo "$LIST" | awk 'NF{c++} END{print c+0}')
+        if [[ "$CNT" != "$DES" ]]; then
+          echo "Expected $DES pod(s) matching ^${PREFIX}[0-9]+$, found $CNT"
+          echo "$LIST"
+          exit 1
+        fi
+        BAD=$(echo "$LIST" | awk '
+          $2 !~ /^[0-9]+\/[0-9]+$/ {print "bad READY column:", $0; next}
+          {
+            p = index($2, "/")
+            if (p < 2) {print "bad READY column:", $0; next}
+            left = substr($2, 1, p - 1)
+            right = substr($2, p + 1)
+            if (left != right) {print "containers not ready:", $0; next}
+          }
+          $3 != "Running" {print "status not Running:", $0; next}
+        ')
+        if [[ -n "$BAD" ]]; then
+          echo "$BAD"
+          exit 1
+        fi
+        echo "All $DES pod(s) for $STS: READY and Running"
+      register: gl_preflight_pods
+      changed_when: false
+
+    - name: Preflight summary (Galera healthy for E2E)
+      when: e2e_galera_preflight | default(true) | bool
+      ansible.builtin.debug:
+        msg: >-
+          Galera preflight OK: galera/{{ e2e_galera_cr_name | default('openstack') }} (if CR check enabled),
+          STS/{{ e2e_galera_sts_name }} fully ready, pods Running. Proceeding to imported E2E playbook.
+
+- import_playbook: test-e2e-podremediator-pvc-remediation.yml
+  vars:
+    e2e_deploy_bundled_test_statefulset: false
+    e2e_workload_namespace: openstack
+    e2e_operator_namespace: openstack-operators
+    # Defaults: CR openstack → STS openstack-galera (mariadb-operator on OpenStack); PVC mysql-db-<sts>-0.
+    e2e_test_pod_name: openstack-galera-0
+    e2e_test_pvc_name: mysql-db-openstack-galera-0
+    e2e_statefulset_name: openstack-galera
+    e2e_pvc_deleted_timeout_seconds: 1200
+    e2e_pod_reschedule_timeout_seconds: 900
+    e2e_pod_ready_wait_seconds: 2400
+    e2e_galera_wsrep_monitor: true
+    e2e_galera_wsrep_step_checks: true
+    e2e_galera_wsrep_assert_final: true
+    e2e_k8s_events_report: true
+    e2e_k8s_events_relevant_only: true
+    e2e_galera_events_log_path: /tmp/galera-e2e-k8s-events.log
+    # Table + filtered events only (no per-pod SHOW dump; shorter step-check mysql TSV; less ansible -v noise).
+    e2e_galera_compact_log: true
+    # List + poll-log every Bound+local PVC on the node under test (e.g. two Galera members colocated).
+    e2e_report_all_local_pvcs_on_test_node: true
+    # Markdown DR from timeline log (script runs on controller; ansible.builtin.script ships file from had-18). Disable: -e e2e_generate_galera_dr_report=false
+    e2e_generate_galera_dr_report: true
+    e2e_galera_dr_report_path: /tmp/galera-e2e-dr-report.md
+
+- name: Galera E2E – Generate DR markdown report from timeline log
+  hosts: controllers
+  gather_facts: false
+  vars:
+    _log: "{{ e2e_galera_events_log_path | default('/tmp/galera-e2e-k8s-events.log') }}"
+    _out: "{{ e2e_galera_dr_report_path | default('/tmp/galera-e2e-dr-report.md') }}"
+  tasks:
+    - name: Generate Disaster Recovery & Availability markdown report (last E2E iteration in log)
+      when:
+        - e2e_generate_galera_dr_report | default(true) | bool
+        - (_log | trim | length) > 0
+      # Do not use command+playbook_dir here: tasks run on controller0 where that path does not exist.
+      ansible.builtin.script: "{{ playbook_dir }}/../scripts/galera_e2e_dr_report.py {{ _log }} {{ _out }}"
+      register: galera_dr_report_gen
+      changed_when: true
+
+    - name: DR report path on controller
+      when: e2e_generate_galera_dr_report | default(true) | bool
+      ansible.builtin.debug:
+        msg: >-
+          Galera DR markdown report: {{ _out }} (copy locally, e.g. with run-e2e.sh after Galera E2E, or scp zuul@<controller-host>:{{ _out }} .)

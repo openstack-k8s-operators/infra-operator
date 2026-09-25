@@ -1,0 +1,177 @@
+# Verifica manuale che l'ambiente sia pronto per E2E PodRemediator.
+# Da had-18 (come zuul): ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml test-kit/podremediator/playbooks/verify-e2e-ready.yml
+---
+- name: Verify controller0 – cluster and credentials
+  hosts: controllers
+  gather_facts: false
+  vars:
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    operator_namespace: openstack-operators
+    test_pod_name: "test-podremediator-0"
+    test_pvc_name: "data-test-podremediator-0"
+  tasks:
+    - name: Check kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
+      failed_when: not kubeconfig_stat.stat.exists
+
+    - name: Check kubeadmin password file exists
+      ansible.builtin.stat:
+        path: "{{ kubeadmin_password_file }}"
+      register: kubeadmin_stat
+      failed_when: not kubeadmin_stat.stat.exists
+
+    - name: OC login
+      ansible.builtin.shell: |
+        {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: oc_login
+      failed_when: oc_login.rc != 0
+
+    - name: Get nodes
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get nodes -o wide"
+      register: nodes_out
+      changed_when: false
+
+    - name: Show nodes
+      ansible.builtin.debug:
+        var: nodes_out.stdout_lines
+
+    - name: PodRemediator CR exists and Ready
+      ansible.builtin.shell: |
+        {{ oc_bin }} get podremediator -n {{ operator_namespace }} -o wide 2>/dev/null || true
+        {{ oc_bin }} get podremediator -n {{ operator_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "none"
+      register: pr_cr
+      changed_when: false
+      failed_when: false
+
+    - name: Show PodRemediator CR
+      ansible.builtin.debug:
+        var: pr_cr.stdout_lines
+
+    - name: NodeHealthCheck exists
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get nodehealthcheck -A 2>/dev/null || true"
+      register: nhc_out
+      changed_when: false
+      failed_when: false
+
+    - name: Show NodeHealthCheck
+      ansible.builtin.debug:
+        var: nhc_out.stdout_lines
+
+    - name: Test pod exists (Step 6)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n {{ operator_namespace }} {{ test_pod_name }} -o wide"
+      register: test_pod_out
+      changed_when: false
+      failed_when: false
+
+    - name: Assert test pod exists – run runbook Step 6 first
+      ansible.builtin.assert:
+        that: test_pod_out.rc == 0 and (test_pod_out.stdout | trim | length > 0)
+        fail_msg: "Pod {{ test_pod_name }} non trovato in {{ operator_namespace }}. Eseguire prima lo Step 6 del runbook (Run runbook Step 6 first)."
+        success_msg: "Pod {{ test_pod_name }} presente."
+
+    - name: Show test pod
+      ansible.builtin.debug:
+        var: test_pod_out.stdout_lines
+
+    - name: Test PVC exists
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pvc -n {{ operator_namespace }} {{ test_pvc_name }}"
+      register: test_pvc_out
+      changed_when: false
+      failed_when: false
+
+    - name: Assert test PVC exists – run runbook Step 6 first
+      ansible.builtin.assert:
+        that: test_pvc_out.rc == 0 and (test_pvc_out.stdout | trim | length > 0)
+        fail_msg: "PVC {{ test_pvc_name }} non trovata in {{ operator_namespace }}. Eseguire prima lo Step 6 del runbook (Run runbook Step 6 first)."
+        success_msg: "PVC {{ test_pvc_name }} presente."
+
+    - name: Show test PVC
+      ansible.builtin.debug:
+        var: test_pvc_out.stdout_lines
+
+    - name: Get pod node and PV node (same for E2E)
+      block:
+        - name: Get test pod node
+          ansible.builtin.shell: "{{ oc_bin }} get pod -n {{ operator_namespace }} {{ test_pod_name }} -o jsonpath='{.spec.nodeName}' 2>/dev/null"
+          register: pod_node
+          changed_when: false
+          failed_when: false
+
+        - name: Get PV name from PVC
+          ansible.builtin.shell: "{{ oc_bin }} get pvc -n {{ operator_namespace }} {{ test_pvc_name }} -o jsonpath='{.spec.volumeName}' 2>/dev/null"
+          register: pv_name
+          changed_when: false
+          failed_when: false
+
+        - name: Get PV node (topology)
+          ansible.builtin.shell: |
+            pv="{{ pv_name.stdout | trim }}"
+            if [[ -z "$pv" ]]; then echo ""; exit 0; fi
+            {{ oc_bin }} get pv "$pv" -o json | python3 -c "
+            import sys,json
+            d=json.load(sys.stdin)
+            aff=d.get('spec',{}).get('nodeAffinity',{}).get('required',{}).get('nodeSelectorTerms',[])
+            for term in aff:
+                for m in term.get('matchExpressions',[])+term.get('matchFields',[]):
+                    k=m.get('key','')
+                    if 'node' in k or 'hostname' in k:
+                        v=m.get('values',[])
+                        if v: print(v[0]); sys.exit(0)
+            print('')
+            " 2>/dev/null || echo ""
+          register: pv_node
+          changed_when: false
+          failed_when: false
+
+        - name: E2E readiness – pod and PV on same node
+          ansible.builtin.assert:
+            that:
+              - pod_node.stdout | trim | length > 0
+              - pv_node.stdout | trim | length > 0
+              - pod_node.stdout | trim == pv_node.stdout | trim
+            fail_msg: "E2E richiede pod e PV sullo stesso node. Pod node={{ pod_node.stdout | trim }}, PV node={{ pv_node.stdout | trim }}. Rilanciare Step 6 del runbook."
+            success_msg: "Pod e PV sullo stesso node ({{ pod_node.stdout | trim }}). OK per E2E."
+      when: test_pod_out.rc == 0 and test_pvc_out.rc == 0
+
+- name: Verify had-18 – virsh and kubeconfig for zuul
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: false
+  tasks:
+    - name: Virsh available
+      ansible.builtin.command:
+        cmd: virsh list --all
+      register: virsh_out
+      changed_when: false
+      failed_when: false
+
+    - name: Show virsh domains (cluster VMs)
+      ansible.builtin.debug:
+        var: virsh_out.stdout_lines
+      when: virsh_out.rc == 0
+
+    - name: Zuul kubeconfig on had-18 (for e2e optional checks)
+      ansible.builtin.stat:
+        path: "{{ controller_user_home }}/.kube/config"
+      register: zuul_kube
+      failed_when: false
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: |
+          controller0: oc, kubeconfig, kubeadmin, PodRemediator CR, NHC, test pod/PVC (e stesso node) verificati sopra.
+          had-18: virsh={{ 'OK' if virsh_out.rc == 0 else 'NON disponibile' }}, zuul .kube={{ 'presente' if zuul_kube.stat is defined and zuul_kube.stat.exists else 'assente' }}.
+          Per lanciare E2E: ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml test-kit/podremediator/playbooks/test-e2e-podremediator-pvc-remediation.yml -b -vvv
+      when: true

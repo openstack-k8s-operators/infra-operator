@@ -1,0 +1,116 @@
+---
+# Pick E2E victim pod/PVC before node kill (Galera only).
+# Sets host facts on controllers: e2e_test_pod_name, e2e_test_pvc_name, test_pod_name, test_pvc_name
+# (so the rest of test-e2e-podremediator-pvc-remediation.yml uses the chosen ordinal).
+#
+# Required context (parent play): oc_bin, e2e_workload_ns, e2e_sts_name (StatefulSet name).
+# Optional: e2e_galera_mysql_container (default galera), e2e_galera_victim_selection.
+#
+# e2e_galera_victim_selection:
+#   max_wsrep_last_committed — among Running pods with working mysql, pick highest
+#                            SHOW GLOBAL STATUS wsrep_last_committed (ties: lowest ordinal).
+#   random_member          — uniform choice among the same eligible set.
+#
+# PVC name: mysql-db-<sts_name>-<ordinal> (e.g. openstack-galera + 2 -> mysql-db-openstack-galera-2).
+
+- name: Resolve Galera E2E victim pod from wsrep_last_committed or at random
+  ansible.builtin.shell: |
+    set -euo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_sts_name }}"
+    CTR="{{ e2e_galera_mysql_container | default('galera') }}"
+    MODE="{{ e2e_galera_victim_selection | trim }}"
+    if [[ "$MODE" != "random_member" && "$MODE" != "random" && "$MODE" != "max_wsrep_last_committed" ]]; then
+      echo "Unknown e2e_galera_victim_selection='$MODE' (use max_wsrep_last_committed | random_member | random)" >&2
+      exit 4
+    fi
+
+    REPL="$($OC get sts "$STS" -n "$NS" -o json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("spec",{}).get("replicas",""))' || true)"
+    if ! [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Cannot read spec.replicas for STS $STS in $NS" >&2
+      exit 2
+    fi
+
+    PVC_PREFIX="mysql-db-${STS}"
+
+    declare -a ORDS=()
+    declare -a SEQS=()
+    declare -a NODES=()
+    declare -a PODS=()
+
+    for i in $(seq 0 $((REPL - 1))); do
+      POD="${STS}-${i}"
+      phase=$($OC get pod -n "$NS" "$POD" -o json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("status",{}).get("phase",""))' || true)
+      [[ "$phase" == "Running" ]] || continue
+      if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        continue
+      fi
+      seq_raw="$($OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -N -e \
+        "SHOW GLOBAL STATUS LIKE 'wsrep_last_committed';" 2>/dev/null | head -1 || true)"
+      seq="$(printf '%s' "$seq_raw" | head -1 | tr -d '\r' | cut -sf2)"
+      if ! [[ "$seq" =~ ^[0-9]+$ ]]; then
+        seq=-1
+      fi
+      node=$($OC get pod -n "$NS" "$POD" -o json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("spec",{}).get("nodeName") or "?")' || echo "?")
+      ORDS+=("$i")
+      SEQS+=("$seq")
+      NODES+=("$node")
+      PODS+=("$POD")
+    done
+
+    set -- "${PODS[@]}"
+    n=$#
+    if [[ "$n" -eq 0 ]]; then
+      echo "No Running Galera pod accepted mysql for STS $STS - cannot select victim" >&2
+      exit 3
+    fi
+
+    pick_idx=0
+    if [[ "$MODE" == "random_member" || "$MODE" == "random" ]]; then
+      pick_idx=$((RANDOM % n))
+    else
+      best_seq=-1
+      best_ord=999999
+      for j in $(seq 0 $((n - 1))); do
+        s="${SEQS[j]}"
+        o="${ORDS[j]}"
+        [[ "$s" =~ ^[0-9]+$ ]] || s=-1
+        if [[ "$s" -gt "$best_seq" ]]; then
+          best_seq="$s"
+          best_ord="$o"
+          pick_idx="$j"
+        elif [[ "$s" -eq "$best_seq" && "$o" -lt "$best_ord" ]]; then
+          best_seq="$s"
+          best_ord="$o"
+          pick_idx="$j"
+        fi
+      done
+    fi
+
+    ORD="${ORDS[pick_idx]}"
+    POD="${PODS[pick_idx]}"
+    NODE="${NODES[pick_idx]}"
+    SEQ="${SEQS[pick_idx]}"
+    PVC="${PVC_PREFIX}-${ORD}"
+
+    export V_MODE="$MODE" V_ORD="$ORD" V_POD="$POD" V_PVC="$PVC" V_NODE="$NODE" V_SEQ="$SEQ"
+    python3 -c "import json,os; e=os.environ; w=e['V_SEQ']; wi=int(w) if w.lstrip('-').isdigit() else None; print(json.dumps(dict(mode=e['V_MODE'],ordinal=int(e['V_ORD']),pod=e['V_POD'],pvc=e['V_PVC'],node=e['V_NODE'],wsrep_last_committed=wi)))"
+  args:
+    executable: /bin/bash
+  register: galera_victim_pick
+  changed_when: true
+
+- name: Show chosen Galera victim
+  ansible.builtin.debug:
+    msg: "{{ galera_victim_pick.stdout | from_json }}"
+
+- name: Publish victim as E2E test pod/PVC facts for following plays
+  ansible.builtin.set_fact:
+    e2e_test_pod_name: "{{ (galera_victim_pick.stdout | from_json).pod }}"
+    e2e_test_pvc_name: "{{ (galera_victim_pick.stdout | from_json).pvc }}"
+    test_pod_name: "{{ (galera_victim_pick.stdout | from_json).pod }}"
+    test_pvc_name: "{{ (galera_victim_pick.stdout | from_json).pvc }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: true
+  loop: "{{ groups['controllers'] }}"

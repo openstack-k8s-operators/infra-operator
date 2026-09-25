@@ -1,0 +1,295 @@
+---
+# Informational Galera / MariaDB checks during PodRemediator E2E (node kill, PVC wait, reschedule).
+# Each snapshot prints an ASCII summary table (pod / Ready / Phase / Node / wsrep_last_committed / wsrep_*), then per-ordinal mysql detail,
+# then the E2E target pod when set and not already an STS ordinal.
+# Parent play must set: wsrep_monitor_stage (label for logs), oc_bin, e2e_workload_ns, e2e_statefulset_name, test_pod_name.
+# Optional: e2e_galera_mysql_container (default galera).
+# Optional: e2e_galera_events_log_path — when set (non-empty), append a human-readable block (stage, wsrep, events) to that
+# file on the controller host after each snapshot (Galera wrapper initializes the file at playbook start).
+# Never fails the play (failed_when: false) — use e2e-galera-wsrep-assert-final.yml for hard checks.
+
+- name: Galera MariaDB / wsrep snapshot (informational)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_statefulset_name }}"
+    CTR="{{ mysql_ctr }}"
+    STAGE="{{ wsrep_monitor_stage }}"
+    TPPOD="{{ test_pod_name | default('') }}"
+
+    if [[ -z "$STS" ]]; then
+      echo "[$STAGE] e2e_statefulset_name empty — skip Galera DB snapshot"
+      exit 0
+    fi
+
+    echo "=== [$STAGE] $(date -Iseconds) ==="
+    REPL="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    RDY="$($OC get sts "$STS" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    echo "STS $STS: readyReplicas=${RDY:-?} spec.replicas=${REPL:-?}"
+
+    WSREP_Q="SHOW GLOBAL STATUS WHERE Variable_name IN (
+      'wsrep_last_committed','wsrep_cluster_size','wsrep_cluster_status','wsrep_local_state_comment',
+      'wsrep_connected','wsrep_ready','wsrep_flow_control_paused','wsrep_cluster_conf_id'
+    );
+    SHOW GLOBAL STATUS WHERE Variable_name = 'wsrep_incoming_addresses';"
+
+    truncate40() {
+      local s="$1" sl
+      sl=$(printf '%s' "$s" | wc -c)
+      [[ "$sl" -le 40 ]] && echo "$s" || echo "${s:0:37}..."
+    }
+
+    print_wsrep_table_header() {
+      echo ""
+      echo "--- wsrep summary (all STS ordinals + optional E2E target) ---"
+      printf '%s\n' "| Pod | Ready | Phase | Node | wsrep_last_committed | wsrep_cluster_size | wsrep_cluster_status | wsrep_local_state | wsrep_connected | wsrep_ready | wsrep_flow_control_paused | wsrep_cluster_conf_id | wsrep_incoming_addresses (trunc) |"
+      printf '%s\n' "|-----|-------|-------|-----------------------------|---------------------|--------------------|----------------------|-------------------|----------------|-------------|---------------------------|----------------------|----------------------------------|"
+    }
+
+    print_wsrep_table_row() {
+      local pod="$1" podrdy phase node lc sz st stc cr r f cid inc
+      podrdy=$($OC get pod -n "$NS" "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "?")
+      phase=$($OC get pod -n "$NS" "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || echo "?")
+      node=$($OC get pod -n "$NS" "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "?")
+      lc="—"; sz="—"; st="—"; stc="—"; cr="—"; r="—"; f="—"; cid="—"; inc="—"
+      if [[ "$phase" == "Running" ]] && $OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        local out
+        out=$($OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -N -e "$WSREP_Q" 2>/dev/null || true)
+        if [[ -n "$out" ]]; then
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            [[ "$line" != *"	"* ]] && continue
+            local k v
+            k="${line%%	*}"
+            v="${line#*	}"
+            v="${v//$'\r'/}"
+            case "$k" in
+              wsrep_last_committed) lc="$v" ;;
+              wsrep_cluster_size) sz="$v" ;;
+              wsrep_cluster_status) st="$v" ;;
+              wsrep_local_state_comment) stc="$v" ;;
+              wsrep_connected) cr="$v" ;;
+              wsrep_ready) r="$v" ;;
+              wsrep_flow_control_paused) f="$v" ;;
+              wsrep_cluster_conf_id) cid="$v" ;;
+              wsrep_incoming_addresses) inc="$v" ;;
+            esac
+          done <<< "$out"
+        fi
+      fi
+      if [[ -n "${METRICS_TMP:-}" ]]; then
+        printf '%s\t%s\t%s\n' "$pod" "$lc" "$node" >>"$METRICS_TMP"
+      fi
+      printf '| %-22s | %-5s | %-7s | %-28s | %-19s | %-18s | %-20s | %-17s | %-14s | %-11s | %-25s | %-20s | %-32s |\n' \
+        "$pod" "$podrdy" "$phase" "$node" "$lc" "$sz" "$st" "$stc" "$cr" "$r" "$f" "$cid" "$(truncate40 "$inc")"
+    }
+
+    wsrep_from_pod() {
+      local pod="$1"
+      local tag="$2"
+      local phase
+      phase=$($OC get pod -n "$NS" "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+      if [[ "$phase" != "Running" ]]; then
+        echo "[$tag] pod=$pod phase=${phase:-missing} — skip mysql"
+        return 1
+      fi
+      if ! $OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        echo "[$tag] pod=$pod mysql probe failed — skip wsrep"
+        return 1
+      fi
+      echo "[$tag] wsrep via pod=$pod container=$CTR"
+      $OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -e "$WSREP_Q" 2>&1 || echo "[$tag] mysql SHOW GLOBAL STATUS failed (non-fatal)"
+      return 0
+    }
+
+    declare -a SCAN_PODS
+    ANY=""
+    if [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      for i in $(seq 0 $((REPL - 1))); do
+        SCAN_PODS+=("${STS}-$i")
+      done
+    fi
+    if [[ -n "$TPPOD" ]]; then
+      dup=0
+      for p in "${SCAN_PODS[@]}"; do
+        [[ "$p" == "$TPPOD" ]] && dup=1
+      done
+      [[ $dup -eq 0 ]] && SCAN_PODS+=("$TPPOD")
+    fi
+
+    _scan_n=0
+    for __scan in "${SCAN_PODS[@]}"; do _scan_n=$((_scan_n + 1)); done
+    if [[ "$_scan_n" -gt 0 ]]; then
+      METRICS_TMP=$(mktemp)
+      print_wsrep_table_header
+      for p in "${SCAN_PODS[@]}"; do
+        print_wsrep_table_row "$p"
+      done
+      best_lc=-1
+      best_p=""
+      best_n=""
+      if [[ -f "${METRICS_TMP:-}" ]]; then
+        while IFS="$(printf '\t')" read -r mp mv mn; do
+          [[ -z "${mp:-}" ]] && continue
+          [[ "$mp" =~ ^${STS}-[0-9]+$ ]] || continue
+          [[ "$mv" =~ ^[0-9]+$ ]] || continue
+          if [[ -z "$best_p" ]] || [[ "$mv" -gt "$best_lc" ]] || [[ "$mv" -eq "$best_lc" && "$mp" < "$best_p" ]]; then
+            best_lc=$mv
+            best_p=$mp
+            best_n=$mn
+          fi
+        done <"$METRICS_TMP"
+        rm -f "$METRICS_TMP"
+      fi
+      unset METRICS_TMP
+      if [[ -n "$best_p" ]] && [[ "$best_lc" -ge 0 ]]; then
+        echo ""
+        echo "(Highest wsrep_last_committed among ${STS}-* rows: ${best_lc} on pod ${best_p}, node ${best_n}. With e2e_galera_victim_selection=max_wsrep_last_committed the killed worker is the node for the victim pod at pick time, typically this member if the snapshot matches that moment.)"
+      fi
+      echo ""
+      echo "--- wsrep detail (mysql) ---"
+      for p in "${SCAN_PODS[@]}"; do
+        echo ""
+        if [[ "$p" =~ ^${STS}-[0-9]+$ ]]; then
+          ord="${p#${STS}-}"
+          echo ">>> ordinal $ord ($p)"
+          if wsrep_from_pod "$p" "ordinal-$ord"; then ANY=1; fi
+        else
+          echo ">>> E2E target pod ($p)"
+          wsrep_from_pod "$p" "e2e-target" || true
+        fi
+      done
+    else
+      echo "[sts-member] invalid or missing replicas='$REPL'"
+    fi
+
+    if [[ -z "$ANY" ]] && [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      echo "[sts-member] no STS ordinal pod accepted mysql; Galera pods (wide):"
+      $OC get pod -n "$NS" -o wide 2>/dev/null | grep "^${STS}-" || true
+    fi
+
+    if [[ -n "$TPPOD" ]] && [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      for i in $(seq 0 $((REPL - 1))); do
+        if [[ "${STS}-$i" == "$TPPOD" ]]; then
+          echo ""
+          echo "(E2E target $TPPOD is STS ordinal $i — same row in the summary table; detail printed in the STS block above.)"
+          break
+        fi
+      done
+    fi
+    exit 0
+  args:
+    executable: /bin/bash
+  register: galera_wsrep_monitor_out
+  changed_when: false
+  failed_when: false
+  vars:
+    mysql_ctr: "{{ e2e_galera_mysql_container | default('galera') }}"
+
+- name: Show Galera DB / wsrep snapshot
+  ansible.builtin.debug:
+    msg: "{{ galera_wsrep_monitor_out.stdout_lines | default(['<no output>']) }}"
+
+# Kubernetes Events (relevant lines only by default) — alongside wsrep.
+# Enable: e2e_k8s_events_report=true (Galera wrapper sets this). Disable: -e e2e_k8s_events_report=false
+# Filtering (default on): -e e2e_k8s_events_relevant_only=false restores full tail without grep.
+# Override grep extended regex: -e 'e2e_k8s_events_filter_regex=my|pattern'  (empty string = no filter)
+# Raw lines scanned before filter: e2e_k8s_events_fetch_lines (default 2500). Max lines after filter: e2e_k8s_events_max_lines (default 120).
+- name: Kubernetes events snapshot (workload + operator namespaces)
+  ansible.builtin.shell: |
+    set -uo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    OP_NS="{{ e2e_operator_ns | default(lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators')) }}"
+    STAGE="{{ wsrep_monitor_stage }}"
+    FETCH="{{ e2e_k8s_events_fetch_lines | default(2500) }}"
+    MAX="{{ e2e_k8s_events_max_lines | default(120) }}"
+    MODE="{{ _e2e_k8s_rx_mode }}"
+    CUSTOM={{ _e2e_k8s_custom_rx_q }}
+    # Built-in: Galera STS/PVC names, PodRemediator, node remediation, MariaDB/infra operators, common volume/pod failures
+    DEFAULT_RX='openstack-galera|mysql-db-openstack-galera|podremediator|PodRemediator|selfnoderemediation|SelfNodeRemediation|nodehealthcheck|NodeHealthCheck|infra-operator|mariadb-operator|FailedKillPod|KillPod|FailedAttachVolume|FailedMount|VolumeDelete|FreeDiskSpace|Evicted|BackOff|Error.*galera|galera\.openstack'
+
+    case "$MODE" in
+      custom) RX="$CUSTOM" ;;
+      builtin) RX="$DEFAULT_RX" ;;
+      *) RX="" ;;
+    esac
+
+    # Stream: recent window (FETCH) then optional grep -iE, then cap at MAX lines.
+    emit_filtered() {
+      local ns="$1"
+      local raw
+      raw=$($OC get events -n "$ns" --sort-by='.lastTimestamp' 2>/dev/null || true)
+      if [[ -n "$RX" ]]; then
+        { echo "$raw" | tail -n "$FETCH" | grep -iE -- "$RX" || true; } | tail -n "$MAX"
+      else
+        echo "$raw" | tail -n "$MAX" || true
+      fi
+    }
+
+    echo "=== K8s Events [$STAGE] $(date -Iseconds) ns=$NS (mode=$MODE fetch=$FETCH max=$MAX) ==="
+    if [[ -n "$RX" ]]; then
+      n=$(emit_filtered "$NS" | wc -l)
+      echo "(relevant lines in tail window: $n)"
+    fi
+    emit_filtered "$NS" || echo "(no events or API error)"
+    echo "=== K8s Events [$STAGE] ns=$OP_NS (mode=$MODE) ==="
+    if [[ -n "$RX" ]]; then
+      n=$(emit_filtered "$OP_NS" | wc -l)
+      echo "(relevant lines: $n)"
+    fi
+    emit_filtered "$OP_NS" || echo "(no events or API error)"
+    exit 0
+  args:
+    executable: /bin/bash
+  register: galera_k8s_events_out
+  changed_when: false
+  failed_when: false
+  when: e2e_k8s_events_report | default(false) | bool
+  vars:
+    _e2e_k8s_custom_rx: "{{ e2e_k8s_events_filter_regex | default('', true) }}"
+    _e2e_k8s_custom_rx_q: "{{ _e2e_k8s_custom_rx | quote }}"
+    _e2e_k8s_rx_mode: >-
+      {% if e2e_k8s_events_filter_regex is defined %}
+      {% if e2e_k8s_events_filter_regex | string | length > 0 %}custom{% else %}none{% endif %}
+      {% elif e2e_k8s_events_relevant_only | default(true) | bool %}builtin
+      {% else %}none{% endif %}
+
+- name: Show Kubernetes events snapshot
+  ansible.builtin.debug:
+    msg: "{{ galera_k8s_events_out.stdout_lines | default(['<no events block>']) }}"
+  when: e2e_k8s_events_report | default(false) | bool
+
+- name: Append Galera E2E human-readable timeline (wsrep + events) to log file on controller
+  when: e2e_galera_events_log_path | default('') | length > 0
+  block:
+    - name: Write one timeline segment to temp file
+      ansible.builtin.copy:
+        dest: /tmp/galera-e2e-timeline-segment.txt
+        mode: "0600"
+        content: |
+
+          ################################################################################
+          # Stage: {{ wsrep_monitor_stage }}
+          # Timestamp: {{ lookup('pipe', 'date -Iseconds') }}
+          ################################################################################
+
+          === Galera / MariaDB wsrep ===
+          {{ galera_wsrep_monitor_out.stdout | default('<no wsrep output>') }}
+          {% if e2e_k8s_events_report | default(false) | bool and galera_k8s_events_out is defined %}
+
+          === Kubernetes events (workload ns {{ e2e_workload_ns }}, operator ns {{ e2e_operator_ns | default(lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators')) }}; relevant-only grep by default, max {{ e2e_k8s_events_max_lines | default(120) }} lines per ns) ===
+          {{ galera_k8s_events_out.stdout | default('') }}
+          {% else %}
+
+          (Kubernetes events not collected for this stage.)
+          {% endif %}
+
+    - name: Append segment to log file
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cat /tmp/galera-e2e-timeline-segment.txt >> "{{ e2e_galera_events_log_path }}"
+        rm -f /tmp/galera-e2e-timeline-segment.txt
+      args:
+        executable: /bin/bash
