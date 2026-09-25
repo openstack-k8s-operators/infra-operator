@@ -36,13 +36,17 @@ flowchart TD
     F["Sets annotation\nsafe-to-delete=true"]
     F --> G
 
-    G["PodRemediator\nforce-deletes pod\n→ deletes PVC"]
+    G["PodRemediator\nforce-deletes consented pod\n→ requests PVC deletion"]
     G -->|Phase 3| H
 
-    H([StatefulSet recreates pod + PVC\non a healthy node])
+    H{"Replacement pod holds\nterminating PVC?"}
+    H -->|Yes| I["Workload operator pauses recreation\nand releases replacement pod"]
+    H -->|No| J
+    I --> J
+    J(["PVC deletion completes; workload operator\nconfirms safe recovery"])
 
     style A fill:#e8f5e9,stroke:#388e3c
-    style H fill:#e8f5e9,stroke:#388e3c
+    style J fill:#e8f5e9,stroke:#388e3c
     style D fill:#fff3e0,stroke:#f57c00
     style F fill:#fff3e0,stroke:#f57c00
     style G fill:#fce4ec,stroke:#c62828
@@ -57,11 +61,16 @@ consent from the application operator:
 |-------|-------|--------|
 | 1 | PodRemediator | Annotates stuck PVC: `remediation.openstack.org/pvc-stuck-on-node=<node>` |
 | 2 | Application operator | Sets `remediation.openstack.org/safe-to-delete=true` after safety checks |
-| 3 | PodRemediator | Force-deletes pod then PVC; StatefulSet reschedules on healthy node |
+| 3 | PodRemediator | Force-deletes the consented pod and requests PVC deletion; waits for any replacement pod to release PVC protection |
 
 If the node recovers before the app operator grants consent, PodRemediator removes
 the handshake annotations — no deletion occurs. The app operator must re-evaluate on the
 next independent fault.
+
+The application operator can withdraw consent until PodRemediator finalizes the PVC
+deletion token with a conditional write. The earlier marker write is provisional.
+Once the token is finalized, removing consent or disabling PodRemediator does not
+cancel cleanup for the selected Pods.
 
 ### Dependency on NHC and SNR
 
@@ -166,7 +175,7 @@ apiVersion: remediation.openstack.org/v1beta1
 kind: PodRemediator
 metadata:
   name: podremediator
-  namespace: openstack-operators
+  namespace: openstack
 spec:
   # PVC remediation is enabled when the CR is applied.
 ```
@@ -178,7 +187,7 @@ oc apply -f the-above.yaml
 **Step 2 — Verify the CR is Ready**
 
 ```bash
-oc get podremediator -n openstack-operators
+oc get podremediator -n openstack
 # NAME             READY   MESSAGE
 # podremediator    True    No unhealthy nodes; monitoring
 ```
@@ -192,8 +201,9 @@ If `READY=False`:
 
 **Step 3 — Scope**
 
-PodRemediator watches local PVCs only in its own namespace. Create a separate
-PodRemediator in each workload namespace that needs remediation.
+PodRemediator watches local PVCs only in its own namespace. The Galera example
+uses the workload namespace `openstack`; create one PodRemediator in each
+additional workload namespace that needs remediation.
 
 **Step 4 — Confirm the application operator is ready (Galera)**
 
@@ -219,7 +229,7 @@ echo "=== infra-operator ===" && \
     -n openstack-operators 2>/dev/null | grep -E "NAME|1/1"
 
 echo "=== PodRemediator CR ===" && \
-  oc get podremediator -n openstack-operators
+  oc get podremediator -n openstack
 
 echo "=== NHC ===" && \
   oc get nodehealthcheck 2>/dev/null | head -5
@@ -251,7 +261,7 @@ All outputs should show healthy / at-least-one-row results before running an E2E
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `disabled` | `bool` | `false` | Stops annotation and deletion and clears pending consent. Set to `true` for maintenance windows. |
+| `disabled` | `bool` | `false` | Stops new handshakes and cancels pending consent. Cleanup already committed for a PVC continues. Set to `true` for maintenance windows. |
 | `consentPollInterval` | `metav1.Duration` | `"2m"` | Fallback retry interval for PVCs waiting for fencing or app-operator consent. Lower = faster response, higher = less API load. |
 | `periodicPollInterval` | `metav1.Duration` | `"5m"` | Safety-net requeue for all idle states. Ensures the controller catches pre-existing unhealthy nodes after an operator pod restart (when no node-transition event fires). |
 
@@ -317,9 +327,10 @@ spec:
 
 Use during maintenance windows. The controller still requires NHC/SNR and reports
 `Ready=True` with a disabled message when those dependencies are available.
-Disabling clears both remediation annotations from PVCs in the CR's namespace, including
-consent, even when NHC/SNR are unavailable. Cleanup failures retry. Re-enable by
-setting `disabled: false`; the application operator must grant fresh consent.
+Disabling clears pending handshake annotations and consent from PVCs in the CR's
+namespace, even when NHC/SNR are unavailable. A deletion already committed before
+disablement continues through Pod and PVC cleanup. Cleanup failures retry.
+Re-enable by setting `disabled: false`; any cancelled handshake needs fresh consent.
 
 ### Watch a workload namespace
 
@@ -336,9 +347,30 @@ When PodRemediator annotates a PVC with `pvc-stuck-on-node`, the app operator mu
    `remediation.openstack.org/consent-id` to the current
    `remediation.openstack.org/request-id` in the same optimistic-locking update.
 
-PodRemediator then force-deletes the referencing pod and the PVC. If the node
+PodRemediator then force-deletes the consented pod and requests PVC deletion. If the node
 recovers before consent is granted, PodRemediator removes the handshake annotations and no
 deletion occurs. Fresh consent is required on each independent fault event.
+
+### When a replacement Pod blocks PVC deletion
+
+A live StatefulSet may recreate an ordinal before the old PVC is fully removed.
+If that new Pod uses the terminating PVC, Kubernetes PVC protection keeps the
+claim in `Terminating`. PodRemediator keeps its deletion commit and CR finalizer,
+requeues, and sets `Ready=False` with reason
+`ReplacementPodBlocksPVCDeletion`. The condition names the PVC and replacement
+Pod that need attention. PodRemediator does not delete the replacement Pod or
+change StatefulSet replicas.
+
+The workload operator must safely pause recreation and release that replacement
+Pod, then allow the old PVC to disappear before restoring its desired workload.
+For a multi-replica Galera cluster, scaling the whole StatefulSet to zero just
+to release one ordinal can stop healthy members; coordinate this with the
+application operator's quorum and recovery procedure. Inspect the PodRemediator
+condition, PVC, and Pod in the workload namespace. Do not remove the
+PodRemediator or PVC-protection finalizers or the deletion commit ConfigMap to
+bypass this wait. A consent decision for one PVC does not authorize automatic
+changes to the other replicas, so recovery at intended nonzero replicas is not
+guaranteed without workload-operator intervention.
 
 ### Consent annotation strings (shared contract)
 

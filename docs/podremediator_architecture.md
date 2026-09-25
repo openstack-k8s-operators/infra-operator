@@ -89,7 +89,7 @@ with the following safety layers (all active):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `disabled` | `bool` | `false` | Stop annotation and deletion; clear pending consent. |
+| `disabled` | `bool` | `false` | Stop new handshakes and clear pending consent; committed cleanup continues. |
 | `consentPollInterval` | `*metav1.Duration` | `"2m"` | Fallback requeue interval while waiting for fencing or consent. Overrides `PODREMEDIATOR_CONSENT_POLL_INTERVAL`. |
 | `periodicPollInterval` | `*metav1.Duration` | `"5m"` | Safety-net requeue for idle states (catches restart-recovery case). Overrides `PODREMEDIATOR_PERIODIC_POLL_INTERVAL`. |
 
@@ -182,10 +182,17 @@ healthy. A missing Node does not imply recovery.
 - **Path A — node recovered:** when the annotated node exists and is healthy,
   remove the handshake annotations so the next fault requires fresh consent.
 - **Path B — consent granted:** require confirmed fencing, `safe-to-delete=true`,
-  and a bound local PV exclusively pinned to the annotated node. Force-delete
-  pods referencing the PVC on that node (or not yet scheduled), then delete the
-  PVC. Existing handshakes can complete after the Node object disappears, provided
-  the SNR still supplies fencing confirmation.
+  and a bound local PV exclusively pinned to the annotated node. Record the
+  selected Pod UIDs in a prepared controller-owned ConfigMap. A first PVC write
+  installs a provisional marker and token. A second optimistic-lock PVC write
+  finalizes the token while consent is still present; that write is the
+  irrevocable consent boundary. The provisional marker cannot authorize cleanup.
+  The ConfigMap is then promoted and the selected Pods and
+  PVC are removed. A new claim user or a Pod on another node aborts deletion
+  and clears the pending handshake before the PVC is deleted. If a replacement
+  appears after the PVC deletion request, the commit and CR finalizer stay
+  pending while PVC protection holds the claim. Once committed, cleanup resumes
+  across SNR loss, node recovery, disablement, and CR deletion.
 - **Path C — waiting:** retain the handshake while fencing or consent is missing.
   If an SNR expires or is removed while its node is still unhealthy, deletion
   pauses until fencing can be confirmed again. PVC annotation events trigger
@@ -257,6 +264,11 @@ namespace A are enqueued — not every PodRemediator in the cluster.
 
 ### 3.7 RBAC
 
+Deletion commits use the operator's existing ConfigMap permissions; no additional
+RBAC grant is needed. Users allowed to update PVC consent annotations must not
+have write access to the `podremediator-deletion-*` ConfigMaps, which are trusted
+controller state. ConfigMap write access can forge a deletion commit.
+
 | API group | Resources | Verbs |
 |-----------|-----------|-------|
 | `remediation.openstack.org` | `podremediators`, `podremediators/status`, `podremediators/finalizers` | full |
@@ -326,7 +338,18 @@ CSI driver with a custom key will be silently excluded. Add missing keys to
 
 ### 6.3 StatefulSet recovery not guaranteed
 
-After PVC deletion the StatefulSet creates a new PVC + pod on a healthy node. This fails if:
+After PVC deletion, workload recovery may create a new PVC and Pod on a healthy
+node. A live StatefulSet can recreate an ordinal while the old PVC is still
+terminating. PodRemediator will not force-delete that replacement or scale the
+StatefulSet: consent selected one PVC and its observed Pod UIDs, while scaling a
+multi-replica StatefulSet to zero could stop healthy quorum members. The
+controller reports `Ready=False` with reason `ReplacementPodBlocksPVCDeletion`,
+retains its commit and finalizer, and retries until the workload operator safely
+pauses recreation and releases the replacement Pod. Therefore automatic
+convergence at the intended nonzero replica count is not guaranteed under this
+consent contract.
+
+Recovery can also fail if:
 - **LVMS capacity exhausted** — new PVC stays Pending.
 - **RabbitMQ `inconsistent_cluster`** — observed in lab; requires manual StatefulSet
   scale + PVC replacement. Document in runbook if encountered.
@@ -350,19 +373,18 @@ production is:
 
 ### For RabbitMQ
 
-> **Important:** The consent handshake requires the **rabbitmq-cluster-operator** to
-> implement the app-operator side — watch for `pvc-stuck-on-node` and set
-> `safe-to-delete=true` after quorum safety checks. PodRemediator annotates PVCs
-> correctly, but without consent from the RabbitMQ operator the PVC is **never deleted**.
-> This is the primary blocking gap for RabbitMQ production use.
+> **Status:** RabbitMQ consent and status integration for infra-operator's
+> `rabbitmqs.rabbitmq.openstack.org` CR is pending in PR #684. Until that work lands,
+> this CR does not grant `safe-to-delete` consent to PodRemediator. The separate
+> upstream `rabbitmqclusters.rabbitmq.com` integration remains out of scope for Phase 1.
 
 | Priority | Feature | Status |
 |----------|---------|--------|
 | P0 | SNR-gated annotation in PodRemediator (F8) | ✅ Done |
 | P0 | Consent infrastructure in PodRemediator | ✅ Done — PodRemediator side only |
-| **P0** | **rabbitmq-cluster-operator sets `safe-to-delete` after quorum checks** | Out of scope for Phase 1 — `rabbitmqs.rabbitmq.openstack.org` consent done; upstream `rabbitmqclusters.rabbitmq.com` is a follow-up |
-| P0 | `rabbitmqs.rabbitmq.openstack.org` consent (infra-operator's own RabbitMQ CR) | ✅ Done |
-| P0 | `status.pvcRemediation` observability on RabbitmqCluster CR | ✅ Done |
+| **P0** | **rabbitmq-cluster-operator sets `safe-to-delete` after quorum checks** | Out of scope for Phase 1 — upstream `rabbitmqclusters.rabbitmq.com` is a follow-up |
+| P0 | `rabbitmqs.rabbitmq.openstack.org` consent (infra-operator's own RabbitMQ CR) | Pending — dependent on PR #684 |
+| P0 | `status.pvcRemediation` observability for RabbitMQ | Pending — dependent on PR #684 |
 | P1 | RabbitMQ-level quorum check (`rabbitmqctl` or CR status) instead of `AvailableReplicas` only | Open |
 | P1 | Fix F13 — `deletePodsForPVC` error handling | ✅ Done |
 | P1 | Fix F12 — annotation-patch failure requeue | ✅ Done |
@@ -384,8 +406,9 @@ production is:
 
 ## 7b. RabbitMQ consent implementation design
 
-> **Scope:** `rabbitmqs.rabbitmq.openstack.org` consent is implemented in the stacked PR #684, outside this foundation PR.
-> The upstream `rabbitmqclusters.rabbitmq.com` (rabbitmq-cluster-operator) is out of scope for Phase 1.
+> **Status:** `rabbitmqs.rabbitmq.openstack.org` consent and status integration is
+> pending in stacked PR #684, outside this foundation PR. The upstream
+> `rabbitmqclusters.rabbitmq.com` (rabbitmq-cluster-operator) integration is out of scope for Phase 1.
 
 The RabbitMQ operator is **in this repo** (`infra-operator`). No external operator needed.
 
@@ -395,7 +418,7 @@ Verified from a running OSP cluster (2026-08-07):
 - Storage class: `lvms-local-storage` → node-pinned PVCs → remediation IS needed
 - Queue type: `Quorum` (Raft-based)
 
-**Files to modify:**
+**PR #684 implementation scope:**
 - `apis/rabbitmq/v1beta1/rabbitmq_types.go` — add `PVCRemediationStatus` + field to `RabbitMqStatus`
 - `internal/controller/rabbitmq/rabbitmq_controller.go` — add `CheckForStuckPVCRequiringRemediation`, PVC watch, call in reconcile loop
 

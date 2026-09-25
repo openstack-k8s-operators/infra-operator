@@ -1,0 +1,35 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 240
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      POD=podremediator-lease-0
+      REMEDIATOR=podremediator-deletion-commit
+      for attempt in $(seq 1 120); do
+        pod_uid=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        pod_deleting=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
+        pvc_uid=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        pvc_finalizers=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+        lease_names=$(oc get configmaps -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+        lease_name=$(printf '%s\n' "$lease_names" | grep '^podremediator-deletion-' | head -n 1)
+        if [ -n "$pod_uid" ] && [ -n "$pod_deleting" ] && [ -n "$pvc_uid" ] && echo "$pvc_finalizers" | grep -q 'kubernetes.io/pvc-protection' && [ -n "$lease_name" ]; then
+          state=$(oc get configmap "$lease_name" -n "$NAMESPACE" -o go-template='{{ index .metadata.annotations "remediation.openstack.org/deletion-commit-state" }}')
+          remediator_uid=$(oc get podremediator "$REMEDIATOR" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+          printf '%s' "$state" | grep -Fq "\"pvcName\":\"$CLAIM\"" && \
+            printf '%s' "$state" | grep -Fq "\"pvcUID\":\"$pvc_uid\"" && \
+            printf '%s' "$state" | grep -Fq "\"remediatorUID\":\"$remediator_uid\"" && \
+            printf '%s' "$state" | grep -Fq '"node":"podremediator-lease-node"' && \
+            printf '%s' "$state" | grep -Fq "\"pods\":[{\"name\":\"$POD\",\"uid\":\"$pod_uid\"}]" || continue
+          committed=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.remediation\.openstack\.org/pvc-deletion-committed}')
+          if [ -n "$committed" ]; then
+            exit 0
+          fi
+        fi
+        sleep 2
+      done
+      echo "Expected ConfigMap-backed commit and protected terminating Pod were not observed"
+      oc get pvc "$CLAIM" -n "$NAMESPACE" -o yaml || true
+      oc get pod "$POD" -n "$NAMESPACE" -o yaml || true
+      oc get configmaps -n "$NAMESPACE" -o yaml || true
+      exit 1
