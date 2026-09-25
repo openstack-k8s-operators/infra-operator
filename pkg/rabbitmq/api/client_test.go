@@ -19,11 +19,45 @@ package api
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+// generateTestCACert returns a self-signed CA certificate in PEM form for use
+// in TLS client tests.
+func generateTestCACert(t *testing.T) []byte {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	certTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	certBytes, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+}
 
 func TestNewClient(t *testing.T) {
 	client, err := NewClient("http://localhost:15672", "user", "pass", false, nil)
@@ -53,6 +87,65 @@ func TestNewClient_NoCACert_TLSEnabled(t *testing.T) {
 	}
 	if client == nil {
 		t.Fatal("Expected client to be created")
+	}
+
+	// A TLS-enabled client must still pin TLS 1.3 even without a custom CA,
+	// falling back to the system trust store (RootCAs nil).
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.httpClient.Transport)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set for a TLS-enabled client")
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS13 {
+		t.Errorf("expected MinVersion TLS 1.3 (%d), got %d", tls.VersionTLS13, transport.TLSClientConfig.MinVersion)
+	}
+	if transport.TLSClientConfig.RootCAs != nil {
+		t.Error("expected RootCAs to be nil (system trust store) when no CA cert is supplied")
+	}
+}
+
+// TestNewClient_NoTLS verifies a client created without TLS retains the default
+// transport behavior (no custom TLS config is installed).
+func TestNewClient_NoTLS(t *testing.T) {
+	client, err := NewClient("http://localhost:15672", "user", "pass", false, nil)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	if client.httpClient.Transport != nil {
+		t.Errorf("expected default transport (nil) for a non-TLS client, got %T", client.httpClient.Transport)
+	}
+}
+
+// TestNewClient_TLSConfig verifies the TLS client configuration used for
+// outbound connections stays post-quantum ready: TLS 1.3 minimum and no
+// override of CurvePreferences (leaving it unset preserves Go's hybrid
+// post-quantum key exchange default, X25519MLKEM768).
+func TestNewClient_TLSConfig(t *testing.T) {
+	caCert := generateTestCACert(t)
+
+	client, err := NewClient("https://localhost:15671", "user", "pass", true, caCert)
+	if err != nil {
+		t.Fatalf("NewClient with valid CA cert should succeed: %v", err)
+	}
+
+	transport, ok := client.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.httpClient.Transport)
+	}
+	tlsConfig := transport.TLSClientConfig
+	if tlsConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set")
+	}
+	if tlsConfig.MinVersion != tls.VersionTLS13 {
+		t.Errorf("expected MinVersion TLS 1.3 (%d), got %d", tls.VersionTLS13, tlsConfig.MinVersion)
+	}
+	if tlsConfig.CurvePreferences != nil {
+		t.Errorf("expected CurvePreferences to be unset to preserve the post-quantum default, got %v", tlsConfig.CurvePreferences)
+	}
+	if tlsConfig.RootCAs == nil {
+		t.Error("expected RootCAs to be populated from the provided CA cert")
 	}
 }
 
