@@ -744,7 +744,10 @@ func TestPreparedDeletionCommitDoesNotPromoteAfterConsentRevocation(t *testing.T
 	}
 	validatedPVCResourceVersion := pvc.ResourceVersion
 	requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
-	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	token, err := newDeletionCommitToken()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	pod := podUsingClaim("pod", "worker-0", "pod-uid", []string{"test.example/pod-cleanup"})
 	if err := r.Create(ctx, pod); err != nil {
@@ -840,7 +843,10 @@ func TestFinalizedPreparedDeletionCommitResumesAfterConsentRevocation(t *testing
 	if err := r.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	const token = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	token, err := newDeletionCommitToken()
+	if err != nil {
+		t.Fatal(err)
+	}
 	state := deletionCommit{
 		PVCName: pvc.Name, PVCUID: string(pvc.UID), PVCResourceVersion: pvc.ResourceVersion,
 		RequestID:     pvc.Annotations[remediationv1.RequestIDAnnotation],
