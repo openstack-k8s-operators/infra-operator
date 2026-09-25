@@ -75,6 +75,13 @@ type MemcachedSpecCore struct {
 	MaxConn int32 `json:"maxConn"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=none;verbose;debug
+	// +kubebuilder:default=debug
+	// LogLevel controls memcached logging verbosity: "none" (quiet),
+	// "verbose" (-v), or "debug" (-vv).
+	LogLevel string `json:"logLevel,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	// TopologyRef to apply the Topology defined by the associated CR referenced
 	// by name
 	TopologyRef *topologyv1.TopoRef `json:"topologyRef,omitempty"`
@@ -163,6 +170,24 @@ type MemcachedList struct {
 
 func init() {
 	SchemeBuilder.Register(&Memcached{}, &MemcachedList{})
+}
+
+// LogOption returns the memcached command-line verbosity flag corresponding to
+// the configured LogLevel. The returned value is always one of a fixed set of
+// constants so that no user-controlled string is ever passed to the memcached
+// launch command.
+func (instance *MemcachedSpecCore) LogOption() string {
+	switch instance.LogLevel {
+	case "none":
+		return ""
+	case "verbose":
+		return "-v"
+	case "debug":
+		return "-vv"
+	default:
+		// Fall back to the historical default (very verbose).
+		return "-vv"
+	}
 }
 
 // ValidateTopology -
