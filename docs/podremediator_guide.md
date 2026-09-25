@@ -1,0 +1,378 @@
+# PodRemediator – Operator Guide
+
+## What is PodRemediator?
+
+PodRemediator is a controller in infra-operator that helps unblock stateful
+workloads using **local persistent storage** (e.g. Galera, RabbitMQ) when a worker
+node fails. Local PVCs are node-pinned; they may remain bound to the failed node.
+PodRemediator coordinates their removal only after SNR fencing evidence and
+application-operator consent. The application operator remains responsible for
+recreating and recovering the workload; PVC deletion alone does not guarantee
+recovery.
+
+PodRemediator bridges the gap between the existing OpenShift remediation stack
+(NHC + SNR) and the application operators that own the workloads.
+
+For controller behavior, see the [architecture](podremediator_architecture.md).
+Workload-specific guidance is split into the [Galera](podremediator_galera.md)
+and [RabbitMQ](podremediator_rabbitmq.md) integration documents; the
+[testing guide](podremediator_testing.md) describes what each test layer covers.
+
+---
+
+## How It Works
+
+### Architecture Overview
+
+The full request, consent, commit, and cleanup flow—including node recovery,
+disablement, and replacement-Pod handling—is shown in the
+[architecture flow](podremediator_architecture.md#remediation-flow).
+
+### Consent handshake
+
+PodRemediator never deletes a PVC on its own. Every deletion requires explicit
+consent from the application operator:
+
+| Step | Actor | Action |
+|-------|-------|--------|
+| 1 | PodRemediator | After SNR confirmation, writes `pvc-stuck-on-node` and a fresh `request-id`, clearing stale consent |
+| 2 | Application operator | Sets `safe-to-delete=true` and `consent-id` to the current `request-id` after safety checks |
+| 3 | PodRemediator | Commits the current consent, cleans up selected Pod UIDs, and requests PVC deletion |
+
+If the node recovers before the app operator grants consent, PodRemediator removes
+the handshake annotations — no deletion occurs. The app operator must re-evaluate on the
+next independent fault.
+
+The application operator can withdraw consent until PodRemediator finalizes the PVC
+deletion token with a conditional write. The earlier marker write is provisional.
+Once the token is finalized, removing consent or disabling PodRemediator does not
+revoke that consent. A new, unselected claim user can still abort cleanup before
+the PVC deletion request; after Kubernetes accepts the request, cleanup cannot be
+cancelled and may wait for a replacement Pod to release the claim.
+
+### Dependency on NHC and SNR
+
+PodRemediator **requires** Node Health Check (NHC) and Self Node Remediation (SNR):
+- Annotation and deletion require an active `SelfNodeRemediation` CR for the node
+  in phase `Reboot-Completed` or `Fencing-Completed`. An SNR object alone does not
+  prove fencing. Missing, deleting, or unknown-status SNRs block deletion, even
+  when the workload operator has consented.
+- If the failed Node object disappears, existing handshakes can still complete
+  with confirmed fencing and consent. If the SNR disappears first, they wait.
+- Without NHC/SNR installed the CR stays `Ready=False` with reason `NHC/SNRNotFound`.
+
+### Local PV Detection
+
+PodRemediator only acts on **node-local** PVCs — volumes whose PV is pinned to a
+specific node via topology affinity. Every affinity alternative must select the
+same node with a singleton `In` expression on a supported key. Ambiguous or
+multi-node affinity is skipped. Supported storage types:
+
+| Storage | Topology key |
+|---------|-------------|
+| Kubernetes local volumes | `kubernetes.io/hostname` |
+| TopoLVM / Red Hat LVMS | `topology.topolvm.io/node`, `topology.lvms.io/node` |
+| HostPath CSI | `kubernetes.io/hostname` |
+
+Zone-affinity CSI volumes (e.g. Cinder: `topology.cinder.csi.openstack.org/zone`)
+are **excluded** — they can be reattached across nodes and do not need PVC deletion.
+
+### Workload integrations
+
+PodRemediator has no built-in Galera or RabbitMQ safety policy. The corresponding
+application operator must observe the PVC request and grant request-scoped
+consent only when its own checks pass. See the separate [Galera](podremediator_galera.md)
+and [RabbitMQ](podremediator_rabbitmq.md) documents for integration behavior and
+compatibility requirements.
+
+---
+
+## Deployment
+
+### Prerequisites
+
+Verify each prerequisite before creating the `PodRemediator` CR.
+
+**1. infra-operator is running**
+```bash
+oc get deployment -n openstack-operators | grep infra-operator
+# Expected: infra-operator-controller-manager   1/1   Running
+```
+
+**2. PodRemediator CRD is registered**
+```bash
+oc get crd podremediators.remediation.openstack.org
+# Expected: NAME                                          CREATED AT
+#           podremediators.remediation.openstack.org      <timestamp>
+```
+If missing, apply it:
+```bash
+oc apply -f config/crd/bases/remediation.openstack.org_podremediators.yaml
+```
+
+**3. NHC is installed and has at least one NodeHealthCheck CR**
+```bash
+oc get nodehealthcheck
+# Expected: at least one row. No rows → NHC not configured; PodRemediator will stay Ready=False.
+```
+
+**4. SNR is installed and has at least one SelfNodeRemediationTemplate CR**
+```bash
+oc get selfnoderemediationtemplate -A
+# Expected: at least one row. No rows → SNR not configured; PodRemediator will stay Ready=False.
+```
+
+**5. The workload's application operator implements the current consent contract.**
+
+Confirm that it watches the request annotations and writes both
+`safe-to-delete=true` and `consent-id` equal to the current `request-id` in the
+same update. A `safe-to-delete` annotation by itself is not accepted. Check the
+relevant [integration document](podremediator_galera.md) or
+[RabbitMQ integration document](podremediator_rabbitmq.md) for implementation
+status and policy details.
+
+---
+
+### Install
+
+**Step 1 — Create the PodRemediator CR**
+
+```yaml
+apiVersion: remediation.openstack.org/v1beta1
+kind: PodRemediator
+metadata:
+  name: podremediator
+  namespace: openstack
+spec:
+  # PVC remediation is enabled when the CR is applied.
+```
+
+```bash
+oc apply -f the-above.yaml
+```
+
+**Step 2 — Verify the CR is Ready**
+
+```bash
+oc get podremediator -n openstack
+# NAME             READY   MESSAGE
+# podremediator    True    Monitoring; remediating PVCs on unhealthy nodes as authorized
+```
+
+If `READY=False`:
+- Message contains "NHC/SNR" → fix prerequisites 3 and 4 above.
+- Message contains "errors" → check infra-operator logs:
+  ```bash
+  oc logs -n openstack-operators -l app.kubernetes.io/name=infra-operator --tail=50
+  ```
+
+**Step 3 — Scope**
+
+PodRemediator watches local PVCs only in its own namespace. Create one
+PodRemediator in each workload namespace that needs remediation.
+
+**Step 4 — Confirm the workload operator is ready**
+
+Check the application custom resource and operator status using that workload's
+own operating procedure. PodRemediator can request and execute authorized PVC
+cleanup, but it cannot determine whether the application is healthy or recoverable.
+
+---
+
+### Quick install health-check
+
+Run this after install to confirm everything is wired up:
+
+```bash
+echo "=== infra-operator ===" && \
+  oc get deployment infra-operator-controller-manager \
+    -n openstack-operators 2>/dev/null | grep -E "NAME|1/1"
+
+echo "=== PodRemediator CR ===" && \
+  oc get podremediator -n openstack
+
+echo "=== NHC ===" && \
+  oc get nodehealthcheck 2>/dev/null | head -5
+
+echo "=== SNR template ===" && \
+  oc get selfnoderemediationtemplate -A 2>/dev/null | head -5
+
+```
+
+Confirm the infra-operator deployment is available, the PodRemediator CR reports
+Ready, and NHC/SNR prerequisites exist before running a workload-specific E2E test.
+
+### Status messages
+
+| Ready | Message | Meaning |
+|-------|---------|---------|
+| `False` | "Node Health Check (NHC) and Self Node Remediation (SNR) are required…" | Install/configure NHC and SNR |
+| `True` | "Monitoring; remediating PVCs on unhealthy nodes as authorized" | Monitoring; new remediation requires fencing and application consent |
+| `True` | "N PVC(s) waiting for SNR fencing confirmation; M waiting for consent" | No PVC request is published until the SNR phase gate is satisfied |
+| `True` | "N PVC(s) waiting for app-operator safe-to-delete consent" | PVCs annotated, waiting for app operator |
+| `False` | "Partial scan: errors listing PVCs or fetching PVs; will retry" | Transient API error; will retry |
+| `False` | `ReplacementPodBlocksPVCDeletion` | A replacement Pod holds the PVC deletion pending; workload-operator action is required |
+
+---
+
+## Configuration Reference
+
+### PodRemediator CR spec fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `disabled` | `bool` | `false` | Stops new handshakes and cancels pending consent. Cleanup already committed for a PVC continues. Set to `true` for maintenance windows. |
+| `consentPollInterval` | `metav1.Duration` | `"2m"` | Fallback retry interval for PVCs waiting for fencing or app-operator consent. Lower = faster response, higher = less API load. |
+| `periodicPollInterval` | `metav1.Duration` | `"5m"` | Safety-net requeue for all idle states. Ensures the controller catches pre-existing unhealthy nodes after an operator pod restart (when no node-transition event fires). |
+
+SNR phase changes trigger reconciliation without waiting for a poll. The SNR
+watch is optional and reconnects if its CRD is installed after operator startup.
+Polling remains a fallback during watch interruptions.
+
+### Operator-wide environment variables
+
+Set in the infra-operator Deployment env block. CR spec values take priority.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PODREMEDIATOR_CONSENT_POLL_INTERVAL` | `2m` | Operator-wide default for `consentPollInterval`. Go duration string (e.g. `"90s"`). Invalid values are logged and fall back to the hardcoded default. |
+| `PODREMEDIATOR_PERIODIC_POLL_INTERVAL` | `5m` | Operator-wide default for `periodicPollInterval`. Go duration string (e.g. `"2m"`). Invalid values are logged and fall back to the hardcoded default. |
+
+**Verifying active configuration:** On startup `main.go` logs the resolved values:
+```
+INFO  PodRemediator configured  consentPollInterval=2m0s  periodicPollInterval=5m0s
+```
+Check the infra-operator pod logs to confirm the intended intervals are active.
+
+**Priority chain:**
+
+```mermaid
+flowchart LR
+    A["spec.consentPollInterval\n(CR — per-instance\nhot-reloadable)"]
+    B["PODREMEDIATOR_CONSENT_POLL_INTERVAL\n(env var — operator-wide\nrequires pod restart)"]
+    C["DefaultConsentPollInterval = 2m\n(hardcoded fallback)"]
+
+    A -->|"not set → falls back to"| B
+    B -->|"not set → falls back to"| C
+
+    style A fill:#e3f2fd,stroke:#1565c0
+    style B fill:#f3e5f5,stroke:#6a1b9a
+    style C fill:#f5f5f5,stroke:#757575
+```
+
+Same chain applies for `periodicPollInterval` / `PODREMEDIATOR_PERIODIC_POLL_INTERVAL` / `DefaultPeriodicPollInterval = 5m`.
+
+### Tuning guidance
+
+| Scenario | Recommended values |
+|----------|--------------------|
+| Default production (3-node Galera, standard NHC timing ~5-10 min) | `consentPollInterval: 2m`, `periodicPollInterval: 5m` |
+| Lab / fast iteration (frequent operator restarts) | `periodicPollInterval: 1m` |
+| Large cluster (>100 PVCs per namespace, reduce API load) | `consentPollInterval: 5m`, `periodicPollInterval: 10m` |
+| Aggressive recovery SLO | `consentPollInterval: 30s`, `periodicPollInterval: 2m` |
+
+> **Note:** `periodicPollInterval` only matters for the restart-recovery case. In normal
+> operation, node-transition events trigger immediate reconciliation.
+
+---
+
+## Operations
+
+### Disable PVC remediation
+
+```yaml
+spec:
+  disabled: true
+```
+
+Use during maintenance windows. The controller still requires NHC/SNR and reports
+`Ready=True` with a disabled message when those dependencies are available.
+Disabling clears pending handshake annotations and consent from PVCs in the CR's
+namespace, even when NHC/SNR are unavailable. A deletion already committed before
+disablement continues through Pod and PVC cleanup. Cleanup failures retry.
+Re-enable by setting `disabled: false`; any cancelled handshake needs fresh consent.
+
+### Watch a workload namespace
+
+PodRemediator is namespace-scoped: it watches and cleans PVCs only in its own
+namespace. Create one CR per workload namespace.
+
+### What the application operator must do
+
+When PodRemediator annotates a PVC with `pvc-stuck-on-node`, the app operator must:
+
+1. **Detect** the annotation — watch PVCs with `AnnotationChangedPredicate`.
+2. **Check safety** — quorum, replication state, seqno (workload-specific).
+3. **Grant consent** — set `remediation.openstack.org/safe-to-delete=true` and
+   `remediation.openstack.org/consent-id` to the current
+   `remediation.openstack.org/request-id` in the same optimistic-locking update.
+
+PodRemediator then force-deletes the consented pod and requests PVC deletion. If the node
+recovers before consent is granted, PodRemediator removes the handshake annotations and no
+deletion occurs. Fresh consent is required on each independent fault event.
+
+### When a replacement Pod blocks PVC deletion
+
+A live StatefulSet may recreate an ordinal before the old PVC is fully removed.
+If that new Pod uses the terminating PVC, Kubernetes PVC protection keeps the
+claim in `Terminating`. PodRemediator keeps its deletion commit and CR finalizer,
+requeues, and sets `Ready=False` with reason
+`ReplacementPodBlocksPVCDeletion`. The condition names the PVC and replacement
+Pod that need attention. PodRemediator does not delete the replacement Pod or
+change StatefulSet replicas.
+
+If an unselected Pod starts using the claim before PodRemediator requests PVC
+deletion, the controller aborts that cleanup and clears the pending request. If
+the PVC deletion request has already been accepted, it cannot be cancelled; the
+controller waits for the workload operator to release the replacement Pod.
+
+The workload operator must safely pause recreation and release that replacement
+Pod, then allow the old PVC to disappear before restoring its desired workload.
+For a multi-replica Galera cluster, scaling the whole StatefulSet to zero just
+to release one ordinal can stop healthy members; coordinate this with the
+application operator's quorum and recovery procedure. Inspect the PodRemediator
+condition, PVC, and Pod in the workload namespace. Do not remove the
+PodRemediator or PVC-protection finalizers or the deletion commit ConfigMap to
+bypass this wait. A consent decision for one PVC does not authorize automatic
+changes to the other replicas, so recovery at intended nonzero replicas is not
+guaranteed without workload-operator intervention.
+
+### Consent annotation strings (shared contract)
+
+These annotation keys are defined in `apis/remediation/v1beta1/annotations.go` in the
+infra-operator repository. Application operators should reference that package or copy
+the string constants with a cross-reference comment to prevent drift.
+
+| Annotation | Value | Set by |
+|-----------|-------|--------|
+| `remediation.openstack.org/pvc-stuck-on-node` | Node name | PodRemediator |
+| `remediation.openstack.org/request-id` | CR/PVC/SNR identity | PodRemediator |
+| `remediation.openstack.org/remediator-uid` | PodRemediator UID | PodRemediator |
+| `remediation.openstack.org/fencing-node-uid` | Node UID | PodRemediator |
+| `remediation.openstack.org/safe-to-delete` | `"true"` | Application operator |
+| `remediation.openstack.org/consent-id` | Exact `request-id` | Application operator |
+
+`consent-id` must equal the current `request-id`; consent with a missing or stale
+request ID is ignored. PodRemediator clears the full handshake when the node
+recovers or the CR is deleted.
+
+---
+
+## E2E Testing
+
+E2E tests live in `pidone/ngtestkit` → `podremediator-tests/`:
+
+| Script flag | Scenario |
+|-------------|---------|
+| `E2E_GALERA=1` | Single worker down, full three-phase handshake (baseline) |
+| `E2E_GALERA_QUORUM=1` | 2 different workers down simultaneously — quorum gate refuses consent |
+| `E2E_GALERA_COLOCATED=1` | 2 Galera members on same worker, single virsh destroy |
+| `E2E_GALERA_CELL1=1` | Cell1 Galera cluster |
+| `E2E_RABBITMQ=1` | RabbitMQ workload |
+
+Run from the repository root:
+```bash
+E2E_GALERA=1 SYNC=1 ./podremediator-tests/scripts/run-e2e.sh
+```
+
+See `podremediator-tests/docs/GALERA_E2E_TEST_SCENARIOS.md` for scenario details.

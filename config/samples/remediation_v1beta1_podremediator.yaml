@@ -1,0 +1,11 @@
+apiVersion: remediation.openstack.org/v1beta1
+kind: PodRemediator
+metadata:
+  name: podremediator-sample
+  labels:
+    app.kubernetes.io/name: podremediator
+    app.kubernetes.io/instance: podremediator-sample
+    app.kubernetes.io/part-of: infra-operator
+spec:
+  # PVC remediation is enabled when you apply the CR (default). To disable:
+  # disabled: true

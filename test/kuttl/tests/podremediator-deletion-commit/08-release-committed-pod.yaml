@@ -1,0 +1,8 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      # Hold the StatefulSet at zero replicas until the old claim and ConfigMap are
+      # gone, then scale it back up in the next step to exercise claim recreation.
+      oc patch statefulset podremediator-lease -n "$NAMESPACE" --type=merge --patch '{"spec":{"replicas":0,"template":{"metadata":{"finalizers":[]}}}}'
+      oc patch pod podremediator-lease-0 -n "$NAMESPACE" --type=merge --patch '{"metadata":{"finalizers":[]}}'

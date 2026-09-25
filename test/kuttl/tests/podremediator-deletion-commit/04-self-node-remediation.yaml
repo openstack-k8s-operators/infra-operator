@@ -1,0 +1,8 @@
+apiVersion: self-node-remediation.medik8s.io/v1alpha1
+kind: SelfNodeRemediation
+metadata:
+  name: podremediator-lease-node-snr
+  annotations:
+    remediation.medik8s.io/node-name: podremediator-lease-node
+spec:
+  remediationStrategy: Automatic

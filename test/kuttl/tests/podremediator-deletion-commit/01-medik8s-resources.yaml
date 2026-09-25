@@ -1,0 +1,34 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      oc apply -f - <<EOF
+      apiVersion: self-node-remediation.medik8s.io/v1alpha1
+      kind: SelfNodeRemediationTemplate
+      metadata:
+        name: podremediator-deletion-commit-template
+        namespace: ${NAMESPACE}
+      spec:
+        template:
+          spec:
+            remediationStrategy: Automatic
+      ---
+      apiVersion: remediation.medik8s.io/v1alpha1
+      kind: NodeHealthCheck
+      metadata:
+        name: podremediator-deletion-commit
+      spec:
+        selector:
+          matchLabels:
+            infra-operator.openstack.org/podremediator-kuttl: "true"
+        remediationTemplate:
+          apiVersion: self-node-remediation.medik8s.io/v1alpha1
+          kind: SelfNodeRemediationTemplate
+          namespace: ${NAMESPACE}
+          name: podremediator-deletion-commit-template
+        minHealthy: "1"
+        unhealthyConditions:
+          - type: Ready
+            status: "False"
+            duration: 1h
+      EOF
