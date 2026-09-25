@@ -514,6 +514,7 @@ func (r *Reconciler) generateConfigMaps(
 		"memcachedPort":       memcachedPort,
 		"memcachedCacheSize":  instance.Spec.CacheSize,
 		"memcachedMaxConn":    instance.Spec.MaxConn,
+		"memcachedLogLevel":   instance.Spec.LogOption(),
 	}
 
 	cms := []util.Template{
