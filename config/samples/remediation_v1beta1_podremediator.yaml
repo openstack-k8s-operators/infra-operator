@@ -9,5 +9,3 @@ metadata:
 spec:
   # PVC remediation is enabled when you apply the CR (default). To disable:
   # disabled: true
-  # Optional disruption budget: skip PVC deletion while NotReady node count exceeds this (0 = unlimited).
-  # Example for 3-member Galera: 1 avoids stripping volumes during multi-node incidents.

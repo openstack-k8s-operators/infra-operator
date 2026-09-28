@@ -43,6 +43,10 @@ const (
 	RemediatorUIDAnnotation = "remediation.openstack.org/remediator-uid"
 	// FencingNodeUIDAnnotation binds the handshake to the fenced node incarnation.
 	FencingNodeUIDAnnotation = "remediation.openstack.org/fencing-node-uid"
+	// PVCDeletionCommittedAnnotation is a visible deletion marker. It is first
+	// written provisionally and is not authority by itself: a matching
+	// controller-owned ConfigMap and finalized PVC token are required.
+	PVCDeletionCommittedAnnotation = "remediation.openstack.org/pvc-deletion-committed"
 )
 
 // HasRemediationConsent accepts only an acknowledgment of the current request.
