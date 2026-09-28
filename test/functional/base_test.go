@@ -1221,7 +1221,8 @@ func CreateNodeWithReadyCondition(name string, ready bool) *corev1.Node {
 	}
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
+			Name:   name,
+			Labels: map[string]string{corev1.LabelHostname: name},
 		},
 		Status: corev1.NodeStatus{
 			Conditions: []corev1.NodeCondition{
@@ -1262,6 +1263,13 @@ func UpdateNodeReadyCondition(name string, ready bool) {
 
 // CreateLocalPV creates a node-pinned local PV for functional tests.
 func CreateLocalPV(name string, nodeName string) *corev1.PersistentVolume {
+	return CreateLocalPVWithNodeTopologyKey(name, nodeName, corev1.LabelHostname)
+}
+
+// CreateLocalPVWithNodeTopologyKey creates a node-pinned local PV using the
+// requested topology key. TopoLVM/LVMS keys can directly encode Node.Name,
+// unlike kubernetes.io/hostname when the Node object is gone.
+func CreateLocalPVWithNodeTopologyKey(name string, nodeName string, topologyKey string) *corev1.PersistentVolume {
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -1282,7 +1290,7 @@ func CreateLocalPV(name string, nodeName string) *corev1.PersistentVolume {
 						{
 							MatchExpressions: []corev1.NodeSelectorRequirement{
 								{
-									Key:      corev1.LabelHostname,
+									Key:      topologyKey,
 									Operator: corev1.NodeSelectorOpIn,
 									Values:   []string{nodeName},
 								},

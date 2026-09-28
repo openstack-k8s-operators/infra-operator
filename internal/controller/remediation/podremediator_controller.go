@@ -53,6 +53,9 @@ const (
 	NHCRequiredMessage = "Node Health Check (NHC) and Self Node Remediation (SNR) are required; controller cannot proceed without them"
 	// NHCNotFoundReason is the condition reason when NHC/SNR are missing
 	NHCNotFoundReason = "NHC/SNRNotFound"
+	// ReplacementPodBlocksPVCDeletionReason identifies a committed deletion
+	// waiting for the workload owner to release a new Pod using the PVC.
+	ReplacementPodBlocksPVCDeletionReason = "ReplacementPodBlocksPVCDeletion"
 
 	// DefaultConsentPollInterval is the default for ConsentPollInterval.
 	DefaultConsentPollInterval = 2 * time.Minute
@@ -260,6 +263,21 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 	Log.Info("Reconciling PodRemediator delete")
 
 	namespaces := []string{instance.Namespace}
+	resumeResult, err := r.resumeCommittedPVCDeletions(ctx, namespaces, string(instance.UID), Log)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if resumeResult.Pending {
+		// Keep the CR finalizer until every committed PVC deletion has finished.
+		if resumeResult.BlockedByReplacementPod != "" {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
+				"%s", resumeResult.BlockedByReplacementPod))
+		} else {
+			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
+		}
+		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+	}
 	if err := r.cleanupAnnotations(ctx, namespaces, string(instance.UID), true); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -377,42 +395,6 @@ func (r *PodRemediatorReconciler) getNodesWithFencedSNR(ctx context.Context, Log
 	return fenced, nil
 }
 
-// deletePVCAndPods commits the consent decision with a conditional PVC delete
-// before force-deleting the captured pods. PVC protection keeps a mounted claim
-// terminating until those pods are gone. Replacements and concurrently changed
-// objects are protected by API-server UID/resourceVersion preconditions.
-func (r *PodRemediatorReconciler) deletePVCAndPods(ctx context.Context, pvc *corev1.PersistentVolumeClaim, stuckOnNode string, Log logr.Logger) error {
-	podList := &corev1.PodList{}
-	if err := r.safetyReader().List(ctx, podList, client.InNamespace(pvc.Namespace)); err != nil {
-		return fmt.Errorf("list pods for PVC %s: %w", pvc.Name, err)
-	}
-	if err := r.Delete(ctx, pvc, observedDeleteOptions(pvc)); err != nil {
-		if k8s_errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("conditionally delete PVC %s: %w", pvc.Name, err)
-	}
-	gracePeriod := int64(0)
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		if pod.Spec.NodeName != "" && pod.Spec.NodeName != stuckOnNode {
-			continue
-		}
-		for _, vol := range pod.Spec.Volumes {
-			if vol.PersistentVolumeClaim != nil && vol.PersistentVolumeClaim.ClaimName == pvc.Name {
-				options := observedDeleteOptions(pod)
-				options.GracePeriodSeconds = &gracePeriod
-				Log.Info("Force-deleting observed pod after accepted PVC deletion", "pod", pod.Name, "pvc", pvc.Name)
-				if err := r.Delete(ctx, pod, options); err != nil && !k8s_errors.IsNotFound(err) {
-					return fmt.Errorf("conditionally force-delete pod %s: %w", pod.Name, err)
-				}
-				break
-			}
-		}
-	}
-	return nil
-}
-
 // effectiveInterval returns the CR-spec value if set, otherwise the reconciler
 // field (from env var), otherwise the hardcoded default.
 func effectiveInterval(specVal *metav1.Duration, reconcilerVal time.Duration, defaultVal time.Duration) time.Duration {
@@ -434,6 +416,12 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	periodicPoll := effectiveInterval(instance.Spec.PeriodicPollInterval, r.PeriodicPollInterval, DefaultPeriodicPollInterval)
 
 	namespaces := []string{instance.Namespace}
+	resumeResult, err := r.resumeCommittedPVCDeletions(ctx, namespaces, string(instance.UID), Log)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning, "%s", err))
+		return ctrl.Result{}, err
+	}
 	// Cancel consent even if dependencies disappear during maintenance. This also
 	// covers recovery and a subsequent failure while remediation is disabled.
 	if instance.Spec.Disabled {
@@ -442,6 +430,16 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning, "%s", err))
 			return ctrl.Result{}, err
 		}
+	}
+	if resumeResult.Pending {
+		if resumeResult.BlockedByReplacementPod != "" {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
+				"%s", resumeResult.BlockedByReplacementPod))
+		} else {
+			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
+		}
+		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
 	}
 
 	// Validate intervals: reject zero or negative values to prevent tight requeue loops.
@@ -519,6 +517,8 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 
 	// Always scan existing handshakes, including PVCs whose Node was removed.
 	hadError := false
+	pendingCommittedDeletion := false
+	blockedByReplacementPod := ""
 	waitingForConsent := 0
 	waitingForFencing := 0
 	for _, ns := range namespaces {
@@ -532,6 +532,10 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
 			pvcKey := client.ObjectKeyFromObject(pvc)
+			if _, aborted := resumeResult.AbortedPVCUIDs[string(pvc.UID)]; aborted {
+				Log.Info("Skipping PVC after aborting its committed deletion", "pvc", pvcKey)
+				continue
+			}
 			if owner := pvc.Annotations[remediationv1.RemediatorUIDAnnotation]; owner != "" && owner != string(instance.UID) {
 				Log.V(1).Info("Skipping PVC owned by another PodRemediator", "pvc", pvcKey, "owner", owner)
 				continue
@@ -609,15 +613,31 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 						hadError = true
 						continue
 					}
-					pvNode := getLocalPVNodeName(pv, Log)
-					if !isLocalPV(pv) || pvNode != stuckOnNode {
+					pvNode := resolveLocalPVNodeName(pv, nodeList.Items, Log)
+					// An existing, owner-bound handshake can survive removal of its
+					// Node object only when the PV explicitly names the Node. A hostname
+					// label cannot be resolved after the Node is gone.
+					if pvNode == "" && !allNodeNames[stuckOnNode] &&
+						pvc.Annotations[remediationv1.RemediatorUIDAnnotation] == string(instance.UID) &&
+						pvc.Annotations[remediationv1.RequestIDAnnotation] == requestID &&
+						pvc.Annotations[remediationv1.FencingNodeUIDAnnotation] != "" &&
+						getDirectLocalPVNodeName(pv) == stuckOnNode {
+						pvNode = stuckOnNode
+					}
+					if pvNode != stuckOnNode {
 						Log.Info("Refusing to delete PVC: PV is not node-local or not pinned to the stuck node (possible forged annotation)",
 							"pvc", pvcKey, "node", stuckOnNode, "pvNode", pvNode)
 						continue
 					}
-					if err := r.deletePVCAndPods(ctx, pvc, stuckOnNode, Log); err != nil {
+					pending, blocked, err := r.deletePVCAndPods(ctx, instance, pvc, stuckOnNode, Log)
+					if err != nil {
 						Log.Error(err, "delete consented PVC and observed pods", "pvc", pvcKey)
 						hadError = true
+					} else if pending {
+						pendingCommittedDeletion = true
+						if blocked != "" {
+							blockedByReplacementPod = blocked
+						}
 					}
 					continue
 				}
@@ -653,10 +673,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				hadError = true
 				continue
 			}
-			if !isLocalPV(pv) {
-				continue
-			}
-			nodeName := getLocalPVNodeName(pv, Log)
+			nodeName := resolveLocalPVNodeName(pv, nodeList.Items, Log)
 			if nodeName == "" {
 				continue
 			}
@@ -687,6 +704,17 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning,
 			"Partial scan: errors listing PVCs or fetching PVs; will retry"))
 		return ctrl.Result{}, fmt.Errorf("partial scan errors during PVC remediation; requeueing")
+	}
+
+	if pendingCommittedDeletion {
+		if blockedByReplacementPod != "" {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
+				"%s", blockedByReplacementPod))
+		} else {
+			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
+		}
+		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
 	}
 
 	if waitingForFencing > 0 {
@@ -761,4 +789,111 @@ func getLocalPVNodeName(pv *corev1.PersistentVolume, Log logr.Logger) string {
 		nodeName = termNode
 	}
 	return nodeName
+}
+
+// resolveLocalPVNodeName maps every exclusive topology requirement to an
+// actual Node and returns its Kubernetes object name. Topology label values are
+// not assumed to be Node.Name; hostname labels in particular commonly differ.
+func resolveLocalPVNodeName(pv *corev1.PersistentVolume, nodes []corev1.Node, Log logr.Logger) string {
+	if pv.Spec.Local == nil && pv.Spec.CSI == nil && pv.Spec.HostPath == nil {
+		return ""
+	}
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+
+	resolvedNodeName := ""
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		if len(term.MatchFields) != 0 {
+			return ""
+		}
+		var termNodeName string
+		requirementCount := 0
+		for _, expression := range term.MatchExpressions {
+			if !isLocalPVNodeTopologyKey(expression.Key) {
+				// The additional constraint may change the set of matching Nodes.
+				// Resolve only affinity expressed in supported node topology keys.
+				return ""
+			}
+			requirementCount++
+			if expression.Operator != corev1.NodeSelectorOpIn || len(expression.Values) != 1 || expression.Values[0] == "" {
+				return ""
+			}
+			nodeName := resolvePVTopologyRequirement(expression.Key, expression.Values[0], nodes)
+			if nodeName == "" || (termNodeName != "" && termNodeName != nodeName) {
+				Log.V(1).Info("PV topology requirement does not resolve to one consistent Node", "pv", pv.Name, "key", expression.Key, "value", expression.Values[0])
+				return ""
+			}
+			termNodeName = nodeName
+		}
+		if requirementCount == 0 || termNodeName == "" || (resolvedNodeName != "" && resolvedNodeName != termNodeName) {
+			Log.V(1).Info("PV is not exclusively pinned to one actual Node; skipping", "pv", pv.Name)
+			return ""
+		}
+		resolvedNodeName = termNodeName
+	}
+	return resolvedNodeName
+}
+
+// getDirectLocalPVNodeName permits the documented TopoLVM/LVMS node-name
+// convention when the Node object has disappeared. Hostname is never a direct
+// Node identity, and mixed topology expressions cannot prove exclusivity here.
+func getDirectLocalPVNodeName(pv *corev1.PersistentVolume) string {
+	if pv.Spec.Local == nil && pv.Spec.CSI == nil && pv.Spec.HostPath == nil {
+		return ""
+	}
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+	name := ""
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		if len(term.MatchFields) != 0 || len(term.MatchExpressions) != 1 {
+			return ""
+		}
+		expression := term.MatchExpressions[0]
+		if expression.Key != "topology.topolvm.io/node" && expression.Key != "topology.lvms.io/node" {
+			return ""
+		}
+		if expression.Operator != corev1.NodeSelectorOpIn || len(expression.Values) != 1 || expression.Values[0] == "" ||
+			(name != "" && name != expression.Values[0]) {
+			return ""
+		}
+		name = expression.Values[0]
+	}
+	return name
+}
+
+func isLocalPVNodeTopologyKey(key string) bool {
+	for _, knownKey := range localPVNodeTopologyKeys {
+		if key == knownKey {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePVTopologyRequirement(key, value string, nodes []corev1.Node) string {
+	matchingNodes := make([]string, 0, 1)
+	for i := range nodes {
+		node := &nodes[i]
+		if node.Labels[key] == value {
+			matchingNodes = append(matchingNodes, node.Name)
+		}
+	}
+	if len(matchingNodes) == 1 {
+		return matchingNodes[0]
+	}
+	if len(matchingNodes) > 1 || key == corev1.LabelHostname {
+		return ""
+	}
+
+	// TopoLVM/LVMS affinity values are explicitly node identities on some
+	// installations. Preserve that convention only when no Node carries the
+	// topology label and exactly one Node has the requested object name.
+	for i := range nodes {
+		if nodes[i].Name == value {
+			return nodes[i].Name
+		}
+	}
+	return ""
 }

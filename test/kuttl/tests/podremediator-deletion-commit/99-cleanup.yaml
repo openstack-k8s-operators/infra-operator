@@ -1,0 +1,21 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      oc patch statefulset podremediator-lease -n "$NAMESPACE" --type=merge --patch '{"spec":{"replicas":0,"template":{"metadata":{"finalizers":[]}}}}' >/dev/null 2>&1 || true
+      oc patch pod podremediator-lease-0 -n "$NAMESPACE" --type=merge --patch '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+      oc delete pod podremediator-lease-0 -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete podremediator podremediator-deletion-commit -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete selfnoderemediation podremediator-lease-node-snr -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete nodehealthcheck podremediator-deletion-commit --ignore-not-found --wait=false || true
+      oc delete selfnoderemediationtemplate podremediator-deletion-commit-template -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete pvc data-podremediator-lease-0 -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete statefulset podremediator-lease -n "$NAMESPACE" --ignore-not-found --wait=false || true
+      oc delete pv podremediator-lease-pv --ignore-not-found --wait=false || true
+      oc delete node podremediator-lease-node --ignore-not-found --wait=false || true
+      for crd in nodehealthchecks.remediation.medik8s.io selfnoderemediationtemplates.self-node-remediation.medik8s.io selfnoderemediations.self-node-remediation.medik8s.io; do
+        created=$(oc get crd "$crd" -o go-template='{{ index .metadata.labels "podremediator-kuttl-created" }}' 2>/dev/null || true)
+        if [ "$created" = "true" ]; then
+          oc delete crd "$crd" --wait=false || true
+        fi
+      done

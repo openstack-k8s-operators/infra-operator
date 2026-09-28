@@ -17,6 +17,9 @@ limitations under the License.
 package functional_test
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	clientscheme "k8s.io/client-go/kubernetes/scheme"
 
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
@@ -32,6 +37,7 @@ import (
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	remediation_ctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -269,8 +275,35 @@ var _ = Describe("PodRemediator controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
-		It("completes consented remediation after the only unhealthy Node is deleted", func() {
+		It("completes consented remediation after Node deletion with explicit TopoLVM node-name affinity", func() {
 			key := types.NamespacedName{Name: pvcName, Namespace: namespace}
+			// A hostname label is not a Node identity after the Node object is gone.
+			// TopoLVM/LVMS affinity explicitly carries the Kubernetes Node name and
+			// is the supported deleted-Node compatibility path.
+			oldPVC := getFunctionalPVC(pvcName)
+			Expect(k8sClient.Delete(ctx, oldPVC)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+			pv := &corev1.PersistentVolume{}
+			pvKey := types.NamespacedName{Name: pvName}
+			Expect(k8sClient.Get(ctx, pvKey, pv)).To(Succeed())
+			// envtest has no PV protection controller to remove a protection
+			// finalizer after the claim is gone. Clear finalizers from this old,
+			// test-owned fixture using its freshly fetched resourceVersion so the
+			// same PV name can be recreated with different topology affinity.
+			pv.Finalizers = nil
+			Expect(k8sClient.Update(ctx, pv)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, pv)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, pvKey, &corev1.PersistentVolume{}))).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+			CreateLocalPVWithNodeTopologyKey(pvName, nodeName, "topology.topolvm.io/node")
+			CreateBoundPVC(namespace, pvcName, pvName)
+			boundPVC := getFunctionalPVC(pvcName)
+			boundPVC.Status.Phase = corev1.ClaimBound
+			Expect(k8sClient.Status().Update(ctx, boundPVC)).To(Succeed())
+
 			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false))
 			DeferCleanup(th.DeleteInstance, pr)
 			Eventually(func(g Gomega) {
@@ -278,17 +311,18 @@ var _ = Describe("PodRemediator controller", func() {
 				g.Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
 				g.Expect(pvc.Annotations).To(HaveKeyWithValue(remediationv1.PVCStuckOnNodeAnnotation, nodeName))
 			}, timeout, interval).Should(Succeed())
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			oldPVC = pvc.DeepCopy()
+			grantRemediationConsent(pvc)
+			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
 			node := &corev1.Node{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
 			Eventually(func(g Gomega) {
 				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, &corev1.Node{}))).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
-			pvc := &corev1.PersistentVolumeClaim{}
-			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
-			oldPVC := pvc.DeepCopy()
-			grantRemediationConsent(pvc)
-			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
 			Eventually(func(g Gomega) {
 				g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, key, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
@@ -739,12 +773,22 @@ var _ = Describe("PodRemediator controller", func() {
 			CreateBoundPVC(namespace, pvcName, pvName)
 		})
 
-		It("force-deletes only the pod on the stuck node (Path B pod gate)", func() {
+		It("aborts remediation when a cross-node Pod uses the same PVC (Path B pod gate)", func() {
 			pvcKey := types.NamespacedName{Name: pvcName, Namespace: namespace}
 			stuckPodName := "pod-stuck-" + uuid.New().String()[:8]
 			otherPodName := "pod-other-" + uuid.New().String()[:8]
 
-			CreatePodForPVC(namespace, stuckPodName, nodeName, pvcName)
+			DeferCleanup(func() {
+				current := &corev1.PersistentVolumeClaim{}
+				if err := k8sClient.Get(ctx, pvcKey, current); err == nil {
+					current.Finalizers = nil
+					_ = k8sClient.Update(ctx, current)
+					_ = k8sClient.Delete(ctx, current)
+				}
+			})
+
+			stuckPod := CreatePodForPVC(namespace, stuckPodName, nodeName, pvcName)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, stuckPod) })
 			otherPod := CreatePodForPVC(namespace, otherPodName, otherNodeName, pvcName)
 			DeferCleanup(func() { _ = k8sClient.Delete(ctx, otherPod) })
 
@@ -765,15 +809,21 @@ var _ = Describe("PodRemediator controller", func() {
 			oldPVC := pvc.DeepCopy()
 			grantRemediationConsent(pvc)
 			Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
-
-			// The pod on the stuck node is force-deleted; the pod on the other node survives.
 			Eventually(func(g Gomega) {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: stuckPodName, Namespace: namespace}, &corev1.Pod{})
-				g.Expect(k8s_errors.IsNotFound(err)).To(BeTrue())
+				currentPVC := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, currentPVC)).To(Succeed())
+				g.Expect(currentPVC.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+				g.Expect(currentPVC.Annotations).ToNot(HaveKey(remediationv1.ConsentIDAnnotation))
 			}, timeout, interval).Should(Succeed())
 
+			// A claim user on another node aborts the entire deletion decision;
+			// neither the stuck-node Pod nor the cross-node Pod can be deleted.
 			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: stuckPodName, Namespace: namespace}, &corev1.Pod{})).To(Succeed())
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: otherPodName, Namespace: namespace}, &corev1.Pod{})).To(Succeed())
+				currentPVC := &corev1.PersistentVolumeClaim{}
+				g.Expect(k8sClient.Get(ctx, pvcKey, currentPVC)).To(Succeed())
+				g.Expect(currentPVC.DeletionTimestamp).To(BeNil())
 			}, timeout/5, interval).Should(Succeed())
 		})
 	})
@@ -787,4 +837,340 @@ func grantRemediationConsent(pvc *corev1.PersistentVolumeClaim) {
 	}
 	pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
 	pvc.Annotations[remediationv1.ConsentIDAnnotation] = requestID
+}
+
+var _ = Describe("PodRemediator ConfigMap-backed deletion commit", func() {
+	const podHoldFinalizer = "functional-test.openstack.org/hold-pod-deletion"
+
+	var (
+		nodeName  string
+		otherNode string
+		pvName    string
+		pvcName   string
+		podName   string
+		pod       *corev1.Pod
+		prKey     types.NamespacedName
+	)
+
+	BeforeEach(func() {
+		CreateMedik8sCRDs()
+		CreateNHCInstance()
+		CreateSNRTemplate(namespace)
+
+		nodeName = "worker-" + uuid.New().String()[:8]
+		otherNode = "worker-" + uuid.New().String()[:8]
+		pvName = "pv-" + uuid.New().String()[:8]
+		pvcName = "pvc-" + uuid.New().String()[:8]
+		podName = "pod-" + uuid.New().String()[:8]
+
+		CreateNodeWithReadyCondition(nodeName, false)
+		DeferCleanup(func() {
+			current := &corev1.Node{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, current); err == nil {
+				_ = k8sClient.Delete(ctx, current)
+			}
+		})
+		CreateSelfNodeRemediation(namespace, nodeName)
+		DeferCleanup(func() {
+			snr := &unstructured.Unstructured{}
+			snr.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation",
+			})
+			snr.SetNamespace(namespace)
+			snr.SetName(nodeName + "-snr")
+			_ = k8sClient.Delete(ctx, snr)
+		})
+
+		CreateLocalPV(pvName, nodeName)
+		DeferCleanup(func() {
+			current := &corev1.PersistentVolume{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: pvName}, current); err == nil {
+				_ = k8sClient.Delete(ctx, current)
+			}
+		})
+		CreateBoundPVC(namespace, pvcName, pvName)
+		// envtest also has no persistent-volume binder; mark the fixture claim as
+		// bound after binding it by volumeName so this case covers a bound PVC.
+		boundPVC := getFunctionalPVC(pvcName)
+		boundPVC.Status.Phase = corev1.ClaimBound
+		Expect(k8sClient.Status().Update(ctx, boundPVC)).To(Succeed())
+		DeferCleanup(func() {
+			current := &corev1.PersistentVolumeClaim{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, current); err == nil {
+				current.Finalizers = nil
+				_ = k8sClient.Update(ctx, current)
+				_ = k8sClient.Delete(ctx, current)
+			}
+		})
+
+		// envtest has no kube-controller-manager, garbage collector, or PVC
+		// protection controller. This finalizer holds the Pod API object so these
+		// tests can cover ConfigMap persistence and reconciler behavior only.
+		pod = CreatePodForPVC(namespace, podName, nodeName, pvcName)
+		oldPod := pod.DeepCopy()
+		pod.Finalizers = []string{podHoldFinalizer}
+		Expect(k8sClient.Patch(ctx, pod, client.MergeFrom(oldPod))).To(Succeed())
+		DeferCleanup(func() {
+			current := &corev1.Pod{}
+			key := types.NamespacedName{Namespace: namespace, Name: podName}
+			if err := k8sClient.Get(ctx, key, current); err == nil {
+				current.Finalizers = nil
+				_ = k8sClient.Update(ctx, current)
+				_ = k8sClient.Delete(ctx, current)
+			}
+		})
+
+		pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false))
+		prKey = types.NamespacedName{Namespace: pr.GetNamespace(), Name: pr.GetName()}
+		DeferCleanup(func() {
+			// A committed-deletion test may intentionally leave this Pod terminating
+			// behind its test finalizer. Release it before deleting the PodRemediator,
+			// otherwise its own deletion correctly waits for the committed cleanup.
+			current := &corev1.Pod{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, current); err == nil && len(current.Finalizers) > 0 {
+				current.Finalizers = nil
+				Expect(k8sClient.Update(ctx, current)).To(Succeed())
+			}
+			th.DeleteInstance(pr)
+		})
+
+		Eventually(func(g Gomega) {
+			instance := GetPodRemediator(prKey)
+			pvc := &corev1.PersistentVolumeClaim{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, pvc)).To(Succeed())
+			g.Expect(pvc.Annotations[remediationv1.RequestIDAnnotation]).NotTo(BeEmpty())
+			g.Expect(pvc.Annotations[remediationv1.RemediatorUIDAnnotation]).To(Equal(string(instance.UID)))
+		}, timeout, interval).Should(Succeed())
+
+	})
+
+	It("persists PVC and Pod identities in a namespaced ConfigMap before cleanup", func() {
+		commit := startConfigMapBackedDeletion(namespace, pvcName, podName, nodeName, prKey, pod)
+		state := decodeFunctionalDeletionCommit(commit)
+
+		Expect(commit.Namespace).To(Equal(namespace))
+		Expect(state.PVCName).To(Equal(pvcName))
+		Expect(state.PVCUID).To(Equal(string(getFunctionalPVC(pvcName).UID)))
+		Expect(state.RemediatorUID).To(Equal(string(GetPodRemediator(prKey).UID)))
+		Expect(state.Node).To(Equal(nodeName))
+		Expect(state.Pods).To(ConsistOf(functionalCommittedPod{Name: podName, UID: string(pod.UID)}))
+		Expect(getFunctionalPVC(pvcName).Spec.VolumeName).To(Equal(pvName))
+		Expect(getFunctionalPVC(pvcName).Status.Phase).To(Equal(corev1.ClaimBound))
+		Expect(getFunctionalPVC(pvcName).Annotations[remediationv1.PVCDeletionCommittedAnnotation]).ToNot(BeEmpty())
+
+		Eventually(func(g Gomega) {
+			current := &corev1.Pod{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, current)).To(Succeed())
+			g.Expect(current.DeletionTimestamp).ToNot(BeNil())
+			g.Expect(current.Finalizers).To(ContainElement(podHoldFinalizer))
+		}, timeout, interval).Should(Succeed())
+	})
+
+	It("resumes a persisted commit after SNR loss, Node recovery, disablement, and CR deletion", func() {
+		pvcUID := string(getFunctionalPVC(pvcName).UID)
+		commit := startConfigMapBackedDeletion(namespace, pvcName, podName, nodeName, prKey, pod)
+
+		snr := &unstructured.Unstructured{}
+		snr.SetGroupVersionKind(schema.GroupVersionKind{
+			Group: "self-node-remediation.medik8s.io", Version: "v1alpha1", Kind: "SelfNodeRemediation",
+		})
+		snr.SetNamespace(namespace)
+		snr.SetName(nodeName + "-snr")
+		Expect(k8sClient.Delete(ctx, snr)).To(Succeed())
+		UpdateNodeReadyCondition(nodeName, true)
+		instance := GetPodRemediator(prKey)
+		instance.Spec.Disabled = true
+		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+		freshReconciler := newFunctionalPodRemediatorReconciler()
+		Eventually(func(g Gomega) {
+			_, reconcileErr := freshReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: prKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+		}, timeout, interval).Should(Succeed())
+		stillCommitted, err := findFunctionalDeletionCommit(namespace, pvcUID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stillCommitted.UID).To(Equal(commit.UID))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, &corev1.Pod{})).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+
+		deleting := GetPodRemediator(prKey)
+		Expect(k8sClient.Delete(ctx, deleting)).To(Succeed())
+		Eventually(func(g Gomega) {
+			_, reconcileErr := freshReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: prKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			current := &remediationv1.PodRemediator{}
+			g.Expect(k8sClient.Get(ctx, prKey, current)).To(Succeed())
+			g.Expect(current.DeletionTimestamp).ToNot(BeNil())
+			g.Expect(current.Finalizers).NotTo(BeEmpty())
+			currentConfigMap, commitErr := findFunctionalDeletionCommit(namespace, pvcUID)
+			g.Expect(commitErr).NotTo(HaveOccurred())
+			g.Expect(currentConfigMap.UID).To(Equal(commit.UID))
+		}, timeout, interval).Should(Succeed())
+
+		removeFunctionalPodFinalizer(podName)
+		Eventually(func(g Gomega) {
+			_, reconcileErr := freshReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: prKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, prKey, &remediationv1.PodRemediator{}))).To(BeTrue())
+			g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, &corev1.PersistentVolumeClaim{}))).To(BeTrue())
+			expectNoFunctionalDeletionCommit(g, namespace, pvcUID)
+		}, timeout, interval).Should(Succeed())
+	})
+
+	It("scrubs an informational commit marker without a ConfigMap and rejects replacement claim users", func() {
+		pvc := getFunctionalPVC(pvcName)
+		forgedPVCUID := string(pvc.UID)
+		pvc.Annotations[remediationv1.PVCDeletionCommittedAnnotation] = "v1|forged-node|forged-pvc|forged-remediator"
+		pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+		pvc.Annotations[remediationv1.ConsentIDAnnotation] = "forged-consent"
+		Expect(k8sClient.Update(ctx, pvc)).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			current := getFunctionalPVC(pvcName)
+			g.Expect(current.Annotations).ToNot(HaveKey(remediationv1.PVCDeletionCommittedAnnotation))
+			g.Expect(remediationv1.HasRemediationConsent(current.Annotations)).To(BeFalse())
+			expectNoFunctionalDeletionCommit(g, namespace, forgedPVCUID)
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, &corev1.Pod{})).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+
+		pvcUID := string(getFunctionalPVC(pvcName).UID)
+		commit := startConfigMapBackedDeletion(namespace, pvcName, podName, nodeName, prKey, pod)
+		otherNodeObject := CreateNodeWithReadyCondition(otherNode, true)
+		DeferCleanup(func() {
+			current := &corev1.Node{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: otherNodeObject.Name}, current); err == nil {
+				_ = k8sClient.Delete(ctx, current)
+			}
+		})
+		replacement := CreatePodForPVC(namespace, "replacement-"+uuid.New().String()[:8], otherNodeObject.Name, pvcName)
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, replacement) })
+
+		freshReconciler := newFunctionalPodRemediatorReconciler()
+		Eventually(func(g Gomega) {
+			_, reconcileErr := freshReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: prKey})
+			g.Expect(reconcileErr).NotTo(HaveOccurred())
+			expectNoFunctionalDeletionCommit(g, namespace, pvcUID)
+			current := getFunctionalPVC(pvcName)
+			// A later reconcile may begin a fresh handshake for the same unhealthy
+			// Node. It must not preserve commit authority or the previous consent.
+			g.Expect(current.DeletionTimestamp).To(BeNil())
+			g.Expect(current.Annotations).ToNot(HaveKey(remediationv1.PVCDeletionCommittedAnnotation))
+			g.Expect(current.Annotations).ToNot(HaveKey(remediationv1.SafeToDeleteAnnotation))
+			g.Expect(current.Annotations).ToNot(HaveKey(remediationv1.ConsentIDAnnotation))
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(replacement), &corev1.Pod{})).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+		Expect(commit.UID).NotTo(BeEmpty())
+
+		deleting := GetPodRemediator(prKey)
+		Expect(k8sClient.Delete(ctx, deleting)).To(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(k8s_errors.IsNotFound(k8sClient.Get(ctx, prKey, &remediationv1.PodRemediator{}))).To(BeTrue())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(replacement), &corev1.Pod{})).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: pvcName}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+		}, timeout, interval).Should(Succeed())
+	})
+})
+
+type functionalCommittedPod struct {
+	Name string `json:"name"`
+	UID  string `json:"uid"`
+}
+
+type functionalDeletionCommit struct {
+	PVCName       string                   `json:"pvcName"`
+	PVCUID        string                   `json:"pvcUID"`
+	RemediatorUID string                   `json:"remediatorUID"`
+	Node          string                   `json:"node"`
+	Pods          []functionalCommittedPod `json:"pods"`
+}
+
+func newFunctionalPodRemediatorReconciler() *remediation_ctrl.PodRemediatorReconciler {
+	kclient, err := kubernetes.NewForConfig(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	return &remediation_ctrl.PodRemediatorReconciler{
+		Client:        k8sClient,
+		APIReader:     k8sClient,
+		Scheme:        clientscheme.Scheme,
+		Kclient:       kclient,
+		DynamicClient: dynClient,
+	}
+}
+
+func startConfigMapBackedDeletion(namespace, pvcName, podName, nodeName string, prKey types.NamespacedName, pod *corev1.Pod) *corev1.ConfigMap {
+	pvc := getFunctionalPVC(pvcName)
+	oldPVC := pvc.DeepCopy()
+	grantRemediationConsent(pvc)
+	Expect(k8sClient.Patch(ctx, pvc, client.MergeFrom(oldPVC))).To(Succeed())
+
+	var commit *corev1.ConfigMap
+	Eventually(func(g Gomega) {
+		var err error
+		commit, err = findFunctionalDeletionCommit(namespace, string(pvc.UID))
+		if err != nil {
+			g.Expect(err).NotTo(HaveOccurred())
+			return
+		}
+		currentPVC := getFunctionalPVC(pvcName)
+		g.Expect(currentPVC.Annotations[remediationv1.PVCDeletionCommittedAnnotation]).ToNot(BeEmpty())
+		currentPod := &corev1.Pod{}
+		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: podName}, currentPod)).To(Succeed())
+		g.Expect(currentPod.DeletionTimestamp).ToNot(BeNil())
+	}, timeout, interval).Should(Succeed())
+
+	state := decodeFunctionalDeletionCommit(commit)
+	Expect(state.PVCName).To(Equal(pvcName))
+	Expect(state.PVCUID).To(Equal(string(pvc.UID)))
+	Expect(state.Node).To(Equal(nodeName))
+	Expect(state.Pods).To(ConsistOf(functionalCommittedPod{Name: podName, UID: string(pod.UID)}))
+	Expect(commit.Namespace).To(Equal(namespace))
+	Expect(prKey.Name).NotTo(BeEmpty())
+	return commit
+}
+
+func findFunctionalDeletionCommit(namespace, pvcUID string) (*corev1.ConfigMap, error) {
+	commits := &corev1.ConfigMapList{}
+	if err := k8sClient.List(ctx, commits, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	for i := range commits.Items {
+		commit := &commits.Items[i]
+		if !strings.HasPrefix(commit.Name, "podremediator-deletion-") {
+			continue
+		}
+		var state functionalDeletionCommit
+		if err := json.Unmarshal([]byte(commit.Annotations["remediation.openstack.org/deletion-commit-state"]), &state); err != nil {
+			return nil, err
+		}
+		if state.PVCUID == pvcUID {
+			return commit, nil
+		}
+	}
+	return nil, fmt.Errorf("no deletion commit ConfigMap found for PVC UID %s", pvcUID)
+}
+
+func expectNoFunctionalDeletionCommit(g Gomega, namespace, pvcUID string) {
+	_, err := findFunctionalDeletionCommit(namespace, pvcUID)
+	g.Expect(err).To(MatchError(fmt.Sprintf("no deletion commit ConfigMap found for PVC UID %s", pvcUID)))
+}
+
+func decodeFunctionalDeletionCommit(commit *corev1.ConfigMap) functionalDeletionCommit {
+	var state functionalDeletionCommit
+	Expect(json.Unmarshal([]byte(commit.Annotations["remediation.openstack.org/deletion-commit-state"]), &state)).To(Succeed())
+	return state
+}
+
+func getFunctionalPVC(name string) *corev1.PersistentVolumeClaim {
+	pvc := &corev1.PersistentVolumeClaim{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pvc)).To(Succeed())
+	return pvc
+}
+
+func removeFunctionalPodFinalizer(name string) {
+	key := types.NamespacedName{Namespace: namespace, Name: name}
+	pod := &corev1.Pod{}
+	Expect(k8sClient.Get(ctx, key, pod)).To(Succeed())
+	oldPod := pod.DeepCopy()
+	pod.Finalizers = nil
+	Expect(k8sClient.Patch(ctx, pod, client.MergeFrom(oldPod))).To(Succeed())
 }
