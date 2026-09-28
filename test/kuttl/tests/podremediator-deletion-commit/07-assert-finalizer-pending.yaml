@@ -1,0 +1,22 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 120
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      POD=podremediator-lease-0
+      for attempt in $(seq 1 60); do
+        deletion=$(oc get podremediator podremediator-deletion-commit -n "$NAMESPACE" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
+        finalizers=$(oc get podremediator podremediator-deletion-commit -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+        pod=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)
+        pvc_finalizers=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+        lease_count=$(oc get configmaps -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -c '^podremediator-deletion-' || true)
+        if [ -n "$deletion" ] && [ -n "$finalizers" ] && [ -n "$pod" ] && echo "$pvc_finalizers" | grep -q 'kubernetes.io/pvc-protection' && [ "$lease_count" -gt 0 ]; then
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "PodRemediator did not retain its finalizer while an authorized Pod held the committed cleanup"
+      oc get podremediator podremediator-deletion-commit -n "$NAMESPACE" -o yaml || true
+      oc get pvc "$CLAIM" -n "$NAMESPACE" -o yaml || true
+      exit 1
