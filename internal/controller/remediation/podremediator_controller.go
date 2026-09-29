@@ -56,7 +56,8 @@ const (
 	// ReplacementPodBlocksPVCDeletionReason identifies a committed deletion
 	// waiting for the workload owner to release a new Pod using the PVC.
 	ReplacementPodBlocksPVCDeletionReason = "ReplacementPodBlocksPVCDeletion"
-	InvalidPVCDeletionCommitReason        = "InvalidPVCDeletionCommit"
+	// InvalidPVCDeletionCommitReason is the status condition reason for an invalid PVC deletion commit.
+	InvalidPVCDeletionCommitReason = "InvalidPVCDeletionCommit"
 
 	// DefaultConsentPollInterval is the default for ConsentPollInterval.
 	DefaultConsentPollInterval = 2 * time.Minute
