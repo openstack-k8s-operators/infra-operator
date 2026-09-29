@@ -864,7 +864,13 @@ var _ = Describe("RabbitMQ Controller", func() {
 			oldCR.SetName(migrationName.Name)
 			oldCR.SetNamespace(migrationName.Namespace)
 			oldCR.SetFinalizers([]string{"deletion.finalizers.rabbitmqclusters.rabbitmq.com"})
-			Expect(k8sClient.Create(ctx, oldCR)).To(Succeed())
+			// Retry the create: the client's discovery RESTMapper can lag
+			// behind the CRD's Established condition, so an immediate create
+			// may transiently fail with a NoKindMatchError until the mapper
+			// picks up the newly installed kind.
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Create(ctx, oldCR)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
 		})
 
 		It("should adopt an existing StatefulSet owned by a foreign controller", func() {
