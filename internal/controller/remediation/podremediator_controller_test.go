@@ -222,6 +222,100 @@ func TestPodRemediatorOnlyScansOwnNamespace(t *testing.T) {
 	}
 }
 
+func TestPodRemediatorScansConfiguredNamespace(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	pr.Spec.Namespaces = []string{"workload"}
+
+	remotePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "workload", UID: types.UID("remote-pvc-uid")},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pv"},
+	}
+	if err := r.Create(ctx, remotePVC); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(remotePVC), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[remediationv1.PVCStuckOnNodeAnnotation] != "worker-0" {
+		t.Fatalf("remote PVC stuck-on-node annotation = %q, want worker-0", got.Annotations[remediationv1.PVCStuckOnNodeAnnotation])
+	}
+	if got.Annotations[remediationv1.RequestIDAnnotation] != "pr-uid:remote-pvc-uid:snr-uid" {
+		t.Fatalf("remote PVC request-id = %q, want request scoped to its PVC UID", got.Annotations[remediationv1.RequestIDAnnotation])
+	}
+	if !got.DeletionTimestamp.IsZero() {
+		t.Fatal("remote PVC was deleted before the application operator granted consent")
+	}
+}
+
+func TestPVCEventEnqueuesPodRemediatorWatchingItsNamespace(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t)
+	pr.Spec.Namespaces = []string{"test", "workload"}
+	if err := r.Create(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := r.enqueuePodRemediatorsForNamespace(ctx, "workload", logr.Discard())
+	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(pr) {
+		t.Fatalf("PVC event in watched namespace enqueued %v, want only %s", requests, client.ObjectKeyFromObject(pr))
+	}
+	if requests := r.enqueuePodRemediatorsForNamespace(ctx, "unwatched", logr.Discard()); len(requests) != 0 {
+		t.Fatalf("PVC event in unwatched namespace enqueued %v, want none", requests)
+	}
+}
+
+func TestDisabledCleanupClearsConfiguredNamespace(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t)
+	pr.Spec.Disabled = true
+	pr.Spec.Namespaces = []string{"workload"}
+
+	remotePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "claim", Namespace: "workload", UID: types.UID("remote-pvc-uid"),
+			Annotations: map[string]string{
+				remediationv1.PVCStuckOnNodeAnnotation: "worker-0",
+				remediationv1.SafeToDeleteAnnotation:   "true",
+				remediationv1.RequestIDAnnotation:      "old-request",
+				remediationv1.ConsentIDAnnotation:      "old-request",
+				remediationv1.RemediatorUIDAnnotation:  string(pr.UID),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"},
+	}
+	if err := r.Create(ctx, remotePVC); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	got := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(remotePVC), got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		remediationv1.PVCStuckOnNodeAnnotation,
+		remediationv1.SafeToDeleteAnnotation,
+		remediationv1.RequestIDAnnotation,
+		remediationv1.ConsentIDAnnotation,
+		remediationv1.RemediatorUIDAnnotation,
+		remediationv1.FencingNodeUIDAnnotation,
+	} {
+		if _, ok := got.Annotations[key]; ok {
+			t.Errorf("disabled PodRemediator retained %s on PVC in configured namespace", key)
+		}
+	}
+}
+
 func TestFencingRequiredForDeletion(t *testing.T) {
 	for _, tc := range []struct {
 		name, phase                     string

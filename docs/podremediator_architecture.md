@@ -120,14 +120,14 @@ Kubernetes accepts that request, it cannot be cancelled.
 ### 3.2 reconcileDelete
 
 Resumes any previously committed PVC deletion, then clears uncommitted handshake
-annotations from PVCs in the PodRemediator's namespace. The finalizer remains
+annotations from PVCs in the configured namespaces. The finalizer remains
 until committed cleanup completes and annotation cleanup succeeds.
 
 ### 3.3 reconcileNormal — Paths A/B/C/D
 
 ```mermaid
 flowchart TD
-    V["Use the CR's namespace"] --> R["Resume committed deletions"]
+    V["Resolve configured namespaces; default to the CR namespace"] --> R["Resume committed deletions"]
     R --> D{"Disabled?"}
     D -->|Yes| C["Clear uncommitted annotations and consent"]
     C --> N{"NHC + SNR configured?"}
@@ -135,20 +135,23 @@ flowchart TD
     N -->|No| E["Ready=False; periodic retry"]
     N -->|Yes| M{"Disabled?"}
     M -->|Yes| I["Ready=True; periodic retry"]
-    M -->|No| S["Read nodes and confirmed SNR phases; scan PVCs in the CR namespace"]
+    M -->|No| S["Read nodes and confirmed SNR phases; scan PVCs in configured namespaces"]
     S --> A["Path A: recovered node; clear handshake annotations"]
     S --> B["Path B: fencing + consent + exclusive PV locality; delete pod and PVC"]
     S --> W["Path C: wait for fencing or workload consent"]
     S --> P["Path D: fenced unhealthy node; start fresh handshake"]
 ```
 
-Each PodRemediator watches local PVCs only in its own namespace. Create one
-PodRemediator per workload namespace; the controller never lists or cleans PVCs
-from another namespace.
+Each PodRemediator watches PVCs in the namespaces listed in `spec.namespaces`.
+If the list is empty, it watches only its own namespace. PVC events in a watched
+namespace enqueue the matching PodRemediator CR, including when the CR and PVC
+are in different namespaces. The namespace scope is immutable after CR creation;
+deleting the CR runs cleanup against its configured namespaces before a new CR
+can be created with a different list.
 
 When `disabled: true`, the controller still reconciles for two bounded purposes:
 it resumes deletion commits that already exist and clears uncommitted annotations
-and consent in the CR namespace. This also cancels pending handshakes if NHC/SNR
+and consent in the configured namespaces. This also cancels pending handshakes if NHC/SNR
 become unavailable. Cleanup failures are retried. Re-enabling starts fresh
 handshakes and requires new workload consent.
 
@@ -241,7 +244,7 @@ integrating another local CSI driver.
 
 The controller reconciles from PodRemediator, Node, PVC, and SNR changes. Node
 and SNR events enqueue the relevant PodRemediator resources; PVC events enqueue
-only the CR in that PVC's namespace. SNR events and periodic polling provide
+CRs whose configured namespace list contains that PVC's namespace. SNR events and periodic polling provide
 liveness when a watch event is missed. These triggers do not authorize cleanup:
 the controller rechecks current fencing evidence and workload consent on every
 reconcile.

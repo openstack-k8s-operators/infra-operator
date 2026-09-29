@@ -96,6 +96,58 @@ var _ = Describe("PodRemediator controller", func() {
 		})
 	})
 
+	When("a PodRemediator namespace scope is changed", func() {
+		It("should reject adding, changing, or removing namespaces after creation", func() {
+			tests := []struct {
+				name       string
+				initial    []string
+				updated    []string
+				initialSet bool
+				updatedSet bool
+				omitSpec   bool
+			}{
+				{name: "adding", updated: []string{"workload"}, updatedSet: true},
+				{name: "adding to a CR created without spec", updated: []string{"workload"}, updatedSet: true, omitSpec: true},
+				{name: "changing", initial: []string{"workload"}, updated: []string{"other"}, initialSet: true, updatedSet: true},
+				{name: "removing", initial: []string{"workload"}, initialSet: true},
+			}
+
+			for _, test := range tests {
+				By(test.name)
+				spec := GetPodRemediatorSpec(false)
+				if test.initialSet {
+					spec["namespaces"] = test.initial
+				}
+				var pr client.Object
+				if test.omitSpec {
+					pr = th.CreateUnstructured(map[string]any{
+						"apiVersion": "remediation.openstack.org/v1beta1",
+						"kind":       "PodRemediator",
+						"metadata": map[string]any{
+							"name":      uuid.New().String(),
+							"namespace": namespace,
+						},
+					})
+				} else {
+					pr = CreatePodRemediator(namespace, spec)
+				}
+				DeferCleanup(th.DeleteInstance, pr)
+
+				Eventually(func(g Gomega) {
+					instance := GetPodRemediator(types.NamespacedName{Namespace: pr.GetNamespace(), Name: pr.GetName()})
+					if test.updatedSet {
+						instance.Spec.Namespaces = test.updated
+					} else {
+						instance.Spec.Namespaces = nil
+					}
+					err := k8sClient.Update(ctx, instance)
+					g.Expect(err).To(HaveOccurred())
+					g.Expect(k8s_errors.IsInvalid(err)).To(BeTrue(), "expected CRD validation to reject namespace scope change, got: %v", err)
+				}, timeout, interval).Should(Succeed())
+			}
+		})
+	})
+
 	When("a PodRemediator is deleted", func() {
 		BeforeEach(func() {
 			pr := CreatePodRemediator(namespace, GetPodRemediatorSpec(false))

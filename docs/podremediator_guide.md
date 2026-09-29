@@ -3,8 +3,9 @@
 ## What is PodRemediator?
 
 PodRemediator is an infra-operator controller configured through namespaced
-`PodRemediator` custom resources (CRs). Each CR watches PVCs in its own namespace,
-so create one CR in each workload namespace that needs remediation.
+`PodRemediator` custom resources (CRs). A CR watches PVCs in the namespaces listed
+in `spec.namespaces`. If the list is empty, it watches PVCs only in the CR's own
+namespace.
 
 When a worker fails, a local PVC may remain bound to that node and prevent the
 workload from starting elsewhere. PodRemediator coordinates PVC cleanup after
@@ -167,6 +168,10 @@ alone is not accepted.
 
 ### Install
 
+Choose the namespace scope before creating the CR. Put the desired workload
+namespaces in `spec.namespaces` in the initial manifest. If the field is omitted
+or empty, the CR watches PVCs only in its own namespace.
+
 **Step 1 — Create the PodRemediator CR**
 
 ```yaml
@@ -174,9 +179,10 @@ apiVersion: remediation.openstack.org/v1beta1
 kind: PodRemediator
 metadata:
   name: podremediator
-  namespace: openstack
+  namespace: openstack-operators
 spec:
-  # PVC remediation is enabled when the CR is applied.
+  namespaces:
+    - openstack
 ```
 
 ```bash
@@ -186,20 +192,22 @@ oc apply -f the-above.yaml
 **Step 2 — Verify the CR is Ready**
 
 ```bash
-oc get podremediator -n openstack
+oc get podremediator -n openstack-operators
 ```
 
 If `READY` is false, inspect the condition reason and message with
-`oc describe podremediator -n openstack`. For dependency or reconciliation
-errors, check infra-operator logs:
+`oc describe podremediator -n openstack-operators`. For dependency or
+reconciliation errors, check infra-operator logs:
   ```bash
   oc logs -n openstack-operators -l app.kubernetes.io/name=infra-operator --tail=50
   ```
 
-**Step 3 — Scope**
+**Step 3 — Confirm the scope**
 
-PodRemediator watches local PVCs only in its own namespace. Create a separate
-PodRemediator in each workload namespace that needs remediation.
+The CR created in Step 1 watches the `openstack` namespace. Use one
+PodRemediator CR for the set of namespaces it is responsible for. The namespace
+scope is immutable after creation. To change it, delete the CR and wait for
+finalizer cleanup before recreating it with the new list.
 
 **Step 4 — Confirm the workload operator is ready**
 
@@ -331,15 +339,17 @@ spec:
 ```
 
 Use during maintenance windows. Disabling clears uncommitted request and consent
-annotations in the CR's namespace, even when NHC/SNR are unavailable. Cleanup
-that crossed the deletion commit boundary continues and is retried if necessary.
+annotations in the configured namespaces, even when NHC/SNR are unavailable.
+When `spec.namespaces` is empty, cleanup is limited to the CR's namespace.
+Cleanup that crossed the deletion commit boundary continues and is retried if
+necessary.
 Re-enable by setting `disabled: false`; cancelled requests need fresh consent.
 
 ### Watch a workload namespace
 
-PodRemediator is namespace-scoped: each CR watches and cleans PVCs only in its
-own namespace. Create one CR in each workload namespace that needs remediation;
-one CR cannot watch PVCs in multiple namespaces.
+PodRemediator watches and cleans PVCs in the namespaces listed in
+`spec.namespaces`. If the list is empty, it watches and cleans PVCs only in its
+own namespace. A single CR can watch multiple workload namespaces.
 
 ### What the application operator must do
 

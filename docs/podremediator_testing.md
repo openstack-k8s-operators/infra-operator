@@ -18,7 +18,7 @@ race-sensitive safety conditions and fail-closed input handling.
 
 The envtest suite in `test/functional/podremediator_controller_test.go` covers
 the controller's Kubernetes API behavior, such as CR initialization, dependency
-reporting, watches, and namespace-scoped reconciliation. Envtest does not
+reporting, watches, and reconciliation within configured namespaces. Envtest does not
 simulate a real node failure or the actual NHC/SNR remediation machinery.
 
 Run the focused PodRemediator functional tests with:

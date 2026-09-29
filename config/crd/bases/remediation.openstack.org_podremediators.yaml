@@ -28,8 +28,9 @@ spec:
       openAPIV3Schema:
         description: |-
           PodRemediator is the Schema for the podremediators API.
-          When present, the controller watches worker nodes and pods with local PVCs; when NHC/SNR
-          mark a node for remediation, it deletes the corresponding PVCs so workloads can respawn.
+          When present, the controller watches worker nodes and PVCs in spec.namespaces
+          (or only the CR's namespace when the field is empty). When NHC/SNR mark a node
+          for remediation, it deletes eligible PVCs so workloads can respawn.
           NHC and SNR must be installed and configured; otherwise the controller sets ReadyCondition False.
         properties:
           apiVersion:
@@ -69,6 +70,18 @@ spec:
                   Disabled stops annotation and deletion and clears pending remediation consent.
                   Default false: applying the CR enables PVC remediation when NHC/SNR are present; set disabled to true to turn it off.
                 type: boolean
+              namespaces:
+                description: |-
+                  Namespaces is the list of namespaces whose PVCs this PodRemediator watches.
+                  If empty, the controller watches only the namespace containing this CR.
+                  The effective namespace scope is immutable after CR creation. Delete and
+                  recreate the CR to change its scope; deletion cleanup clears pending
+                  handshakes in the configured namespaces.
+                items:
+                  minLength: 1
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               periodicPollInterval:
                 description: |-
                   PeriodicPollInterval is the safety-net requeue interval when the controller
@@ -129,6 +142,13 @@ spec:
                 type: array
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: namespace scope cannot be changed after creation; delete and recreate
+            the PodRemediator
+          rule: (has(self.spec) && has(self.spec.namespaces) && size(self.spec.namespaces)
+            > 0) == (has(oldSelf.spec) && has(oldSelf.spec.namespaces) && size(oldSelf.spec.namespaces)
+            > 0) && (!(has(self.spec) && has(self.spec.namespaces) && size(self.spec.namespaces)
+            > 0) || self.spec.namespaces == oldSelf.spec.namespaces)
     served: true
     storage: true
     subresources:

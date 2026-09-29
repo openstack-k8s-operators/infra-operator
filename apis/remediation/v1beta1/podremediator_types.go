@@ -30,6 +30,16 @@ type PodRemediatorSpec struct {
 	Disabled bool `json:"disabled,omitempty"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	// Namespaces is the list of namespaces whose PVCs this PodRemediator watches.
+	// If empty, the controller watches only the namespace containing this CR.
+	// The effective namespace scope is immutable after CR creation. Delete and
+	// recreate the CR to change its scope; deletion cleanup clears pending
+	// handshakes in the configured namespaces.
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// +kubebuilder:validation:Optional
 	// ConsentPollInterval controls how often the controller re-checks PVCs waiting
 	// for SNR fencing confirmation or app-operator safe-to-delete consent.
 	// Lower values reduce recovery latency; higher values reduce
@@ -61,9 +71,11 @@ type PodRemediatorStatus struct {
 //+kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].message",description="Message"
 
 // PodRemediator is the Schema for the podremediators API.
-// When present, the controller watches worker nodes and pods with local PVCs; when NHC/SNR
-// mark a node for remediation, it deletes the corresponding PVCs so workloads can respawn.
+// When present, the controller watches worker nodes and PVCs in spec.namespaces
+// (or only the CR's namespace when the field is empty). When NHC/SNR mark a node
+// for remediation, it deletes eligible PVCs so workloads can respawn.
 // NHC and SNR must be installed and configured; otherwise the controller sets ReadyCondition False.
+// +kubebuilder:validation:XValidation:rule="(has(self.spec) && has(self.spec.namespaces) && size(self.spec.namespaces) > 0) == (has(oldSelf.spec) && has(oldSelf.spec.namespaces) && size(oldSelf.spec.namespaces) > 0) && (!(has(self.spec) && has(self.spec.namespaces) && size(self.spec.namespaces) > 0) || self.spec.namespaces == oldSelf.spec.namespaces)",message="namespace scope cannot be changed after creation; delete and recreate the PodRemediator"
 type PodRemediator struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
