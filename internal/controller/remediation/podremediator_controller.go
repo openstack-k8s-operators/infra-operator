@@ -239,7 +239,7 @@ func (r *PodRemediatorReconciler) enqueuePodRemediatorsClusterWide(ctx context.C
 	return result
 }
 
-// enqueuePodRemediatorsForNamespace enqueues only PodRemediator CRs in pvcNamespace.
+// enqueuePodRemediatorsForNamespace enqueues PodRemediator CRs that watch pvcNamespace.
 func (r *PodRemediatorReconciler) enqueuePodRemediatorsForNamespace(ctx context.Context, pvcNamespace string, Log logr.Logger) []reconcile.Request {
 	list := &remediationv1.PodRemediatorList{}
 	if err := r.List(ctx, list); err != nil {
@@ -248,15 +248,52 @@ func (r *PodRemediatorReconciler) enqueuePodRemediatorsForNamespace(ctx context.
 	}
 	var result []reconcile.Request
 	for _, pr := range list.Items {
-		if pr.Namespace == pvcNamespace {
+		if podRemediatorWatchesNamespace(&pr, pvcNamespace) {
 			result = append(result, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&pr)})
 		}
 	}
 	return result
 }
 
+// podRemediatorNamespaces returns the namespaces configured on the CR. An empty
+// list preserves the default behavior of watching only the CR's own namespace.
+// Empty entries are ignored defensively so they can never turn a namespaced PVC
+// list into an all-namespaces list.
+func podRemediatorNamespaces(instance *remediationv1.PodRemediator) []string {
+	if len(instance.Spec.Namespaces) == 0 {
+		return []string{instance.Namespace}
+	}
+
+	namespaces := make([]string, 0, len(instance.Spec.Namespaces))
+	seen := make(map[string]struct{}, len(instance.Spec.Namespaces))
+	for _, namespace := range instance.Spec.Namespaces {
+		if namespace == "" {
+			continue
+		}
+		if _, exists := seen[namespace]; exists {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+
+	if len(namespaces) == 0 {
+		return []string{instance.Namespace}
+	}
+	return namespaces
+}
+
+func podRemediatorWatchesNamespace(instance *remediationv1.PodRemediator, namespace string) bool {
+	for _, watchedNamespace := range podRemediatorNamespaces(instance) {
+		if watchedNamespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
 // reconcileDelete cleans up both pvc-stuck-on-node AND safe-to-delete annotations from PVCs
-// in the CR namespace before removing the CR finalizer. If any annotation patch fails the finalizer
+// in configured namespaces before removing the CR finalizer. If any annotation patch fails the finalizer
 // is NOT removed and the reconcile requeues, preserving atomicity. Removing safe-to-delete
 // prevents stale consent from being honored if the CR is later re-created while a node is
 // still unhealthy.
@@ -264,7 +301,7 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling PodRemediator delete")
 
-	namespaces := []string{instance.Namespace}
+	namespaces := podRemediatorNamespaces(instance)
 	resumeResult, err := r.resumeCommittedPVCDeletions(ctx, namespaces, string(instance.UID), Log)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -413,7 +450,7 @@ func effectiveInterval(specVal *metav1.Duration, reconcilerVal time.Duration, de
 	return defaultVal
 }
 
-// reconcileNormal scans PVCs in the CR namespace and advances their fencing consent handshakes.
+// reconcileNormal scans configured PVC namespaces and advances their fencing consent handshakes.
 func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance *remediationv1.PodRemediator) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 
@@ -421,7 +458,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	consentPoll := effectiveInterval(instance.Spec.ConsentPollInterval, r.ConsentPollInterval, DefaultConsentPollInterval)
 	periodicPoll := effectiveInterval(instance.Spec.PeriodicPollInterval, r.PeriodicPollInterval, DefaultPeriodicPollInterval)
 
-	namespaces := []string{instance.Namespace}
+	namespaces := podRemediatorNamespaces(instance)
 	resumeResult, err := r.resumeCommittedPVCDeletions(ctx, namespaces, string(instance.UID), Log)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
