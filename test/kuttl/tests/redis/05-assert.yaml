@@ -4,7 +4,7 @@ kind: TestAssert
 commands:
   - script: |
       set -e
-      SENTINELDATA=$(oc rsh -n $NAMESPACE -c sentinel redis-redis-0 redis-cli -p 26379 info | grep master | tr ',' '\n')
+      SENTINELDATA=$(oc rsh -n $NAMESPACE -c sentinel redis-redis-0 bash -c '$(which valkey-cli redis-cli 2>/dev/null) -p 26379 info' | grep master | tr ',' '\n')
       # there should be 1 master
       echo "$SENTINELDATA" | grep -w sentinel_masters:1
       # there should be 2 slaves

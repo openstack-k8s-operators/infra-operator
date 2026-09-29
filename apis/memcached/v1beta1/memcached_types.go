@@ -29,7 +29,7 @@ const (
 	// Container image fall-back defaults
 
 	// MemcachedContainerImage is the fall-back container image for Memcached
-	MemcachedContainerImage = "quay.io/podified-antelope-centos9/openstack-memcached:current-podified"
+	MemcachedContainerImage = "quay.io/openstack-s2i-containers/openstack-memcached:master-latest"
 
 	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
 	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"
@@ -73,6 +73,13 @@ type MemcachedSpecCore struct {
 	// +kubebuilder:default=8192
 	// Maximum number of connections accepted by Memcached
 	MaxConn int32 `json:"maxConn"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=none;verbose;debug
+	// +kubebuilder:default=debug
+	// LogLevel controls memcached logging verbosity: "none" (quiet),
+	// "verbose" (-v), or "debug" (-vv).
+	LogLevel string `json:"logLevel,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// TopologyRef to apply the Topology defined by the associated CR referenced
@@ -163,6 +170,24 @@ type MemcachedList struct {
 
 func init() {
 	SchemeBuilder.Register(&Memcached{}, &MemcachedList{})
+}
+
+// LogOption returns the memcached command-line verbosity flag corresponding to
+// the configured LogLevel. The returned value is always one of a fixed set of
+// constants so that no user-controlled string is ever passed to the memcached
+// launch command.
+func (instance *MemcachedSpecCore) LogOption() string {
+	switch instance.LogLevel {
+	case "none":
+		return ""
+	case "verbose":
+		return "-v"
+	case "debug":
+		return "-vv"
+	default:
+		// Fall back to the historical default (very verbose).
+		return "-vv"
+	}
 }
 
 // ValidateTopology -

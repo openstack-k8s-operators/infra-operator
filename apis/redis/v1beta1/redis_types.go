@@ -35,7 +35,7 @@ const (
 	// Container image fall-back defaults
 
 	// RedisContainerImage is the fall-back container image for Redis
-	RedisContainerImage = "quay.io/podified-antelope-centos9/openstack-redis:current-podified"
+	RedisContainerImage = "quay.io/openstack-s2i-containers/openstack-redis:master-latest"
 
 	// CrMaxLengthCorrection - DNS1123LabelMaxLength (63) - CrMaxLengthCorrection used in validation to
 	// omit issue with statefulset pod label "controller-revision-hash": "<statefulset_name>-<hash>"

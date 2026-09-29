@@ -7,6 +7,6 @@ metadata:
   name: rabbitmq-qmigrate
 spec:
   replicas: 3
-  containerImage: quay.io/podified-antelope-centos9/openstack-rabbitmq:current-podified
+  containerImage: quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest
   terminationGracePeriodSeconds: 30
   queueType: Mirrored

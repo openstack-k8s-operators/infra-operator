@@ -35,14 +35,15 @@ const (
 	// Container image fall-back defaults
 
 	// DNSMasqContainerImage is the fall-back container image for DNSMasq
-	DNSMasqContainerImage = "quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified"
+	DNSMasqContainerImage = "quay.io/openstack-s2i-containers/openstack-neutron-server:master-latest"
 )
 
 // DNSMasqOption defines allowed options for dnsmasq
 type DNSMasqOption struct {
-	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local;local-ttl;dhcp-ttl;max-ttl
-	Key    string   `json:"key"`
-	Values []string `json:"values"`
+	// +kubebuilder:validation:Enum=server;rev-server;srv-host;txt-record;ptr-record;rebind-domain-ok;naptr-record;cname;host-record;caa-record;dns-rr;auth-zone;synth-domain;no-negcache;local;local-ttl;dhcp-ttl;max-ttl;log-queries;log-debug
+	Key string `json:"key"`
+	// +optional
+	Values []string `json:"values,omitempty"`
 }
 
 // DNSMasqSpec defines the desired state of DNSMasq
