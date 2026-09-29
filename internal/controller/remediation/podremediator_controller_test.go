@@ -1393,6 +1393,123 @@ func TestForgedCommittedDeletionMarkerDoesNotAuthorizeDeletion(t *testing.T) {
 	}
 }
 
+func TestCommittedDeletionRequiresMatchingFinalizedPVCCommitToken(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		legacyPhase       bool
+		finalizedToken    string
+		wantBlockedPVCUID bool
+	}{
+		{name: "missing finalized token"},
+		{name: "mismatched finalized token", finalizedToken: "wrong-token", wantBlockedPVCUID: true},
+		{name: "legacy tokenless commit phase", legacyPhase: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+			pvc := &corev1.PersistentVolumeClaim{}
+			pvcKey := client.ObjectKey{Namespace: pr.Namespace, Name: "claim"}
+			if err := r.Get(ctx, pvcKey, pvc); err != nil {
+				t.Fatal(err)
+			}
+			pod := podUsingClaim("pod", "worker-0", "pod-uid", nil)
+			if err := r.Create(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+
+			const token = "commit-token"
+			state := deletionCommit{
+				PVCName: pvc.Name, PVCUID: string(pvc.UID), RemediatorUID: string(pr.UID),
+				Node: "worker-0", Pods: []committedPod{{Name: pod.Name, UID: string(pod.UID)}},
+			}
+			if !tc.legacyPhase {
+				state.PVCResourceVersion = pvc.ResourceVersion
+				if state.PVCResourceVersion == "" {
+					state.PVCResourceVersion = "test-resource-version"
+				}
+				state.RequestID = "test-request-id"
+				state.Token = token
+				state.Phase = deletionCommitPhaseCommitted
+			}
+			if tc.finalizedToken != "" || !tc.legacyPhase {
+				pvc.Annotations = map[string]string{
+					remediationv1.PVCDeletionCommittedAnnotation: committedPVCDeletionValue(string(pvc.UID), string(pr.UID), state.Node),
+					deletionCommitTokenAnnotation:                token,
+					deletionCommitFinalizedAnnotation:            tc.finalizedToken,
+				}
+				if err := r.Update(ctx, pvc); err != nil {
+					t.Fatal(err)
+				}
+			}
+			encoded, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			commit := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: deletionCommitName(string(pvc.UID)), Namespace: pvc.Namespace,
+				Annotations: map[string]string{deletionCommitAnnotation: string(encoded)},
+			}}
+			if err := r.Create(ctx, commit); err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := r.resumeCommittedPVCDeletions(ctx, []string{pvc.Namespace}, string(pr.UID), logr.Discard())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, blocked := result.BlockedPVCUIDs[string(pvc.UID)]
+			if blocked != tc.wantBlockedPVCUID {
+				t.Fatalf("PVC blocked = %t, want %t", blocked, tc.wantBlockedPVCUID)
+			}
+			gotPod := &corev1.Pod{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(pod), gotPod); err != nil {
+				t.Fatalf("commit without matching finalized token deleted Pod: %v", err)
+			}
+			if !gotPod.DeletionTimestamp.IsZero() {
+				t.Fatal("commit without matching finalized token requested Pod deletion")
+			}
+			gotPVC := &corev1.PersistentVolumeClaim{}
+			if err := r.Get(ctx, pvcKey, gotPVC); err != nil {
+				t.Fatalf("commit without matching finalized token deleted PVC: %v", err)
+			}
+			if !gotPVC.DeletionTimestamp.IsZero() {
+				t.Fatal("commit without matching finalized token requested PVC deletion")
+			}
+		})
+	}
+}
+
+func TestMalformedUnrelatedDeletionCommitDoesNotBlockResume(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	malformed := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: deletionCommitPrefix + "malformed", Namespace: pr.Namespace,
+		Annotations: map[string]string{deletionCommitAnnotation: "not-json"},
+	}}
+	if err := r.Create(ctx, malformed); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := r.resumeCommittedPVCDeletions(ctx, []string{pr.Namespace}, string(pr.UID), logr.Discard())
+	if err != nil {
+		t.Fatalf("unrelated malformed ConfigMap blocked resume: %v", err)
+	}
+	if result.Pending || len(result.BlockedPVCUIDs) != 0 {
+		t.Fatalf("unrelated malformed ConfigMap blocked remediation: %+v", result)
+	}
+	helper, err := commonhelper.NewHelper(pr, r.Client, nil, r.Scheme, logr.Discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr.Finalizers = append(pr.Finalizers, helper.GetFinalizer())
+	if _, err := r.reconcileDelete(ctx, pr, helper); err != nil {
+		t.Fatalf("unrelated malformed ConfigMap blocked finalization: %v", err)
+	}
+	if hasFinalizer(pr, helper.GetFinalizer()) {
+		t.Fatal("unrelated malformed ConfigMap left the PodRemediator finalizer in place")
+	}
+}
+
 func TestCommittedDeletionAbortsWhenClaimHasCrossNodePod(t *testing.T) {
 	t.Run("normal reconcile", func(t *testing.T) {
 		ctx := context.Background()
@@ -1576,7 +1693,27 @@ func commitPVCDeletionForTest(t *testing.T, r *PodRemediatorReconciler, pr *reme
 	if err := r.Get(context.Background(), client.ObjectKey{Namespace: pr.Namespace, Name: "claim"}, pvc); err != nil {
 		t.Fatal(err)
 	}
-	state := deletionCommit{PVCName: pvc.Name, PVCUID: string(pvc.UID), RemediatorUID: string(pr.UID), Node: node, Pods: pods}
+	const requestID = "test-request-id"
+	const token = "test-commit-token"
+	if pvc.Annotations == nil {
+		pvc.Annotations = map[string]string{}
+	}
+	pvc.Annotations[remediationv1.PVCDeletionCommittedAnnotation] = committedPVCDeletionValue(string(pvc.UID), string(pr.UID), node)
+	pvc.Annotations[deletionCommitTokenAnnotation] = token
+	pvc.Annotations[deletionCommitFinalizedAnnotation] = token
+	pvc.Annotations[remediationv1.RequestIDAnnotation] = requestID
+	if err := r.Update(context.Background(), pvc); err != nil {
+		t.Fatal(err)
+	}
+	pvcResourceVersion := pvc.ResourceVersion
+	if pvcResourceVersion == "" {
+		pvcResourceVersion = "test-resource-version"
+	}
+	state := deletionCommit{
+		PVCName: pvc.Name, PVCUID: string(pvc.UID), PVCResourceVersion: pvcResourceVersion,
+		RequestID: requestID, RemediatorUID: string(pr.UID), Node: node,
+		Token: token, Phase: deletionCommitPhaseCommitted, Pods: pods,
+	}
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)

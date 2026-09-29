@@ -56,6 +56,7 @@ const (
 	// ReplacementPodBlocksPVCDeletionReason identifies a committed deletion
 	// waiting for the workload owner to release a new Pod using the PVC.
 	ReplacementPodBlocksPVCDeletionReason = "ReplacementPodBlocksPVCDeletion"
+	InvalidPVCDeletionCommitReason        = "InvalidPVCDeletionCommit"
 
 	// DefaultConsentPollInterval is the default for ConsentPollInterval.
 	DefaultConsentPollInterval = 2 * time.Minute
@@ -267,9 +268,13 @@ func (r *PodRemediatorReconciler) reconcileDelete(ctx context.Context, instance 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if resumeResult.Pending {
+	if resumeResult.Pending || len(resumeResult.BlockedPVCUIDs) != 0 {
 		// Keep the CR finalizer until every committed PVC deletion has finished.
-		if resumeResult.BlockedByReplacementPod != "" {
+		if resumeResult.BlockedByInvalidCommit != "" {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, InvalidPVCDeletionCommitReason, condition.SeverityWarning,
+				"%s", resumeResult.BlockedByInvalidCommit))
+		} else if resumeResult.BlockedByReplacementPod != "" {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
 				"%s", resumeResult.BlockedByReplacementPod))
@@ -430,6 +435,12 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning, "%s", err))
 			return ctrl.Result{}, err
 		}
+		if len(resumeResult.BlockedPVCUIDs) != 0 {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, InvalidPVCDeletionCommitReason, condition.SeverityWarning,
+				"%s", resumeResult.BlockedByInvalidCommit))
+			return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+		}
 	}
 	if resumeResult.Pending {
 		if resumeResult.BlockedByReplacementPod != "" {
@@ -534,6 +545,10 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			pvcKey := client.ObjectKeyFromObject(pvc)
 			if _, aborted := resumeResult.AbortedPVCUIDs[string(pvc.UID)]; aborted {
 				Log.Info("Skipping PVC after aborting its committed deletion", "pvc", pvcKey)
+				continue
+			}
+			if _, blocked := resumeResult.BlockedPVCUIDs[string(pvc.UID)]; blocked {
+				Log.Info("Skipping PVC with an invalid deletion commit record", "pvc", pvcKey)
 				continue
 			}
 			if owner := pvc.Annotations[remediationv1.RemediatorUIDAnnotation]; owner != "" && owner != string(instance.UID) {
@@ -714,6 +729,13 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		} else {
 			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
 		}
+		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+	}
+
+	if len(resumeResult.BlockedPVCUIDs) != 0 {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, InvalidPVCDeletionCommitReason, condition.SeverityWarning,
+			"%s", resumeResult.BlockedByInvalidCommit))
 		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
 	}
 
