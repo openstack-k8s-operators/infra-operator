@@ -73,6 +73,8 @@ type deletionCommit struct {
 type committedPVCDeletionResumeResult struct {
 	Pending                 bool
 	BlockedByReplacementPod string
+	BlockedByInvalidCommit  string
+	BlockedPVCUIDs          map[string]struct{}
 	AbortedPVCUIDs          map[string]struct{}
 }
 
@@ -94,9 +96,7 @@ func newDeletionCommitToken() (string, error) {
 }
 
 func committedDeletion(state deletionCommit) bool {
-	// An empty phase is the original committed format, retained so already
-	// persisted commits continue to resume after an operator upgrade.
-	return state.Phase == "" || state.Phase == deletionCommitPhaseCommitted
+	return state.Phase == deletionCommitPhaseCommitted
 }
 
 func preparedCommitMatchesPVC(pvc *corev1.PersistentVolumeClaim, state deletionCommit) bool {
@@ -409,7 +409,10 @@ func decodeDeletionCommit(commit *corev1.ConfigMap) (deletionCommit, error) {
 		commit.Name != deletionCommitName(state.PVCUID) {
 		return state, fmt.Errorf("invalid PVC deletion commit ConfigMap %s", commit.Name)
 	}
-	if state.Phase != "" && state.Phase != deletionCommitPhasePrepared && state.Phase != deletionCommitPhaseCommitted {
+	if state.Phase == "" {
+		return state, fmt.Errorf("legacy PVC deletion commit ConfigMap %s has no finalized-token phase", commit.Name)
+	}
+	if state.Phase != deletionCommitPhasePrepared && state.Phase != deletionCommitPhaseCommitted {
 		return state, fmt.Errorf("invalid PVC deletion commit phase in ConfigMap %s", commit.Name)
 	}
 	if state.Phase == deletionCommitPhasePrepared || state.Phase == deletionCommitPhaseCommitted {
@@ -443,11 +446,25 @@ func (r *PodRemediatorReconciler) clearAbortedPVC(ctx context.Context, pvc *core
 }
 
 // resumeCommittedPVCDeletions promotes only prepared records with a finalized
-// PVC token. Committed ConfigMaps then authorize cleanup independent of SNR,
-// node health, or CR enabled state. Scrub hints without a matching ConfigMap.
+// PVC token. Committed ConfigMaps authorize cleanup only while that matching
+// token remains on the PVC, independent of SNR, node health, or CR enabled
+// state. Scrub hints without a matching ConfigMap.
 func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Context, namespaces []string, ownerUID string, Log logr.Logger) (committedPVCDeletionResumeResult, error) {
-	result := committedPVCDeletionResumeResult{AbortedPVCUIDs: make(map[string]struct{})}
+	result := committedPVCDeletionResumeResult{
+		BlockedPVCUIDs: make(map[string]struct{}),
+		AbortedPVCUIDs: make(map[string]struct{}),
+	}
 	for _, namespace := range namespaces {
+		pvcs := &corev1.PersistentVolumeClaimList{}
+		if err := r.safetyReader().List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
+			return committedPVCDeletionResumeResult{}, err
+		}
+		pvcByCommitName := make(map[string]*corev1.PersistentVolumeClaim, len(pvcs.Items))
+		for i := range pvcs.Items {
+			pvc := &pvcs.Items[i]
+			pvcByCommitName[deletionCommitName(string(pvc.UID))] = pvc
+		}
+
 		commits := &corev1.ConfigMapList{}
 		if err := r.safetyReader().List(ctx, commits, client.InNamespace(namespace)); err != nil {
 			return committedPVCDeletionResumeResult{}, fmt.Errorf("list PVC deletion commits: %w", err)
@@ -460,7 +477,32 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 			}
 			state, err := decodeDeletionCommit(commit)
 			if err != nil {
-				return committedPVCDeletionResumeResult{}, err
+				pvc := pvcByCommitName[commit.Name]
+				if pvc == nil {
+					Log.V(1).Info("Ignoring malformed PVC deletion commit with no matching PVC", "configMap", commit.Name)
+					continue
+				}
+				pvcUID := string(pvc.UID)
+				if pvcOwner := pvc.Annotations[remediationv1.RemediatorUIDAnnotation]; pvcOwner != "" && pvcOwner != ownerUID {
+					active[pvcUID] = true
+					continue
+				}
+				Log.Error(err, "Invalid PVC deletion commit ConfigMap", "configMap", commit.Name, "pvc", pvc.Name)
+				if !pvc.DeletionTimestamp.IsZero() || pvc.Annotations[deletionCommitFinalizedAnnotation] != "" {
+					active[pvcUID] = true
+					result.BlockedPVCUIDs[pvcUID] = struct{}{}
+					result.BlockedByInvalidCommit = fmt.Sprintf("PVC %s/%s has an invalid deletion commit record; preserve the PVC and repair or remove the record before cleanup can continue", pvc.Namespace, pvc.Name)
+					continue
+				}
+				if err := r.Delete(ctx, commit, observedDeleteOptions(commit)); err != nil && !k8s_errors.IsNotFound(err) {
+					return committedPVCDeletionResumeResult{}, fmt.Errorf("remove invalid PVC deletion commit %s: %w", commit.Name, err)
+				}
+				if err := r.clearAbortedPVC(ctx, pvc); err != nil {
+					return committedPVCDeletionResumeResult{}, err
+				}
+				active[pvcUID] = true
+				result.AbortedPVCUIDs[pvcUID] = struct{}{}
+				continue
 			}
 			if state.RemediatorUID != ownerUID {
 				active[state.PVCUID] = true
@@ -489,6 +531,14 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 					if err := r.rejectPreparedDeletionCommit(ctx, pvc, commit, state); err != nil {
 						return committedPVCDeletionResumeResult{}, err
 					}
+					if pvc.Annotations[remediationv1.PVCDeletionCommittedAnnotation] != "" ||
+						pvc.Annotations[deletionCommitTokenAnnotation] != "" ||
+						pvc.Annotations[deletionCommitFinalizedAnnotation] != "" {
+						if err := r.clearAbortedPVC(ctx, pvc); err != nil {
+							return committedPVCDeletionResumeResult{}, err
+						}
+					}
+					active[state.PVCUID] = true
 					result.AbortedPVCUIDs[state.PVCUID] = struct{}{}
 					continue
 				}
@@ -498,6 +548,25 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 				if err != nil {
 					return committedPVCDeletionResumeResult{}, err
 				}
+			} else if !finalizedCommitMatchesPVC(pvc, state) {
+				// A committed record is authoritative only while its matching PVC
+				// token proves the consent boundary was crossed. Consent may be
+				// withdrawn afterward, but the commit token must remain intact.
+				if !pvc.DeletionTimestamp.IsZero() || pvc.Annotations[deletionCommitFinalizedAnnotation] != "" {
+					active[state.PVCUID] = true
+					result.BlockedPVCUIDs[state.PVCUID] = struct{}{}
+					result.BlockedByInvalidCommit = fmt.Sprintf("PVC %s/%s has a committed deletion record without its matching finalized PVC token", pvc.Namespace, pvc.Name)
+					continue
+				}
+				if err := r.discardPreparedDeletionCommit(ctx, commit); err != nil {
+					return committedPVCDeletionResumeResult{}, err
+				}
+				if err := r.clearAbortedPVC(ctx, pvc); err != nil {
+					return committedPVCDeletionResumeResult{}, err
+				}
+				active[state.PVCUID] = true
+				result.AbortedPVCUIDs[state.PVCUID] = struct{}{}
+				continue
 			}
 			active[state.PVCUID] = true
 			stillPending, aborted, blocked, err := r.resumeCommittedPVCDeletion(ctx, pvc, commit, state, Log)
@@ -511,10 +580,6 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 			if aborted {
 				result.AbortedPVCUIDs[string(pvc.UID)] = struct{}{}
 			}
-		}
-		pvcs := &corev1.PersistentVolumeClaimList{}
-		if err := r.safetyReader().List(ctx, pvcs, client.InNamespace(namespace)); err != nil {
-			return committedPVCDeletionResumeResult{}, err
 		}
 		for i := range pvcs.Items {
 			pvc := &pvcs.Items[i]
@@ -531,6 +596,9 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 }
 
 func (r *PodRemediatorReconciler) resumeCommittedPVCDeletion(ctx context.Context, pvc *corev1.PersistentVolumeClaim, commit *corev1.ConfigMap, state deletionCommit, Log logr.Logger) (bool, bool, string, error) {
+	if !finalizedCommitMatchesPVC(pvc, state) {
+		return false, false, "", fmt.Errorf("PVC %s has a committed deletion record without its matching finalized token", pvc.Name)
+	}
 	pods, err := r.podsUsingPVC(ctx, pvc)
 	if err != nil {
 		return false, false, "", err
