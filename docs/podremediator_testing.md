@@ -10,18 +10,34 @@ and [RabbitMQ integration](podremediator_rabbitmq.md) documents.
 
 ## Controller tests
 
-Tests in `internal/controller/remediation/` exercise controller helpers and
-reconcile behavior, including PV locality, SNR evidence, consent freshness,
-revocation around the commit boundary, force-deletion of selected Pods, and
-resumption of committed work. These tests are the narrowest place to verify
-race-sensitive safety conditions and fail-closed input handling.
+The unit tests in `test/unit/remediation/` call the public `Reconcile` and
+`SetupWithManager` methods with fake Kubernetes clients and informers. They cover
+PV locality, SNR evidence and watch events, namespace selection, consent
+revocation, fencing changes immediately before commitment, selected Pod deletion,
+resumption of committed work, and progress of independent PVCs while cleanup is
+pending. Failure-injection cases exercise rejected writes, writes persisted
+before a lost response, unavailable readback, conflicting commit records, and
+PVC replacement between commit writes. They assert resource preservation before
+commitment and recovery through later reconciliations. Consent combinations,
+malformed persisted records, dependency outages, and polling precedence are also
+covered. Fixtures and injected client failures live alongside the tests. Run
+them with:
+
+```bash
+go test ./test/unit/remediation
+```
 
 The envtest suite in `test/functional/podremediator_controller_test.go` covers
 the controller's Kubernetes API behavior, such as CR initialization, dependency
-reporting, watches, and reconciliation within configured namespaces. Envtest does not
-simulate a real node failure or the actual NHC/SNR remediation machinery.
+reporting, watches, and reconciliation within configured namespaces. The cases in
+`test/functional/podremediator_preconditions_test.go` also verify that the real
+API server rejects stale PVC finalization patches, Pod/PVC deletion with stale
+versions or incorrect UIDs, and invalid polling intervals. These precondition
+tests use ordered API calls without a background PodRemediator reconciliation.
+Envtest does not simulate a real node failure or the actual NHC/SNR remediation
+machinery.
 
-Run the focused PodRemediator functional tests with:
+Run the PodRemediator unit and functional tests together with:
 
 ```bash
 make test-podremediator

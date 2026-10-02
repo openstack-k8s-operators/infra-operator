@@ -139,7 +139,8 @@ test-instanceha: ## Run instanceha tests.
 	/bin/bash test/instanceha/run_tests.sh
 
 .PHONY: test-podremediator
-test-podremediator: manifests generate gowork envtest ginkgo ## Run only PodRemediator controller functional tests. Uses absolute path for KUBEBUILDER_ASSETS so envtest finds etcd when ginkgo runs.
+test-podremediator: manifests generate gowork envtest ginkgo ## Run PodRemediator unit and functional tests. Uses absolute path for KUBEBUILDER_ASSETS so envtest finds etcd when ginkgo runs.
+	go test ./test/unit/remediation
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path --bin-dir $(LOCALBIN))" \
 	OPERATOR_TEMPLATES="$(PWD)/templates" \
 	$(GINKGO) --focus "PodRemediator" -v ./test/functional/
