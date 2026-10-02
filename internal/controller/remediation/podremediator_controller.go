@@ -481,7 +481,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
 		}
 	}
-	if resumeResult.Pending {
+	if instance.Spec.Disabled && resumeResult.Pending {
 		if resumeResult.BlockedByReplacementPod != "" {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
@@ -499,6 +499,9 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			condition.ReadyCondition, condition.ErrorReason, condition.SeverityError,
 			"Invalid poll interval (consentPollInterval=%s periodicPollInterval=%s): must be >= 1s",
 			consentPoll, periodicPoll))
+		if resumeResult.Pending {
+			return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -520,7 +523,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ReadyCondition, NHCNotFoundReason, condition.SeverityError,
 			NHCRequiredMessage))
-		return ctrl.Result{RequeueAfter: periodicPoll}, nil
+		requeueAfter := periodicPoll
+		if resumeResult.Pending {
+			requeueAfter = DefaultConsentPollInterval
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, "NHC and SNR are available")
 
@@ -567,8 +574,8 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 
 	// Always scan existing handshakes, including PVCs whose Node was removed.
 	hadError := false
-	pendingCommittedDeletion := false
-	blockedByReplacementPod := ""
+	pendingCommittedDeletion := resumeResult.Pending
+	blockedByReplacementPod := resumeResult.BlockedByReplacementPod
 	waitingForConsent := 0
 	waitingForFencing := 0
 	for _, ns := range namespaces {
@@ -582,6 +589,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
 			pvcKey := client.ObjectKeyFromObject(pvc)
+			if _, pending := resumeResult.PendingPVCUIDs[string(pvc.UID)]; pending {
+				// Resume already handled this PVC using its durable decision.
+				// Continue scanning other PVCs while this cleanup is pending.
+				continue
+			}
 			if _, aborted := resumeResult.AbortedPVCUIDs[string(pvc.UID)]; aborted {
 				Log.Info("Skipping PVC after aborting its committed deletion", "pvc", pvcKey)
 				continue
@@ -768,7 +780,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		} else {
 			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
 		}
-		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+		requeueAfter := DefaultConsentPollInterval
+		if waitingForConsent > 0 || waitingForFencing > 0 {
+			requeueAfter = min(requeueAfter, consentPoll)
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	if len(resumeResult.BlockedPVCUIDs) != 0 {
