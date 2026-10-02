@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package remediation
+package remediation_test
 
 import (
 	"context"
@@ -29,9 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // TestSNRRemediationChanged verifies the SNR event predicate.
@@ -68,10 +66,49 @@ func TestSNRRemediationChanged(t *testing.T) {
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			updated := original.DeepCopy()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r, pr := remediationFixture(t)
+			if err := r.Create(ctx, pr); err != nil {
+				t.Fatal(err)
+			}
+			dyn := r.DynamicClient.(*dynamicfake.FakeDynamicClient)
+			resource := dyn.Resource(gvrSelfNodeRemediation).Namespace("test")
+			snr, err := resource.Get(ctx, "worker-0-snr", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snr.Object["status"] = original.Object["status"]
+			snr.SetAnnotations(nil)
+			snr.SetLabels(nil)
+			if _, err := resource.Update(ctx, snr, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			watcher := watch.NewRaceFreeFake()
+			defer watcher.Stop()
+			watching := make(chan struct{}, 1)
+			dyn.PrependWatchReactor("selfnoderemediations", func(clienttesting.Action) (bool, watch.Interface, error) {
+				select {
+				case watching <- struct{}{}:
+				default:
+				}
+				return true, watcher, nil
+			})
+			harness := startWatchHarness(ctx, t, r)
+			key := client.ObjectKeyFromObject(pr)
+			expectWatchRequest(t, harness.requests, key)
+			select {
+			case <-watching:
+			case <-time.After(5 * time.Second):
+				t.Fatal("SNR watch did not start")
+			}
+			updated := snr.DeepCopy()
 			tc.change(updated)
-			if got := snrRemediationChanged(original, updated); got != tc.want {
-				t.Fatalf("event selected = %v, want %v", got, tc.want)
+			watcher.Modify(updated)
+			if tc.want {
+				expectWatchRequest(t, harness.requests, key)
+			} else {
+				expectNoWatchRequest(t, harness.requests)
 			}
 		})
 	}
@@ -108,34 +145,17 @@ func TestSNRSourceConnectsAfterAPIInstalled(t *testing.T) {
 		}
 		return true, watcher, nil
 	})
-	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
-	defer queue.ShutDown()
-	if err := (&snrSource{reconciler: r}).Start(ctx, queue); err != nil {
-		t.Fatal(err)
-	}
+	harness := startWatchHarness(ctx, t, r)
 	select {
 	case <-attempted:
 	case <-time.After(5 * time.Second):
 		t.Fatal("optional API was never checked")
 	}
-	if queue.Len() != 0 {
-		t.Fatal("unexpected event from missing API")
-	}
+	expectNoWatchRequest(t, harness.requests)
 	installed.Store(true)
 	expectEvent := func() {
 		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for queue.Len() == 0 && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if queue.Len() == 0 {
-			t.Fatal("SNR event did not enqueue PodRemediator")
-		}
-		request, _ := queue.Get()
-		queue.Done(request)
-		if request.NamespacedName != client.ObjectKeyFromObject(pr) {
-			t.Fatalf("unexpected request %v", request)
-		}
+		expectWatchRequest(t, harness.requests, client.ObjectKeyFromObject(pr))
 	}
 	// The initial list after installation must also trigger reconciliation.
 	expectEvent()

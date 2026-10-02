@@ -95,6 +95,7 @@ their purpose changes, update this table to match.
 | `config/crd,rbac,manager,webhook/` | Generated Kubernetes manifests (CRDs, RBAC, deployment, webhooks) |
 | `config/samples/` | Example CRs for all API groups |
 | `pkg/` | Shared utility packages |
+| `test/unit/` | Unit tests using fake clients and public controller entry points |
 | `test/functional/` | envtest-based Ginkgo/Gomega tests |
 | `test/instanceha/` | Python-based InstanceHA tests |
 | `test/kuttl/` | KUTTL integration tests |
@@ -123,6 +124,9 @@ After modifying Go code, always run: `make generate manifests fmt vet`.
 
 ## Testing
 
+- Place new tests under `test/`. Controller unit tests belong in
+  `test/unit/<group>/` and should exercise public entry points without exporting
+  implementation details solely for testing.
 - Functional tests use the envtest framework with Ginkgo/Gomega and live in
   `test/functional/`.
 - InstanceHA has its own Python-based test suite in `test/instanceha/`.

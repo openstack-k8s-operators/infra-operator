@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package remediation
+package remediation_test
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-logr/logr"
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
+	remediationctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	commonhelper "github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,60 +33,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // remediationFixture builds a reconciler and CR for controller unit tests.
-func remediationFixture(t *testing.T, nodes ...client.Object) (*PodRemediatorReconciler, *remediationv1.PodRemediator) {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := appsv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := remediationv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}, Spec: corev1.PersistentVolumeSpec{
-		PersistentVolumeSource: corev1.PersistentVolumeSource{Local: &corev1.LocalVolumeSource{Path: "/data"}},
-		NodeAffinity:           &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{"worker-0"}}}}}}},
-	}}
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "test", UID: types.UID("pvc-uid")}, Spec: corev1.PersistentVolumeClaimSpec{VolumeName: "pv"}}
-	pr := &remediationv1.PodRemediator{ObjectMeta: metav1.ObjectMeta{Name: "pr", Namespace: "test", UID: types.UID("pr-uid")}}
-	pvc.Annotations = map[string]string{
-		remediationv1.PVCStuckOnNodeAnnotation: "worker-0",
-		remediationv1.SafeToDeleteAnnotation:   "true",
-		remediationv1.RequestIDAnnotation:      "pr-uid:pvc-uid:snr-uid",
-		remediationv1.ConsentIDAnnotation:      "pr-uid:pvc-uid:snr-uid",
-		remediationv1.RemediatorUIDAnnotation:  "pr-uid",
-		remediationv1.FencingNodeUIDAnnotation: "node-uid",
-	}
-	objects := append([]client.Object{pv, pvc}, nodes...)
-	c := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&remediationv1.PodRemediator{}).
-		WithObjects(objects...).
-		Build()
-	nhc := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "remediation.medik8s.io/v1alpha1", "kind": "NodeHealthCheck", "metadata": map[string]interface{}{"name": "nhc"}}}
-	template := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "self-node-remediation.medik8s.io/v1alpha1", "kind": "SelfNodeRemediationTemplate", "metadata": map[string]interface{}{"name": "template", "namespace": "test"}}}
-	snr := &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "self-node-remediation.medik8s.io/v1alpha1", "kind": "SelfNodeRemediation", "metadata": map[string]interface{}{"name": "worker-0-snr", "namespace": "test", "uid": "snr-uid", "annotations": map[string]interface{}{"remediation.medik8s.io/node-name": "worker-0"}}, "status": map[string]interface{}{"phase": "Fencing-Completed"}}}
-	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{gvrNodeHealthCheck: "NodeHealthCheckList", gvrSelfNodeRemediationTemplate: "SelfNodeRemediationTemplateList", gvrSelfNodeRemediation: "SelfNodeRemediationList"}, nhc, template, snr)
-	return &PodRemediatorReconciler{Client: c, DynamicClient: dyn, Scheme: scheme}, pr
-}
-
-// remediationNode returns a test Node with the requested Ready status.
-func remediationNode(ready corev1.ConditionStatus) *corev1.Node {
-	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", UID: types.UID("node-uid"), Labels: map[string]string{corev1.LabelHostname: "worker-0"}}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: ready}}}}
-}
-
 func TestRejectNonExclusiveAffinity(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -97,9 +50,7 @@ func TestRejectNonExclusiveAffinity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pv := &corev1.PersistentVolume{Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "network.csi"}}, NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: corev1.LabelHostname, Operator: tc.op, Values: tc.values}}}}}}}}
-			if isLocalPV(pv) && getLocalPVNodeName(pv, logr.Discard()) == "worker-0" {
-				t.Fatal("PV accepted as exclusively local to worker-0 despite non-exclusive/excluding affinity")
-			}
+			assertAffinityRemediation(t, pv, "")
 		})
 	}
 }
@@ -109,7 +60,7 @@ func TestDeletedNodeWaitsForLiveFencing(t *testing.T) {
 	if err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Delete(context.Background(), "worker-0-snr", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(context.Background(), pr); err != nil {
+	if _, err := reconcileRemediation(context.Background(), r, pr); err != nil {
 		t.Fatal(err)
 	}
 	err := r.Get(context.Background(), client.ObjectKey{Namespace: "test", Name: "claim"}, &corev1.PersistentVolumeClaim{})
@@ -136,7 +87,7 @@ func TestDeletedNodeHostnameAffinityDoesNotAuthorizeConsentedDeletion(t *testing
 	if err := r.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +118,7 @@ func TestForeignRemediatorOwnsPVC(t *testing.T) {
 	if err := r.Update(ctx, pvc); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: "test", Name: "claim"}, pvc); err != nil {
@@ -182,7 +133,7 @@ func TestDisabledRecoveryInvalidatesConsent(t *testing.T) {
 	ctx := context.Background()
 	r, pr := remediationFixture(t, remediationNode(corev1.ConditionTrue))
 	pr.Spec.Disabled = true
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	node := &corev1.Node{}
@@ -194,7 +145,7 @@ func TestDisabledRecoveryInvalidatesConsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr.Spec.Disabled = false
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: "test", Name: "claim"}, &corev1.PersistentVolumeClaim{}); err != nil {
@@ -214,7 +165,7 @@ func TestPodRemediatorOnlyScansOwnNamespace(t *testing.T) {
 	if err := r.Create(ctx, pvc); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: "unrelated", Name: "claim"}, &corev1.PersistentVolumeClaim{}); err != nil {
@@ -235,7 +186,7 @@ func TestPodRemediatorScansConfiguredNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,23 +202,6 @@ func TestPodRemediatorScansConfiguredNamespace(t *testing.T) {
 	}
 	if !got.DeletionTimestamp.IsZero() {
 		t.Fatal("remote PVC was deleted before the application operator granted consent")
-	}
-}
-
-func TestPVCEventEnqueuesPodRemediatorWatchingItsNamespace(t *testing.T) {
-	ctx := context.Background()
-	r, pr := remediationFixture(t)
-	pr.Spec.Namespaces = []string{"test", "workload"}
-	if err := r.Create(ctx, pr); err != nil {
-		t.Fatal(err)
-	}
-
-	requests := r.enqueuePodRemediatorsForNamespace(ctx, "workload", logr.Discard())
-	if len(requests) != 1 || requests[0].NamespacedName != client.ObjectKeyFromObject(pr) {
-		t.Fatalf("PVC event in watched namespace enqueued %v, want only %s", requests, client.ObjectKeyFromObject(pr))
-	}
-	if requests := r.enqueuePodRemediatorsForNamespace(ctx, "unwatched", logr.Discard()); len(requests) != 0 {
-		t.Fatalf("PVC event in unwatched namespace enqueued %v, want none", requests)
 	}
 }
 
@@ -294,7 +228,7 @@ func TestDisabledCleanupClearsConfiguredNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,7 +295,7 @@ func TestFencingRequiredForDeletion(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := r.reconcileNormal(ctx, pr); err != nil {
+			if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 				t.Fatal(err)
 			}
 			for _, obj := range []client.Object{&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "test"}}, pod} {
@@ -391,7 +325,7 @@ func TestConsentWaitsForLiveFencedSNR(t *testing.T) {
 	if _, err := resource.Update(ctx, snr, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: "test", Name: "claim"}, &corev1.PersistentVolumeClaim{}); err != nil {
@@ -400,14 +334,28 @@ func TestConsentWaitsForLiveFencedSNR(t *testing.T) {
 }
 
 func TestSNRNodeNameFallback(t *testing.T) {
-	snr := &unstructured.Unstructured{Object: map[string]interface{}{
-		"metadata": map[string]interface{}{"name": "worker-0"},
-	}}
-	if got := snrNodeName(snr); got != "worker-0" {
-		t.Fatalf("SNR node name = %q, want metadata.name fallback", got)
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	resource := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test")
+	snr, err := resource.Get(ctx, "worker-0-snr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !fencingMatchesNode(snr, remediationNode(corev1.ConditionTrue)) {
-		t.Fatal("metadata.name fallback was not accepted for the matching node")
+	if err := resource.Delete(ctx, snr.GetName(), metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	snr.SetName("worker-0")
+	snr.SetAnnotations(nil)
+	snr.SetLabels(nil)
+	snr.SetResourceVersion("")
+	if _, err := resource.Create(ctx, snr, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: "test", Name: "claim"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("SNR metadata.name fallback did not authorize consented cleanup: %v", err)
 	}
 }
 
@@ -427,7 +375,7 @@ func TestUnannotatedPVCWaitingForFencingUsesConsentPoll(t *testing.T) {
 	if err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Delete(ctx, "worker-0-snr", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := r.reconcileNormal(ctx, pr)
+	result, err := reconcileRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,12 +410,7 @@ func TestAffinityAlternatives(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pv := &corev1.PersistentVolume{Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{Local: &corev1.LocalVolumeSource{Path: "/data"}}, NodeAffinity: &corev1.VolumeNodeAffinity{Required: &corev1.NodeSelector{NodeSelectorTerms: tc.terms}}}}
-			if got := getLocalPVNodeName(pv, logr.Discard()); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-			if isLocalPV(pv) != (tc.want != "") {
-				t.Fatal("locality classification disagrees with exclusive node pinning")
-			}
+			assertAffinityRemediation(t, pv, tc.want)
 		})
 	}
 }
@@ -483,7 +426,7 @@ func TestDisabledCleanupWithoutDependencies(t *testing.T) {
 		if err := r.DynamicClient.Resource(gvrNodeHealthCheck).Delete(ctx, "nhc", metav1.DeleteOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.reconcileNormal(ctx, pr); err != nil {
+		if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 			t.Fatal(err)
 		}
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -504,11 +447,11 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 
 	for _, tc := range []struct {
 		name        string
-		changeState func(context.Context, *testing.T, *PodRemediatorReconciler, *remediationv1.PodRemediator)
+		changeState func(context.Context, *testing.T, *remediationctrl.PodRemediatorReconciler, *remediationv1.PodRemediator)
 	}{
 		{
 			name: "SNR disappears",
-			changeState: func(ctx context.Context, t *testing.T, r *PodRemediatorReconciler, _ *remediationv1.PodRemediator) {
+			changeState: func(ctx context.Context, t *testing.T, r *remediationctrl.PodRemediatorReconciler, _ *remediationv1.PodRemediator) {
 				t.Helper()
 				if err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Delete(ctx, "worker-0-snr", metav1.DeleteOptions{}); err != nil {
 					t.Fatal(err)
@@ -517,7 +460,7 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 		},
 		{
 			name: "node recovers",
-			changeState: func(ctx context.Context, t *testing.T, r *PodRemediatorReconciler, _ *remediationv1.PodRemediator) {
+			changeState: func(ctx context.Context, t *testing.T, r *remediationctrl.PodRemediatorReconciler, _ *remediationv1.PodRemediator) {
 				t.Helper()
 				node := &corev1.Node{}
 				if err := r.Get(ctx, client.ObjectKey{Name: "worker-0"}, node); err != nil {
@@ -531,7 +474,7 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 		},
 		{
 			name: "PodRemediator is disabled",
-			changeState: func(_ context.Context, _ *testing.T, _ *PodRemediatorReconciler, pr *remediationv1.PodRemediator) {
+			changeState: func(_ context.Context, _ *testing.T, _ *remediationctrl.PodRemediatorReconciler, pr *remediationv1.PodRemediator) {
 				pr.Spec.Disabled = true
 			},
 		},
@@ -561,12 +504,12 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			result, err := r.reconcileNormal(ctx, pr)
+			result, err := reconcileRemediation(ctx, r, pr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.RequeueAfter != DefaultConsentPollInterval {
-				t.Fatalf("newly committed deletion requeued after %s, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+			if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+				t.Fatalf("newly committed deletion requeued after %s, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 			}
 			committedPVC := &corev1.PersistentVolumeClaim{}
 			if err := r.Get(ctx, pvcKey, committedPVC); err != nil {
@@ -577,12 +520,12 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 			}
 
 			tc.changeState(ctx, t, r, pr)
-			result, err = r.reconcileNormal(ctx, pr)
+			result, err = reconcileRemediation(ctx, r, pr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.RequeueAfter != DefaultConsentPollInterval {
-				t.Fatalf("resumed deletion requeued after %s, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+			if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+				t.Fatalf("resumed deletion requeued after %s, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 			}
 			terminatingPod := &corev1.Pod{}
 			if err := r.Get(ctx, podKey, terminatingPod); err != nil {
@@ -616,12 +559,12 @@ func TestCommittedPVCDeletionResumesAfterStateChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			result, err = r.reconcileNormal(ctx, pr)
+			result, err = reconcileRemediation(ctx, r, pr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.RequeueAfter != DefaultConsentPollInterval {
-				t.Fatalf("PVC-protection wait requeued after %s, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+			if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+				t.Fatalf("PVC-protection wait requeued after %s, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 			}
 			if err := r.Get(ctx, podKey, &corev1.Pod{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("referencing Pod was not cleaned up: %v", err)
@@ -682,7 +625,7 @@ func TestConsentRevocationAtPVCDeletionCommitBoundaryPreventsCleanup(t *testing.
 	}
 	r.Client = clientAtCommit
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		// A resource-version conflict is a valid way for the controller to abort
 		// after the competing consent update. The assertions below verify safety.
 		t.Logf("reconcile stopped after consent revocation: %v", err)
@@ -782,7 +725,7 @@ func TestConsentRevocationAfterPVCMarkerWritePreventsCommitPromotion(t *testing.
 	r.Client = deleteRecorder
 	r.APIReader = baseClient
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		// A conflict after the competing consent update also safely aborts.
 		t.Logf("reconcile stopped after consent revocation: %v", err)
 	}
@@ -838,10 +781,7 @@ func TestPreparedDeletionCommitDoesNotPromoteAfterConsentRevocation(t *testing.T
 	}
 	validatedPVCResourceVersion := pvc.ResourceVersion
 	requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
-	token, err := newDeletionCommitToken()
-	if err != nil {
-		t.Fatal(err)
-	}
+	const token = "prepared-test-token"
 
 	pod := podUsingClaim("pod", "worker-0", "pod-uid", []string{"test.example/pod-cleanup"})
 	if err := r.Create(ctx, pod); err != nil {
@@ -884,7 +824,7 @@ func TestPreparedDeletionCommitDoesNotPromoteAfterConsentRevocation(t *testing.T
 	r.Client = deleteRecorder
 	r.APIReader = baseClient
 	pr.Spec.Disabled = true // resume runs before the disabled scan/cleanup path
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatalf("reconcile prepared commit after consent revocation: %v", err)
 	}
 	if len(deleteRecorder.podDeleteRequests) != 0 {
@@ -937,10 +877,7 @@ func TestFinalizedPreparedDeletionCommitResumesAfterConsentRevocation(t *testing
 	if err := r.Create(ctx, pod); err != nil {
 		t.Fatal(err)
 	}
-	token, err := newDeletionCommitToken()
-	if err != nil {
-		t.Fatal(err)
-	}
+	const token = "prepared-test-token"
 	state := deletionCommit{
 		PVCName: pvc.Name, PVCUID: string(pvc.UID), PVCResourceVersion: pvc.ResourceVersion,
 		RequestID:     pvc.Annotations[remediationv1.RequestIDAnnotation],
@@ -986,7 +923,7 @@ func TestFinalizedPreparedDeletionCommitResumesAfterConsentRevocation(t *testing
 	r.Client = deleteRecorder
 	r.APIReader = baseClient
 	pr.Spec.Disabled = true
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatalf("resume finalized deletion after consent revocation: %v", err)
 	}
 	if len(deleteRecorder.podDeleteRequests) != 1 {
@@ -1007,7 +944,7 @@ func TestFinalizedPreparedDeletionCommitResumesAfterConsentRevocation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !committedDeletion(committedState) || committedState.Token != token {
+	if committedState.Phase != deletionCommitPhaseCommitted || committedState.Token != token {
 		t.Fatal("finalized deletion did not promote matching prepared authority")
 	}
 }
@@ -1045,11 +982,11 @@ func TestStatefulSetReplacementBeforePVCEmptyListCheckAbortsCleanup(t *testing.T
 	r.Client = deleteRecorder
 	r.APIReader = baseClient
 
-	result, err := r.reconcileNormal(ctx, pr)
+	result, err := reconcileRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatalf("reconcile with replacement Pod before empty-list check: %v", err)
 	}
-	if result.RequeueAfter != DefaultConsentPollInterval && result.RequeueAfter != DefaultPeriodicPollInterval {
+	if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval && result.RequeueAfter != remediationctrl.DefaultPeriodicPollInterval {
 		t.Fatalf("cleanup requeued after unexpected interval %s with a replacement Pod", result.RequeueAfter)
 	}
 	if !replacementClient.replacementCreated {
@@ -1081,7 +1018,7 @@ func TestStatefulSetReplacementBeforePVCEmptyListCheckAbortsCleanup(t *testing.T
 	// PVC delete becomes irreversible. Disable the scanner so the fixture cannot
 	// start a fresh consent request after that abort.
 	pr.Spec.Disabled = true
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatalf("reconcile after replacement invalidated the prepared Pod set: %v", err)
 	}
 	if err := baseClient.Get(ctx, pvcKey, gotPVC); err != nil {
@@ -1132,15 +1069,15 @@ func TestStatefulSetReplacementAfterPVCDeleteKeepsCommitPending(t *testing.T) {
 	r.Client = deleteRecorder
 	r.APIReader = baseClient
 
-	result, err := r.reconcileNormal(ctx, pr)
+	result, err := reconcileRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatalf("reconcile with replacement racing PVC deletion: %v", err)
 	}
-	if result.RequeueAfter != DefaultConsentPollInterval {
-		t.Fatalf("cleanup requeued after %s while PVC deletion was protected, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+	if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+		t.Fatalf("cleanup requeued after %s while PVC deletion was protected, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 	}
 	initialReady := pr.Status.Conditions.Get(condition.ReadyCondition)
-	if initialReady == nil || initialReady.Status != corev1.ConditionFalse || string(initialReady.Reason) != ReplacementPodBlocksPVCDeletionReason ||
+	if initialReady == nil || initialReady.Status != corev1.ConditionFalse || string(initialReady.Reason) != remediationctrl.ReplacementPodBlocksPVCDeletionReason ||
 		!strings.Contains(initialReady.Message, pvcKey.String()) || !strings.Contains(initialReady.Message, replacement.Name) {
 		t.Fatalf("replacement racing PVC deletion needs an actionable Ready condition, got %v", initialReady)
 	}
@@ -1178,18 +1115,18 @@ func TestStatefulSetReplacementAfterPVCDeleteKeepsCommitPending(t *testing.T) {
 	pr.Finalizers = append(pr.Finalizers, finalizer)
 	now := metav1.Now()
 	pr.DeletionTimestamp = &now
-	result, err = r.reconcileDelete(ctx, pr, crHelper)
+	result, err = reconcileDeletingRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatalf("resume protected PVC with a post-delete replacement Pod: %v", err)
 	}
-	if result.RequeueAfter != DefaultConsentPollInterval {
-		t.Fatalf("protected PVC was treated as complete after %s with its replacement still present, want pending interval %s", result.RequeueAfter, DefaultConsentPollInterval)
+	if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+		t.Fatalf("protected PVC was treated as complete after %s with its replacement still present, want pending interval %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 	}
 	if !hasFinalizer(pr, finalizer) {
 		t.Fatal("PodRemediator finalizer was removed while PVC protection still held the terminating claim")
 	}
 	ready := pr.Status.Conditions.Get(condition.ReadyCondition)
-	if ready == nil || ready.Status != corev1.ConditionFalse || string(ready.Reason) != ReplacementPodBlocksPVCDeletionReason ||
+	if ready == nil || ready.Status != corev1.ConditionFalse || string(ready.Reason) != remediationctrl.ReplacementPodBlocksPVCDeletionReason ||
 		!strings.Contains(ready.Message, pvcKey.String()) || !strings.Contains(ready.Message, replacement.Name) ||
 		!strings.Contains(ready.Message, "pause recreation") {
 		t.Fatalf("blocked replacement needs an actionable Ready condition, got %v", ready)
@@ -1203,14 +1140,14 @@ func TestStatefulSetReplacementAfterPVCDeleteKeepsCommitPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode retained PVC deletion commit: %v", err)
 	}
-	if !committedDeletion(state) {
+	if state.Phase != deletionCommitPhaseCommitted {
 		t.Fatalf("retained PVC deletion commit phase = %q, want committed", state.Phase)
 	}
 	if len(deleteRecorder.podDeleteRequests) != 1 {
 		t.Fatalf("controller issued %d Pod deletes after replacement appeared, want no delete of the replacement", len(deleteRecorder.podDeleteRequests))
 	}
-	result, err = r.reconcileDelete(ctx, pr, crHelper)
-	if err != nil || result.RequeueAfter != DefaultConsentPollInterval || !hasFinalizer(pr, finalizer) {
+	result, err = reconcileDeletingRemediation(ctx, r, pr)
+	if err != nil || result.RequeueAfter != remediationctrl.DefaultConsentPollInterval || !hasFinalizer(pr, finalizer) {
 		t.Fatalf("committed cleanup did not remain pending on retry: result=%v error=%v", result, err)
 	}
 	if err := baseClient.Get(ctx, commitKey, &corev1.ConfigMap{}); err != nil {
@@ -1244,7 +1181,7 @@ func TestStatefulSetReplacementAfterPVCDeleteKeepsCommitPending(t *testing.T) {
 	} else if !apierrors.IsNotFound(err) {
 		t.Fatalf("get PVC after protection release: %v", err)
 	}
-	result, err = r.reconcileDelete(ctx, pr, crHelper)
+	result, err = reconcileDeletingRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatalf("finish committed cleanup after the StatefulSet released its replacement: %v", err)
 	}
@@ -1334,8 +1271,8 @@ func TestCommittedDeletionForceDeletesTerminatingPodOnlyOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.RequeueAfter != DefaultConsentPollInterval {
-				t.Fatalf("terminating Pod kept committed cleanup pending for %s, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+			if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+				t.Fatalf("terminating Pod kept committed cleanup pending for %s, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 			}
 			if !hasFinalizer(getPodRemediator(t, r, key), crHelper.GetFinalizer()) {
 				t.Fatal("PodRemediator finalizer was removed while the Pod cleanup finalizer remained")
@@ -1432,7 +1369,7 @@ func TestUnmarkedTerminatingPVCDoesNotAuthorizePodDeletion(t *testing.T) {
 	if terminatingPVC.DeletionTimestamp.IsZero() {
 		t.Fatal("test setup did not leave the unmarked PVC terminating")
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	gotPod := &corev1.Pod{}
@@ -1467,7 +1404,7 @@ func TestForgedCommittedDeletionMarkerDoesNotAuthorizeDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1547,11 +1484,12 @@ func TestCommittedDeletionRequiresMatchingFinalizedPVCCommitToken(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			result, err := r.resumeCommittedPVCDeletions(ctx, []string{pvc.Namespace}, string(pr.UID), logr.Discard())
+			_, err = reconcileRemediation(ctx, r, pr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, blocked := result.BlockedPVCUIDs[string(pvc.UID)]
+			ready := pr.Status.Conditions.Get(condition.ReadyCondition)
+			blocked := ready != nil && string(ready.Reason) == remediationctrl.InvalidPVCDeletionCommitReason
 			if blocked != tc.wantBlockedPVCUID {
 				t.Fatalf("PVC blocked = %t, want %t", blocked, tc.wantBlockedPVCUID)
 			}
@@ -1584,11 +1522,11 @@ func TestMalformedUnrelatedDeletionCommitDoesNotBlockResume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := r.resumeCommittedPVCDeletions(ctx, []string{pr.Namespace}, string(pr.UID), logr.Discard())
+	result, err := reconcileRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatalf("unrelated malformed ConfigMap blocked resume: %v", err)
 	}
-	if result.Pending || len(result.BlockedPVCUIDs) != 0 {
+	if result.RequeueAfter != remediationctrl.DefaultPeriodicPollInterval || !pr.Status.Conditions.IsTrue(condition.ReadyCondition) {
 		t.Fatalf("unrelated malformed ConfigMap blocked remediation: %+v", result)
 	}
 	helper, err := commonhelper.NewHelper(pr, r.Client, nil, r.Scheme, logr.Discard())
@@ -1596,7 +1534,7 @@ func TestMalformedUnrelatedDeletionCommitDoesNotBlockResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr.Finalizers = append(pr.Finalizers, helper.GetFinalizer())
-	if _, err := r.reconcileDelete(ctx, pr, helper); err != nil {
+	if _, err := reconcileDeletingRemediation(ctx, r, pr); err != nil {
 		t.Fatalf("unrelated malformed ConfigMap blocked finalization: %v", err)
 	}
 	if hasFinalizer(pr, helper.GetFinalizer()) {
@@ -1616,12 +1554,12 @@ func TestCommittedDeletionAbortsWhenClaimHasCrossNodePod(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result, err := r.reconcileNormal(ctx, pr)
+		result, err := reconcileRemediation(ctx, r, pr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.RequeueAfter != DefaultPeriodicPollInterval {
-			t.Fatalf("aborted cross-node remediation requeued after %s, want normal idle interval %s", result.RequeueAfter, DefaultPeriodicPollInterval)
+		if result.RequeueAfter != remediationctrl.DefaultPeriodicPollInterval {
+			t.Fatalf("aborted cross-node remediation requeued after %s, want normal idle interval %s", result.RequeueAfter, remediationctrl.DefaultPeriodicPollInterval)
 		}
 		assertCrossNodePodAndPVCRemain(t, r, pod)
 	})
@@ -1711,12 +1649,12 @@ func TestCommittedDeletionDoesNotDeletePodsCreatedAfterCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	committedPodUID := committedPod.UID
-	result, err := r.reconcileNormal(ctx, pr)
+	result, err := reconcileRemediation(ctx, r, pr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.RequeueAfter != DefaultConsentPollInterval {
-		t.Fatalf("committed cleanup requeued after %s, want %s", result.RequeueAfter, DefaultConsentPollInterval)
+	if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+		t.Fatalf("committed cleanup requeued after %s, want %s", result.RequeueAfter, remediationctrl.DefaultConsentPollInterval)
 	}
 	gotCommittedPod := &corev1.Pod{}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(committedPod), gotCommittedPod); err != nil {
@@ -1750,7 +1688,7 @@ func TestCommittedDeletionDoesNotDeletePodsCreatedAfterCommit(t *testing.T) {
 	}
 	pr.Spec.Disabled = true
 
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	gotNewPod := &corev1.Pod{}
@@ -1765,7 +1703,7 @@ func TestCommittedDeletionDoesNotDeletePodsCreatedAfterCommit(t *testing.T) {
 	}
 }
 
-func markPVCDeletionCommittedForTest(t *testing.T, r *PodRemediatorReconciler, pr *remediationv1.PodRemediator, node string, finalizers ...string) {
+func markPVCDeletionCommittedForTest(t *testing.T, r *remediationctrl.PodRemediatorReconciler, pr *remediationv1.PodRemediator, node string, finalizers ...string) {
 	t.Helper()
 	pvc := &corev1.PersistentVolumeClaim{}
 	key := client.ObjectKey{Namespace: pr.Namespace, Name: "claim"}
@@ -1781,7 +1719,7 @@ func markPVCDeletionCommittedForTest(t *testing.T, r *PodRemediatorReconciler, p
 	}
 }
 
-func commitPVCDeletionForTest(t *testing.T, r *PodRemediatorReconciler, pr *remediationv1.PodRemediator, node string, pods ...committedPod) {
+func commitPVCDeletionForTest(t *testing.T, r *remediationctrl.PodRemediatorReconciler, pr *remediationv1.PodRemediator, node string, pods ...committedPod) {
 	t.Helper()
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(context.Background(), client.ObjectKey{Namespace: pr.Namespace, Name: "claim"}, pvc); err != nil {
@@ -1830,7 +1768,7 @@ func hasFinalizer(obj metav1.Object, finalizer string) bool {
 	return false
 }
 
-func getPodRemediator(t *testing.T, r *PodRemediatorReconciler, key client.ObjectKey) *remediationv1.PodRemediator {
+func getPodRemediator(t *testing.T, r *remediationctrl.PodRemediatorReconciler, key client.ObjectKey) *remediationv1.PodRemediator {
 	t.Helper()
 	pr := &remediationv1.PodRemediator{}
 	if err := r.Get(context.Background(), key, pr); err != nil {
@@ -1874,26 +1812,6 @@ func createStatefulSetReplacementWorkload(t *testing.T, c client.Client) (*appsv
 	replacement.DeletionGracePeriodSeconds = nil
 	replacement.Finalizers = nil
 	return statefulSet, original, replacement
-}
-
-type pvcMarkerRevocationClient struct {
-	client.Client
-	afterMarkerWrite func(context.Context)
-	intercepted      bool
-}
-
-func (c *pvcMarkerRevocationClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-	err := c.Client.Patch(ctx, obj, patch, opts...)
-	if err != nil || c.intercepted || c.afterMarkerWrite == nil {
-		return err
-	}
-	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
-	if !ok || pvc.Annotations[remediationv1.PVCDeletionCommittedAnnotation] == "" || pvc.Annotations[deletionCommitTokenAnnotation] == "" {
-		return err
-	}
-	c.intercepted = true
-	c.afterMarkerWrite(ctx)
-	return nil
 }
 
 type statefulSetReplacementClient struct {
@@ -1994,43 +1912,7 @@ func isDeletionCommitRecord(obj client.Object) bool {
 	return strings.HasPrefix(obj.GetName(), deletionCommitPrefix) || obj.GetAnnotations()[deletionCommitAnnotation] != ""
 }
 
-type recordedPodDelete struct {
-	GracePeriodSeconds *int64
-}
-
-type podDeleteRecordingClient struct {
-	client.Client
-	podDeleteRequests []recordedPodDelete
-}
-
-func (c *podDeleteRecordingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-	if _, ok := obj.(*corev1.Pod); ok {
-		options := (&client.DeleteOptions{}).ApplyOptions(opts)
-		var gracePeriodSeconds *int64
-		if options.GracePeriodSeconds != nil {
-			gracePeriod := *options.GracePeriodSeconds
-			gracePeriodSeconds = &gracePeriod
-		}
-		c.podDeleteRequests = append(c.podDeleteRequests, recordedPodDelete{GracePeriodSeconds: gracePeriodSeconds})
-	}
-	return c.Client.Delete(ctx, obj, opts...)
-}
-
-func podUsingClaim(name, node, uid string, finalizers []string) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "test", UID: types.UID(uid), Finalizers: finalizers},
-		Spec: corev1.PodSpec{
-			NodeName: node,
-			Volumes:  []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "claim"}}}},
-		},
-		Status: corev1.PodStatus{
-			Phase:      corev1.PodRunning,
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
-		},
-	}
-}
-
-func assertCrossNodePodAndPVCRemain(t *testing.T, r *PodRemediatorReconciler, pod *corev1.Pod) {
+func assertCrossNodePodAndPVCRemain(t *testing.T, r *remediationctrl.PodRemediatorReconciler, pod *corev1.Pod) {
 	t.Helper()
 	gotPod := &corev1.Pod{}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pod), gotPod); err != nil {
@@ -2075,7 +1957,7 @@ func TestHostnameAffinityUsesActualNodeIdentityForHandshake(t *testing.T) {
 	if err := r.Update(ctx, pvc); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, pvcKey, pvc); err != nil {
@@ -2112,7 +1994,7 @@ func TestDuplicateHostnameLabelsDoNotStartHandshake(t *testing.T) {
 	if err := r.Update(ctx, pvc); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.reconcileNormal(ctx, &remediationv1.PodRemediator{ObjectMeta: metav1.ObjectMeta{Name: "pr", Namespace: "test", UID: types.UID("pr-uid")}}); err != nil {
+	if _, err := reconcileRemediation(ctx, r, &remediationv1.PodRemediator{ObjectMeta: metav1.ObjectMeta{Name: "pr", Namespace: "test", UID: types.UID("pr-uid")}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, pvcKey, pvc); err != nil {
@@ -2170,7 +2052,7 @@ func TestDuplicateHostnameLabelsDoNotAuthorizeConsentedDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr := &remediationv1.PodRemediator{ObjectMeta: metav1.ObjectMeta{Name: "pr", Namespace: "test", UID: types.UID("pr-uid")}}
-	if _, err := r.reconcileNormal(ctx, pr); err != nil {
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(ctx, pvcKey, &corev1.PersistentVolumeClaim{}); err != nil {
@@ -2185,7 +2067,7 @@ func TestDuplicateHostnameLabelsDoNotAuthorizeConsentedDeletion(t *testing.T) {
 	}
 }
 
-func setHostnameAffinity(t *testing.T, r *PodRemediatorReconciler, hostname string) {
+func setHostnameAffinity(t *testing.T, r *remediationctrl.PodRemediatorReconciler, hostname string) {
 	t.Helper()
 	pv := &corev1.PersistentVolume{}
 	if err := r.Get(context.Background(), client.ObjectKey{Name: "pv"}, pv); err != nil {
@@ -2199,7 +2081,7 @@ func setHostnameAffinity(t *testing.T, r *PodRemediatorReconciler, hostname stri
 	}
 }
 
-func setFixtureSNRNodeName(t *testing.T, r *PodRemediatorReconciler, nodeName string) {
+func setFixtureSNRNodeName(t *testing.T, r *remediationctrl.PodRemediatorReconciler, nodeName string) {
 	t.Helper()
 	ctx := context.Background()
 	resource := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test")
@@ -2210,5 +2092,53 @@ func setFixtureSNRNodeName(t *testing.T, r *PodRemediatorReconciler, nodeName st
 	snr.SetAnnotations(map[string]string{"remediation.medik8s.io/node-name": nodeName})
 	if _, err := resource.Update(ctx, snr, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// assertAffinityRemediation checks both request creation and consented deletion
+// through Reconcile, so the locality tests exercise the actual controller path.
+func assertAffinityRemediation(t *testing.T, affinity *corev1.PersistentVolume, wantNode string) {
+	t.Helper()
+	for _, consented := range []bool{false, true} {
+		ctx := context.Background()
+		r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+		pv := &corev1.PersistentVolume{}
+		if err := r.Get(ctx, client.ObjectKey{Name: "pv"}, pv); err != nil {
+			t.Fatal(err)
+		}
+		pv.Spec = affinity.Spec
+		if err := r.Update(ctx, pv); err != nil {
+			t.Fatal(err)
+		}
+		key := client.ObjectKey{Namespace: "test", Name: "claim"}
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := r.Get(ctx, key, pvc); err != nil {
+			t.Fatal(err)
+		}
+		if !consented {
+			pvc.Annotations = nil
+			if err := r.Update(ctx, pvc); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+			t.Fatal(err)
+		}
+		err := r.Get(ctx, key, pvc)
+		if consented && wantNode != "" {
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("exclusive affinity did not allow consented deletion: %v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatalf("PVC deleted unexpectedly (consented=%t): %v", consented, err)
+			}
+			if !pvc.DeletionTimestamp.IsZero() {
+				t.Fatal("PVC deletion was requested with ineligible affinity")
+			}
+			if !consented && pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] != wantNode {
+				t.Fatalf("requested node = %q, want %q", pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation], wantNode)
+			}
+		}
 	}
 }

@@ -821,51 +821,12 @@ func isNodeUnhealthy(node *corev1.Node) bool {
 	return false
 }
 
-// isLocalPV reports whether a PV is a supported local volume pinned to one node.
-func isLocalPV(pv *corev1.PersistentVolume) bool {
-	return (pv.Spec.Local != nil || pv.Spec.CSI != nil || pv.Spec.HostPath != nil) &&
-		getLocalPVNodeName(pv, logr.Discard()) != ""
-}
-
 // Known topology keys that carry the node name for local/CSI volumes (e.g. LVMS/TopoLVM).
 // Add new keys here when supporting additional local CSI drivers; do not use heuristics.
 var localPVNodeTopologyKeys = []string{
 	corev1.LabelHostname,       // kubernetes.io/hostname (hostPath, local, many CSI)
 	"topology.topolvm.io/node", // TopoLVM / Red Hat LVMS
 	"topology.lvms.io/node",    // LVMS variant
-}
-
-// getLocalPVNodeName accepts only affinity that exclusively pins every OR term
-// to the same node. Expressions within a term are ANDed. Ambiguous topology
-// expressions fail closed even if another expression could narrow the selection.
-func getLocalPVNodeName(pv *corev1.PersistentVolume, Log logr.Logger) string {
-	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
-		return ""
-	}
-	nodeName := ""
-	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
-		termNode := ""
-		for _, expr := range term.MatchExpressions {
-			for _, key := range localPVNodeTopologyKeys {
-				if expr.Key != key {
-					continue
-				}
-				if expr.Operator != corev1.NodeSelectorOpIn || len(expr.Values) != 1 || expr.Values[0] == "" {
-					return ""
-				}
-				if termNode != "" && termNode != expr.Values[0] {
-					return ""
-				}
-				termNode = expr.Values[0]
-			}
-		}
-		if termNode == "" || (nodeName != "" && nodeName != termNode) {
-			Log.V(1).Info("PV is not exclusively pinned to one known node; skipping", "pv", pv.Name)
-			return ""
-		}
-		nodeName = termNode
-	}
-	return nodeName
 }
 
 // resolveLocalPVNodeName maps every exclusive topology requirement to an
