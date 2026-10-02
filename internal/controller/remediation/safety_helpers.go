@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -114,4 +115,40 @@ func fencingMatchesNode(snr *unstructured.Unstructured, node *corev1.Node) bool 
 		return false
 	}
 	return snr.GetCreationTimestamp().Time.IsZero() || !snr.GetCreationTimestamp().Time.Before(node.CreationTimestamp.Time)
+}
+
+// deletionFencingCurrent refreshes fencing for one PVC immediately before its
+// deletion is finalized. The earlier namespace scan may have become stale while
+// other PVCs were processed or this deletion's provisional record was written.
+func (r *PodRemediatorReconciler) deletionFencingCurrent(ctx context.Context, instance *remediationv1.PodRemediator, pvc *corev1.PersistentVolumeClaim, nodeName string) (bool, error) {
+	fenced, err := r.getNodesWithFencedSNR(ctx, r.GetLogger(ctx))
+	if err != nil {
+		return false, fmt.Errorf("revalidate SNR fencing for PVC %s: %w", pvc.Name, err)
+	}
+	snr := fenced[nodeName]
+	if snr == nil || pvc.Annotations[remediationv1.RequestIDAnnotation] != remediationRequestID(instance, pvc, snr) {
+		return false, nil
+	}
+	node := &corev1.Node{}
+	if err := r.safetyReader().Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("revalidate Node %s before PVC deletion: %w", nodeName, err)
+		}
+		// Preserve the existing missing-Node exception only for PV affinity
+		// that directly names the node. A hostname needs a live Node to resolve.
+		if pvc.Spec.VolumeName == "" || pvc.Annotations[remediationv1.FencingNodeUIDAnnotation] == "" {
+			return false, nil
+		}
+		pv := &corev1.PersistentVolume{}
+		if err := r.safetyReader().Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("revalidate PV %s after Node removal: %w", pvc.Spec.VolumeName, err)
+		}
+		return getDirectLocalPVNodeName(pv) == nodeName, nil
+	}
+	return isNodeUnhealthy(node) &&
+		string(node.UID) == pvc.Annotations[remediationv1.FencingNodeUIDAnnotation] &&
+		fencingMatchesNode(snr, node), nil
 }

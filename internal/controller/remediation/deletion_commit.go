@@ -74,6 +74,7 @@ type committedPVCDeletionResumeResult struct {
 	Pending                 bool
 	BlockedByReplacementPod string
 	BlockedByInvalidCommit  string
+	PendingPVCUIDs          map[string]struct{}
 	BlockedPVCUIDs          map[string]struct{}
 	AbortedPVCUIDs          map[string]struct{}
 }
@@ -290,7 +291,7 @@ func (r *PodRemediatorReconciler) deletePVCAndPods(ctx context.Context, instance
 		}
 	}
 
-	_, err = r.finalizePreparedDeletionCommit(ctx, current, commit, state)
+	_, err = r.finalizePreparedDeletionCommit(ctx, instance, current, commit, state)
 	if err != nil {
 		if errors.Is(err, errPreparedCommitRejected) {
 			return false, "", nil
@@ -336,7 +337,7 @@ func (r *PodRemediatorReconciler) rejectPreparedDeletionCommit(ctx context.Conte
 
 // The finalized token is the irrevocable boundary. The patch compares the PVC
 // resource version read with consent; a withdrawal before it causes a conflict.
-func (r *PodRemediatorReconciler) finalizePreparedDeletionCommit(ctx context.Context, pvc *corev1.PersistentVolumeClaim, commit *corev1.ConfigMap, state deletionCommit) (*corev1.PersistentVolumeClaim, error) {
+func (r *PodRemediatorReconciler) finalizePreparedDeletionCommit(ctx context.Context, instance *remediationv1.PodRemediator, pvc *corev1.PersistentVolumeClaim, commit *corev1.ConfigMap, state deletionCommit) (*corev1.PersistentVolumeClaim, error) {
 	if finalizedCommitMatchesPVC(pvc, state) {
 		return pvc, nil
 	}
@@ -345,6 +346,18 @@ func (r *PodRemediatorReconciler) finalizePreparedDeletionCommit(ctx context.Con
 			return nil, err
 		}
 		return nil, fmt.Errorf("PVC %s lost deletion consent before commitment: %w", pvc.Name, errPreparedCommitRejected)
+	}
+	// PVC optimistic locking catches consent updates, but Node/SNR changes do
+	// not change the PVC's resource version. Recheck those before committing.
+	fenced, err := r.deletionFencingCurrent(ctx, instance, pvc, state.Node)
+	if err != nil {
+		return nil, err
+	}
+	if !fenced {
+		if err := r.rejectPreparedDeletionCommit(ctx, pvc, commit, state); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("PVC %s lost current fencing before commitment: %w", pvc.Name, errPreparedCommitRejected)
 	}
 	old := pvc.DeepCopy()
 	finalized := pvc.DeepCopy()
@@ -451,6 +464,7 @@ func (r *PodRemediatorReconciler) clearAbortedPVC(ctx context.Context, pvc *core
 // state. Scrub hints without a matching ConfigMap.
 func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Context, namespaces []string, ownerUID string, Log logr.Logger) (committedPVCDeletionResumeResult, error) {
 	result := committedPVCDeletionResumeResult{
+		PendingPVCUIDs: make(map[string]struct{}),
 		BlockedPVCUIDs: make(map[string]struct{}),
 		AbortedPVCUIDs: make(map[string]struct{}),
 	}
@@ -574,6 +588,9 @@ func (r *PodRemediatorReconciler) resumeCommittedPVCDeletions(ctx context.Contex
 				return committedPVCDeletionResumeResult{}, err
 			}
 			result.Pending = result.Pending || stillPending
+			if stillPending {
+				result.PendingPVCUIDs[state.PVCUID] = struct{}{}
+			}
 			if blocked != "" {
 				result.BlockedByReplacementPod = blocked
 			}
