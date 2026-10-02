@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package remediation
+package remediation_test
 
 import (
 	"context"
@@ -22,12 +22,16 @@ import (
 	"testing"
 
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
+	remediationctrl "github.com/openstack-k8s-operators/infra-operator/internal/controller/remediation"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	ktesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -50,6 +54,9 @@ func TestDeletionCommitRevalidatesFencing(t *testing.T) {
 		{name: "missing node with hostname affinity", change: "node disappears"},
 		{name: "missing node with direct affinity", change: "node disappears", directAffinity: true, allowed: true},
 		{name: "node read fails", change: "node read fails", readError: true},
+		{name: "SNR refresh fails", change: "SNR refresh fails", readError: true},
+		{name: "PV disappears after Node removal", change: "PV disappears", directAffinity: true},
+		{name: "PV read fails after Node removal", change: "PV read fails", directAffinity: true, readError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -73,11 +80,11 @@ func TestDeletionCommitRevalidatesFencing(t *testing.T) {
 			markerClient := &pvcMarkerRevocationClient{Client: base, afterMarkerWrite: func(ctx context.Context) {
 				// Change fencing after the provisional PVC write, before the
 				// irreversible finalization. The PVC version itself does not change.
-				changeFencingBeforeCommit(t, ctx, r, tc.change)
+				changeFencingBeforeCommit(ctx, t, r, tc.change)
 			}}
 			recorder := &podDeleteRecordingClient{Client: markerClient}
 			r.Client = recorder
-			_, err := r.reconcileNormal(ctx, pr)
+			_, err := reconcileRemediation(ctx, r, pr)
 			if (err != nil) != tc.readError {
 				t.Fatalf("reconcile error = %v, want read error: %t", err, tc.readError)
 			}
@@ -103,18 +110,45 @@ func TestDeletionCommitRevalidatesFencing(t *testing.T) {
 					current.Annotations[deletionCommitTokenAnnotation] != "" {
 					t.Fatal("rejected fencing retained consent or a provisional token")
 				}
-				commitKey := client.ObjectKey{Namespace: key.Namespace, Name: deletionCommitName(string(current.UID))}
-				if err := base.Get(ctx, commitKey, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
-					t.Fatalf("rejected fencing retained the prepared record: %v", err)
+				commits := &corev1.ConfigMapList{}
+				if err := base.List(ctx, commits, client.InNamespace(key.Namespace)); err != nil {
+					t.Fatal(err)
+				}
+				if len(commits.Items) != 0 {
+					t.Fatalf("rejected fencing retained %d prepared records", len(commits.Items))
 				}
 			}
 		})
 	}
 }
 
-func changeFencingBeforeCommit(t *testing.T, ctx context.Context, r *PodRemediatorReconciler, change string) {
+func changeFencingBeforeCommit(ctx context.Context, t *testing.T, r *remediationctrl.PodRemediatorReconciler, change string) {
 	t.Helper()
 	if change == "" {
+		return
+	}
+	if change == "SNR refresh fails" {
+		r.DynamicClient.(*dynamicfake.FakeDynamicClient).PrependReactor("list", gvrSelfNodeRemediation.Resource, func(ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewServiceUnavailable("SNR refresh unavailable")
+		})
+		return
+	}
+	if change == "PV disappears" || change == "PV read fails" {
+		if err := r.Delete(ctx, remediationNode(corev1.ConditionFalse)); err != nil {
+			t.Fatal(err)
+		}
+		if change == "PV disappears" {
+			if err := r.Delete(ctx, &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pv"}}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			r.APIReader = &apiFaultClient{Client: r.Client, before: func(_ context.Context, op string, _ runtime.Object) error {
+				if op == "get PV" {
+					return apierrors.NewServiceUnavailable("PV read unavailable")
+				}
+				return nil
+			}}
+		}
 		return
 	}
 	if change == "node read fails" {
@@ -227,7 +261,7 @@ func TestPendingDeletionAllowsOtherPVCProgress(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if _, err := r.reconcileNormal(ctx, pr); err != nil {
+				if _, err := reconcileRemediation(ctx, r, pr); err != nil {
 					t.Fatal(err)
 				}
 				if tc.pending == "replacement Pod" {
@@ -268,14 +302,14 @@ func TestPendingDeletionAllowsOtherPVCProgress(t *testing.T) {
 					t.Fatal(err)
 				}
 				if tc.action == "recovery" {
-					changeFencingBeforeCommit(t, ctx, r, "node recovers")
+					changeFencingBeforeCommit(ctx, t, r, "node recovers")
 				}
 				for attempt := 0; attempt < 3; attempt++ {
-					result, err := r.reconcileNormal(ctx, pr)
+					result, err := reconcileRemediation(ctx, r, pr)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if result.RequeueAfter != DefaultConsentPollInterval {
+					if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
 						t.Fatalf("pending cleanup requeues after %s", result.RequeueAfter)
 					}
 				}
@@ -304,7 +338,7 @@ func TestPendingDeletionAllowsOtherPVCProgress(t *testing.T) {
 				}
 				if tc.pending == "replacement Pod" {
 					ready := pr.Status.Conditions.Get(condition.ReadyCondition)
-					if ready == nil || string(ready.Reason) != ReplacementPodBlocksPVCDeletionReason {
+					if ready == nil || string(ready.Reason) != remediationctrl.ReplacementPodBlocksPVCDeletionReason {
 						t.Fatalf("lost replacement Pod status: %v", ready)
 					}
 				}
