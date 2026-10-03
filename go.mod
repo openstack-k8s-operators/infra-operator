@@ -8,13 +8,13 @@ require (
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.7
 	github.com/metallb/frr-k8s v0.0.20
 	github.com/onsi/ginkgo/v2 v2.33.0
-	github.com/onsi/gomega v1.43.1
+	github.com/onsi/gomega v1.44.0
 	github.com/openshift/api v3.9.0+incompatible
 	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-00010101000000-000000000000
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20260919144046-f1cdd9f36e9f
-	github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20260919144046-f1cdd9f36e9f
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20260919144046-f1cdd9f36e9f
-	github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20260919144046-f1cdd9f36e9f
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20261001122809-0e19abbc9e47
+	github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20261001122809-0e19abbc9e47
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20261001122809-0e19abbc9e47
+	github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20261001122809-0e19abbc9e47
 	go.uber.org/zap v1.28.0
 	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67
 	k8s.io/api v0.33.13
