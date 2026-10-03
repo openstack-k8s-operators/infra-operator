@@ -2,6 +2,9 @@ name: Lints
 
 on: [pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   check-go-mod-replace-lines:
     name: check for replace lines in go.mod files
@@ -12,3 +15,35 @@ jobs:
       - name: check for replace lines in go.mod files
         run: |
           ! egrep --invert-match -e '^replace.*/apis => \./apis|^replace.*//allow-merging$'  `find . -name 'go.mod'` | egrep -e 'go.mod:replace'
+
+  check-go-version-pqc:
+    name: check go directive stays >= 1.24 (post-quantum TLS default)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout project code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: assert go >= 1.24 in all go.mod files
+        run: |
+          # Go >= 1.24 negotiates the hybrid post-quantum key exchange
+          # (X25519MLKEM768) by default in crypto/tls. Keep the toolchain at or
+          # above that floor so TLS connections stay post-quantum ready.
+          min_major=1
+          min_minor=24
+          rc=0
+          for f in $(find . -name go.mod); do
+            ver=$(awk '/^go [0-9]/ {print $2; exit}' "$f")
+            if [ -z "$ver" ]; then
+              echo "::error file=$f::no 'go' directive found"
+              rc=1
+              continue
+            fi
+            major=$(echo "$ver" | cut -d. -f1)
+            minor=$(echo "$ver" | cut -d. -f2)
+            if [ "$major" -lt "$min_major" ] || { [ "$major" -eq "$min_major" ] && [ "$minor" -lt "$min_minor" ]; }; then
+              echo "::error file=$f::go $ver is below the required ${min_major}.${min_minor} (needed for post-quantum TLS default)"
+              rc=1
+            else
+              echo "$f: go $ver OK"
+            fi
+          done
+          exit $rc
