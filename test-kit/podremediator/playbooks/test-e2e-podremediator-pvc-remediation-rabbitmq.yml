@@ -1,0 +1,254 @@
+# E2E PodRemediator – same virsh/remediation flow as the base playbook but targets an existing
+# OpenStack RabbitMQ StatefulSet (default: rabbitmq-server-0 + persistence-rabbitmq-server-0).
+# Does not deploy or require the lab test StatefulSet (test-podremediator); RabbitMQ must already exist.
+#
+# Prerequisites:
+# - RabbitMQ deployed in namespace `openstack` (e.g. openstack-operators / dataplane).
+# - PodRemediator CR must list `openstack` in spec.namespaces (empty list = only CR namespace).
+#   Example patch:
+#     oc patch podremediator podremediator-sample -n openstack-operators --type=merge \
+#       -p '{"spec":{"namespaces":["openstack-operators","openstack"]}}'
+# - Run from had-18 (virsh); inventory same as main E2E playbook.
+#
+# Ordering is independent of the lab StatefulSet E2E: run this whenever RabbitMQ is up; no need to run
+# the bundled STS test first. Optional lab convenience: run base STS E2E then this playbook, or use
+# test-e2e-podremediator-pvc-remediation-sequential.yml to execute both scenarios back-to-back.
+#
+# Optional extra-vars:
+#   -e e2e_test_pod_name=rabbitmq-server-1 -e e2e_test_pvc_name=persistence-rabbitmq-server-1
+#   -e e2e_pvc_deleted_timeout_seconds=1200
+#   -e oc_api_server=https://api...:6443
+# Lab only – merge spec.namespaces before the check (operator + workload NS):
+#   -e e2e_auto_patch_podremediator=true
+#
+# Preflight (default on): before importing the main E2E playbook, checks RabbitmqCluster
+# AllReplicasReady + ReconcileSuccess, STS ready == desired, all pods 1/1 Running, and
+# optionally rabbitmqctl cluster_status node count. Skip with -e e2e_rabbitmq_preflight=false;
+# skip only the exec check with -e e2e_rabbitmq_preflight_clusterctl=false.
+# Override CR/STS/pod names if the test targets another instance (cell1 example):
+#   -e e2e_rabbitmq_cr_name=rabbitmq-cell1 -e e2e_statefulset_name=rabbitmq-cell1-server \
+#   -e e2e_test_pod_name=rabbitmq-cell1-server-0 -e e2e_test_pvc_name=persistence-rabbitmq-cell1-server-0
+# Optional explicit exec pod: -e e2e_rabbitmq_preflight_exec_pod=rabbitmq-server-0
+#
+# Line-buffered log with nohup (otherwise the file can look stuck for minutes):
+#   env PYTHONUNBUFFERED=1 ansible-playbook ...
+#
+# Run only this playbook (no test STS), from had-18:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/test-e2e-podremediator-pvc-remediation-rabbitmq.yml -b \
+#     -e oc_cmd=/home/zuul/bin/oc -e e2e_auto_patch_podremediator=true
+#
+# From laptop (same as test STS E2E): repo root, then
+#   HAD18=<host> SSHPASS=<password> E2E_OC_CMD=/path/to/oc E2E_RABBITMQ=1 ./test-kit/podremediator/scripts/run-e2e.sh
+# Optional: SYNC=1 to rsync repo to had-18 first; E2E_PVC_TIMEOUT=1200 if slow.
+
+---
+- name: RabbitMQ E2E – verify PodRemediator watches the OpenStack workload namespace
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack') }}"
+    e2e_operator_ns: "{{ lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators') }}"
+    # Preflight uses same StatefulSet name as imported E2E when you pass -e e2e_statefulset_name=...
+    e2e_rabbitmq_sts_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default='rabbitmq-server') }}"
+    # RabbitmqCluster CR name: override with -e e2e_rabbitmq_cr_name=... (do not use lookup(vars,'e2e_rabbitmq_cr_name') here — recursion).
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+  tasks:
+    - name: Get API server from kubeconfig
+      ansible.builtin.shell: |
+        awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+      register: kubeconfig_server_rm
+      changed_when: false
+      failed_when: false
+
+    - name: Set API server fact for oc login
+      ansible.builtin.set_fact:
+        oc_api_server_auto: "{{ (kubeconfig_server_rm.stdout | trim) if (kubeconfig_server_rm.stdout is defined and kubeconfig_server_rm.stdout | trim | length > 0) else '' }}"
+
+    - name: OC login
+      ansible.builtin.shell: |
+        SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+        if [[ -n "$SERVER" ]]; then
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        else
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    # Opt-in: set spec.namespaces so the operator reconciles RabbitMQ PVCs in the workload NS.
+    - name: Get PodRemediator resource name (for optional patch)
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o jsonpath='{.items[0].metadata.name}'"
+      register: pr_name_for_patch
+      changed_when: false
+      failed_when: pr_name_for_patch.stdout | length == 0
+
+    - name: Merge operator + workload namespaces into PodRemediator (lab opt-in)
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.shell: |
+        {{ oc_bin }} patch podremediator "{{ pr_name_for_patch.stdout }}" -n {{ e2e_operator_ns }} --type=merge \
+          -p {{ {'spec': {'namespaces': [e2e_operator_ns, e2e_workload_ns]}} | to_json | quote }}
+      register: pr_merge_patch
+      changed_when: true
+
+    - name: Show PodRemediator patch result
+      when: e2e_auto_patch_podremediator | default(false) | bool
+      ansible.builtin.debug:
+        var: pr_merge_patch.stdout_lines
+
+    # After a merge patch, apiserver/operator can take a moment to show updated spec.namespaces.
+    # Use jsonpath (not JSON+stdin Python) so oc warnings on stderr cannot break parsing.
+    - name: Check PodRemediator spec.namespaces includes workload namespace
+      ansible.builtin.shell: |
+        set -euo pipefail
+        TARGET="{{ e2e_workload_ns | trim }}"
+        COUNT="$({{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} --no-headers 2>/dev/null | wc -l)"
+        COUNT="${COUNT//[[:space:]]/}"
+        if [[ "${COUNT:-0}" -eq 0 ]]; then echo "No PodRemediator in {{ e2e_operator_ns }}"; exit 2; fi
+        NS_LINE="$({{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o jsonpath='{.items[0].spec.namespaces[*]}' 2>/dev/null || true)"
+        echo "PodRemediator namespaces: ${NS_LINE:-<empty>}"
+        for n in ${NS_LINE:-}; do [[ "$n" == "$TARGET" ]] && exit 0; done
+        exit 1
+      register: pr_ns_check
+      changed_when: false
+      failed_when: pr_ns_check.rc == 2
+      until: pr_ns_check.rc == 0
+      retries: 20
+      delay: 3
+
+    - name: Confirm PodRemediator watches workload namespace (from last check)
+      ansible.builtin.debug:
+        msg: "PodRemediator lists namespace {{ e2e_workload_ns }} — PVC remediation can apply to RabbitMQ. Last check stdout: {{ pr_ns_check.stdout_lines | default([]) }}"
+
+    # -------------------------------------------------------------------------
+    # Preflight: RabbitMQ Kubernetes + Erlang cluster must be healthy before
+    # node-death / PVC remediation (avoids false negatives when a pod is
+    # CrashLoopBackOff, inconsistent_cluster, or operator reconcile is failing).
+    # -------------------------------------------------------------------------
+    - name: Preflight – RabbitMq (infra-operator) Ready is True
+      when: e2e_rabbitmq_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CR="{{ e2e_rabbitmq_cr_name | default('rabbitmq') }}"
+        NS="{{ e2e_workload_ns }}"
+        VAL="$({{ oc_bin }} get rabbitmq.rabbitmq.openstack.org "$CR" -n "$NS" \
+          -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+        echo "rabbitmq/$CR Ready: ${VAL:-<empty>}"
+        [[ "${VAL:-}" == "True" ]]
+      register: rmq_preflight_all_ready
+      changed_when: false
+
+    - name: Preflight – RabbitMq (infra-operator) Ready message is Setup complete
+      when: e2e_rabbitmq_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CR="{{ e2e_rabbitmq_cr_name | default('rabbitmq') }}"
+        NS="{{ e2e_workload_ns }}"
+        VAL="$({{ oc_bin }} get rabbitmq.rabbitmq.openstack.org "$CR" -n "$NS" \
+          -o 'jsonpath={.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
+        echo "rabbitmq/$CR Ready message: ${VAL:-<empty>}"
+        [[ "${VAL:-}" == "Setup complete" ]]
+      register: rmq_preflight_reconcile
+      changed_when: false
+
+    - name: Preflight – StatefulSet readyReplicas equals spec.replicas
+      when: e2e_rabbitmq_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        STS="{{ e2e_rabbitmq_sts_name }}"
+        DES="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+        RDY="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+        echo "STS $STS: readyReplicas=${RDY:-} spec.replicas=${DES:-}"
+        [[ -n "${DES:-}" && "${RDY:-}" == "${DES:-}" ]]
+      register: rmq_preflight_sts
+      changed_when: false
+
+    - name: Preflight – all StatefulSet pods are Running with containers Ready
+      when: e2e_rabbitmq_preflight | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        STS="{{ e2e_rabbitmq_sts_name }}"
+        PREFIX="${STS}-"
+        DES="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}')"
+        # NAME READY STATUS ...
+        LIST="$({{ oc_bin }} get pod -n "$NS" --no-headers 2>/dev/null | awk -v pfx="$PREFIX" '$1 ~ "^" pfx "[0-9]+$" {print $1, $2, $3}')"
+        CNT=$(echo "$LIST" | awk 'NF{c++} END{print c+0}')
+        if [[ "$CNT" != "$DES" ]]; then
+          echo "Expected $DES pod(s) matching ^${PREFIX}[0-9]+$, found $CNT"
+          echo "$LIST"
+          exit 1
+        fi
+        # Avoid split($2,a,"/") — mawk/quoting via Ansible can break; use index/substr.
+        BAD=$(echo "$LIST" | awk '
+          $2 !~ /^[0-9]+\/[0-9]+$/ {print "bad READY column:", $0; next}
+          {
+            p = index($2, "/")
+            if (p < 2) {print "bad READY column:", $0; next}
+            left = substr($2, 1, p - 1)
+            right = substr($2, p + 1)
+            if (left != right) {print "containers not ready:", $0; next}
+          }
+          $3 != "Running" {print "status not Running:", $0; next}
+        ')
+        if [[ -n "$BAD" ]]; then
+          echo "$BAD"
+          exit 1
+        fi
+        echo "All $DES pod(s) for $STS: READY and Running"
+      register: rmq_preflight_pods
+      changed_when: false
+
+    - name: Preflight – rabbitmqctl cluster_status (unique nodes match replica count)
+      when:
+        - e2e_rabbitmq_preflight | default(true) | bool
+        - e2e_rabbitmq_preflight_clusterctl | default(true) | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        POD="{{ e2e_rabbitmq_preflight_exec_pod | default(e2e_rabbitmq_sts_name ~ '-0') }}"
+        STS="{{ e2e_rabbitmq_sts_name }}"
+        DES="$({{ oc_bin }} get sts "$STS" -n "$NS" -o jsonpath='{.spec.replicas}')"
+        OUT="$({{ oc_bin }} exec -n "$NS" "$POD" -c rabbitmq -- rabbitmqctl cluster_status 2>&1)"
+        echo "$OUT"
+        if ! echo "$OUT" | grep -q "Cluster status of node"; then
+          echo "rabbitmqctl cluster_status did not produce expected output (exec failed?)"
+          exit 1
+        fi
+        # Nodenames like rabbit@rabbitmq-server-0.rabbitmq-nodes... → count unique ordinals
+        RUN=$(echo "$OUT" | grep -oE "rabbit@${STS}-[0-9]+" | sort -u | wc -l | tr -d ' ')
+        if [[ "$RUN" != "$DES" ]]; then
+          echo "Expected $DES unique Erlang nodes matching rabbit@${STS}-N, parsed count=$RUN"
+          exit 1
+        fi
+        echo "cluster_status: $RUN node(s) match STS replicas=$DES"
+      register: rmq_preflight_clusterctl
+      changed_when: false
+
+    - name: Preflight summary (RabbitMQ healthy for E2E)
+      when: e2e_rabbitmq_preflight | default(true) | bool
+      ansible.builtin.debug:
+        msg: >-
+          RabbitMQ preflight OK: rabbitmq.rabbitmq.openstack.org/{{ e2e_rabbitmq_cr_name | default('rabbitmq') }} Ready+SetupComplete,
+          STS/{{ e2e_rabbitmq_sts_name }} fully ready,
+          pods Running. Proceeding to imported E2E playbook.
+
+# Defaults below; override with -e when running this playbook. Extra-vars beat these.
+- import_playbook: test-e2e-podremediator-pvc-remediation.yml
+  vars:
+    e2e_deploy_bundled_test_statefulset: false
+    e2e_workload_namespace: openstack
+    e2e_operator_namespace: openstack-operators
+    e2e_test_pod_name: rabbitmq-server-0
+    e2e_test_pvc_name: persistence-rabbitmq-server-0
+    e2e_statefulset_name: rabbitmq-server
+    e2e_pvc_deleted_timeout_seconds: 1200
+    e2e_pod_reschedule_timeout_seconds: 900
+    e2e_pod_ready_wait_seconds: 1800

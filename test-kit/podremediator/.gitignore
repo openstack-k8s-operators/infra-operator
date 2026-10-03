@@ -1,0 +1,6 @@
+.tmp/
+inventory/group_vars/all/local.yml
+inventory/inventory.local.yml
+inventory/inventory-from-jumphost.local.yml
+local.env
+scripts/__pycache__/

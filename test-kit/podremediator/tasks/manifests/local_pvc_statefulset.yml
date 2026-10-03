@@ -1,0 +1,60 @@
+---
+# Bundled Service + StatefulSet for PodRemediator local PVC lab.
+# Same workload as main virsh E2E defaults: test-podremediator-0, PVC data-test-podremediator-0.
+# Edit storageClassName below if your cluster does not use lvms-local-storage.
+#
+# Loaded by tasks/deploy-local-pvc-statefulset.yml (runbook Step 6) and inlined in test-e2e-podremediator-pvc-remediation.yml.
+
+local_pvc_statefulset_resources:
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: test-podremediator
+      namespace: openstack-operators
+    spec:
+      clusterIP: None
+      selector:
+        app: test-podremediator
+
+  - apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: test-podremediator
+      namespace: openstack-operators
+    spec:
+      serviceName: test-podremediator
+      replicas: 1
+      selector:
+        matchLabels:
+          app: test-podremediator
+      template:
+        metadata:
+          labels:
+            app: test-podremediator
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: test
+              image: registry.redhat.io/ubi9/ubi-minimal:latest
+              command: ["sleep", "infinity"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                runAsNonRoot: true
+                runAsUser: 1000770000
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+      volumeClaimTemplates:
+        - metadata:
+            name: data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+            storageClassName: lvms-local-storage
