@@ -19,8 +19,14 @@ package rabbitmq
 
 import (
 	"context"
+	cryptotls "crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +53,7 @@ import (
 
 	"github.com/go-logr/logr"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
@@ -1019,6 +1026,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 
+	// PVC remediation handshake with PodRemediator (optional feature).
+	// Auto-detects PodRemediator via REST mapper; silent no-op if not installed.
+	// Consent is fail-closed: when live quorum cannot be confirmed the check returns an
+	// error. We do not fail the CR, but we requeue so the handshake is retried instead of
+	// stalling until an unrelated watch event fires.
+	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, helper); err != nil {
+		Log.Info("PVC remediation consent deferred; requeuing", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	}
+
 	// Mark ObservedGeneration only after the full reconciliation succeeds.
 	// This ensures consumers (e.g., OSCP) can trust that the controller has
 	// fully processed the spec at this generation.
@@ -1672,6 +1689,360 @@ func (r *Reconciler) cleanupOldRabbitmqClusterCR(ctx context.Context, instance *
 	return nil
 }
 
+// IsRabbitmqPVC returns true when the object is a PVC belonging to a RabbitMq
+// StatefulSet, identified by the app.kubernetes.io/name label and the
+// "persistence-" name prefix used by the RabbitMQ StatefulSet volume claim template.
+func IsRabbitmqPVC(obj client.Object) bool {
+	_, ok := obj.GetLabels()["app.kubernetes.io/name"]
+	return ok && strings.HasPrefix(obj.GetName(), "persistence-")
+}
+
+// FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
+// The PVC label app.kubernetes.io/name equals the RabbitMq CR name directly.
+func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) []reconcile.Request {
+	crName, ok := pvc.GetLabels()["app.kubernetes.io/name"]
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      crName,
+			Namespace: pvc.GetNamespace(),
+		},
+	}}
+}
+
+// rmqPVCOrdinal extracts the numeric ordinal suffix from a RabbitMQ StatefulSet PVC name.
+// PVC names follow the pattern "persistence-<sts-name>-<ordinal>".
+// Returns (ordinal, true) when the suffix is a valid integer; (0, false) otherwise so
+// callers can exclude malformed names rather than silently treating them as ordinal 0.
+func rmqPVCOrdinal(name string) (int, bool) {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 || idx == len(name)-1 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[idx+1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// rmqFindReadyPod returns the first pod that is Running with all containers Ready
+// and is NOT scheduled on one of the excluded (stuck/unhealthy) nodes. A pod on a
+// partitioned node can keep reporting Ready for the node-monitor grace period, so
+// querying it would return a stale cluster view; skip such pods when probing.
+func rmqFindReadyPod(pods []corev1.Pod, excludeNodes map[string]bool) *corev1.Pod {
+	for i := range pods {
+		pod := &pods[i]
+		if excludeNodes[pod.Spec.NodeName] {
+			continue
+		}
+		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 {
+			continue
+		}
+		allReady := true
+		for _, cs := range pod.Status.ContainerStatuses {
+			if !cs.Ready {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			return pod
+		}
+	}
+	return nil
+}
+
+// rmqMgmtCreds holds what is needed to reach the RabbitMQ management HTTP API.
+type rmqMgmtCreds struct {
+	username string
+	password string
+	tls      bool   // management endpoint is TLS (spec.tls.secretName set)
+	caPEM    []byte // CA bundle to verify the endpoint (spec.tls.caSecretName), may be empty
+}
+
+// rmqLoadMgmtCreds reads the default-user secret (username/password) and, when TLS is
+// enabled, the CA secret used to verify the RabbitMQ management HTTP API endpoint.
+func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (*rmqMgmtCreds, error) {
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      fmt.Sprintf("%s-default-user", instance.Name),
+		Namespace: instance.Namespace,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("read default-user secret: %w", err)
+	}
+	user := string(secret.Data["username"])
+	pass := string(secret.Data["password"])
+	if user == "" || pass == "" {
+		return nil, fmt.Errorf("default-user secret %s-default-user missing username/password", instance.Name)
+	}
+	creds := &rmqMgmtCreds{username: user, password: pass}
+	if instance.Spec.TLS.SecretName != "" {
+		creds.tls = true
+		if instance.Spec.TLS.CaSecretName != "" {
+			caSecret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      instance.Spec.TLS.CaSecretName,
+				Namespace: instance.Namespace,
+			}, caSecret); err != nil {
+				return nil, fmt.Errorf("read CA secret %s: %w", instance.Spec.TLS.CaSecretName, err)
+			}
+			creds.caPEM = caSecret.Data["ca.crt"]
+		}
+	}
+	return creds, nil
+}
+
+// rmqRunningNodes queries the RabbitMQ management HTTP API (GET /api/nodes) on the given
+// pod and returns the number of cluster nodes reporting running=true. This replaces the
+// former rabbitmqctl pod-exec probe so the operator needs no pods/exec privilege.
+func (r *Reconciler) rmqRunningNodes(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (int, error) {
+	scheme, port := "http", rabbitmq.ManagementPort
+	transport := &http.Transport{}
+	if creds.tls {
+		scheme, port = "https", rabbitmq.ManagementTLSPort
+		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12}
+		if len(creds.caPEM) > 0 {
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(creds.caPEM) {
+				return 0, fmt.Errorf("failed to parse RabbitMQ CA certificate")
+			}
+			tlsCfg.RootCAs = pool
+		} else {
+			// No CA available to verify the endpoint. This is an internal, cluster-local
+			// health probe (not user data), so skip verification rather than fail the
+			// safety gate. Provide spec.tls.caSecretName to enable verification.
+			tlsCfg.InsecureSkipVerify = true
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+
+	// Address the pod by its StatefulSet FQDN so a configured TLS SAN can match.
+	host := fmt.Sprintf("%s.%s-nodes.%s.svc", pod.Name, instance.Name, instance.Namespace)
+	url := fmt.Sprintf("%s://%s:%d/api/nodes?columns=running", scheme, host, port)
+
+	// Bound the request so a stalled endpoint cannot pin a reconcile worker indefinitely.
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.SetBasicAuth(creds.username, creds.password)
+
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return 0, fmt.Errorf("management API %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+
+	var nodes []struct {
+		Running bool `json:"running"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		return 0, fmt.Errorf("parse management API nodes: %w", err)
+	}
+	running := 0
+	for _, n := range nodes {
+		if n.Running {
+			running++
+		}
+	}
+	return running, nil
+}
+
+// CheckForStuckPVCRequiringRemediation evaluates whether the RabbitMq cluster can
+// safely lose one replica, and if so grants PodRemediator consent to delete the PVC
+// by setting safe-to-delete=true.
+//
+// Annotation contract (infra-operator apis/remediation/v1beta1/annotations.go):
+//   - pvc-stuck-on-node: set by PodRemediator when a local PVC is on an unhealthy node
+//   - safe-to-delete:    set by this controller to authorize deletion
+//
+// Safety gates:
+//  1. k8s gate: Status.ReadyCount >= floor(Replicas/2)+1 (already set by the main loop)
+//  2. management-API gate (fail-closed): live running-nodes count >= quorum via the
+//     RabbitMQ management HTTP API (GET /api/nodes). If the live view cannot be obtained
+//     (secret/pod list/HTTP error), consent is NOT granted and an error is returned so the
+//     reconcile requeues — authorizing a destructive PVC deletion while live quorum is
+//     unknown could collapse the cluster. Uses no pods/exec privilege.
+//
+// Concurrency: at most one PVC may hold consent at a time. If any stuck PVC already has
+// safe-to-delete=true, no further consent is granted until that PVC is deleted (drops out
+// of the list) or its remediation annotations are cleared. This prevents PodRemediator
+// from deleting two members before either PVC is gone.
+//
+// Status: instance.Status.PVCRemediation is updated on every call; nil when healthy.
+// Auto-detection: skipped silently if PodRemediator CRD is not installed (REST mapper).
+func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, h *helper.Helper) error {
+	Log := h.GetLogger()
+
+	// Skip in unit-test / envtest context (no API server available).
+	if r.config == nil {
+		return nil
+	}
+
+	// Auto-detect: skip silently if PodRemediator CRD is not installed.
+	if _, err := r.RESTMapper().RESTMapping(schema.GroupKind{
+		Group: "remediation.openstack.org",
+		Kind:  "PodRemediator",
+	}); err != nil {
+		if !apimeta.IsNoMatchError(err) {
+			Log.V(1).Info("REST mapper error checking for PodRemediator; skipping", "error", err)
+		}
+		return nil
+	}
+
+	if instance.Spec.Replicas == nil {
+		return nil
+	}
+
+	// List only PVCs belonging to this RabbitMq cluster.
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	if err := r.List(ctx, pvcList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{"app.kubernetes.io/name": instance.Name},
+	); err != nil {
+		Log.Error(err, "Failed to list PVCs for RabbitMq")
+		return err
+	}
+
+	// Single pass: build status map and candidates list.
+	newRemediationStatus := make(map[string]rabbitmqv1beta1.PVCRemediationStatus)
+	candidates := make([]*corev1.PersistentVolumeClaim, 0)
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
+		if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
+			continue
+		}
+		entry := rabbitmqv1beta1.PVCRemediationStatus{
+			StuckNode:      pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+			ConsentGranted: pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true",
+		}
+		newRemediationStatus[pvc.Name] = entry
+		if !entry.ConsentGranted {
+			// Exclude PVCs whose name has no valid ordinal suffix: they must not be
+			// ordered as ordinal 0 and win consent ahead of well-formed PVCs.
+			if _, ok := rmqPVCOrdinal(pvc.Name); !ok {
+				Log.Info("Skipping stuck PVC with unparseable ordinal suffix", "pvc", pvc.Name)
+				continue
+			}
+			candidates = append(candidates, pvc)
+		}
+	}
+
+	if len(newRemediationStatus) == 0 {
+		instance.Status.PVCRemediation = nil
+	} else {
+		instance.Status.PVCRemediation = newRemediationStatus
+	}
+
+	// Concurrency guard: never grant a second consent while one is outstanding.
+	// PodRemediator deletes one member at a time; concurrent consent could delete
+	// two members and break quorum.
+	for name, entry := range newRemediationStatus {
+		if entry.ConsentGranted {
+			Log.Info("A stuck PVC already holds safe-to-delete consent; deferring further consent",
+				"pvc", name)
+			return nil
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Sort candidates: lowest ordinal first. No seqno ordering — RabbitMQ Raft
+	// ensures all surviving nodes are equally authoritative. All candidates have a
+	// valid ordinal (malformed names were excluded above).
+	sort.SliceStable(candidates, func(i, j int) bool {
+		oi, _ := rmqPVCOrdinal(candidates[i].Name)
+		oj, _ := rmqPVCOrdinal(candidates[j].Name)
+		return oi < oj
+	})
+
+	// Safety gate 1 (k8s): use ReadyCount already set from sts.Status.ReadyReplicas.
+	quorum := *instance.Spec.Replicas/2 + 1
+	if instance.Status.ReadyCount < quorum {
+		Log.Info("RabbitMq cluster does not have enough replicas to safely lose one; deferring consent",
+			"readyCount", instance.Status.ReadyCount, "required", quorum,
+			"specReplicas", *instance.Spec.Replicas)
+		return nil
+	}
+
+	// Safety gate 2 (management HTTP API, fail-closed): verify the live cluster view
+	// before authorizing a destructive PVC deletion. If live quorum cannot be confirmed
+	// (secret/pod list error, no ready pod to probe, or HTTP error) we return an error so
+	// the reconcile requeues WITHOUT granting consent — never fail open.
+	creds, err := r.rmqLoadMgmtCreds(ctx, instance)
+	if err != nil {
+		Log.Error(err, "Failed to load RabbitMq management credentials; deferring consent")
+		return err
+	}
+	// Exclude pods on stuck/unhealthy nodes: such a pod can still report Ready during the
+	// node-monitor grace period and would give a stale cluster view.
+	stuckNodes := make(map[string]bool)
+	for _, entry := range newRemediationStatus {
+		if entry.StuckNode != "" {
+			stuckNodes[entry.StuckNode] = true
+		}
+	}
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{"app.kubernetes.io/name": instance.Name},
+	); err != nil {
+		Log.Error(err, "Failed to list RabbitMq pods for live-quorum check; deferring consent")
+		return err
+	}
+	readyPod := rmqFindReadyPod(podList.Items, stuckNodes)
+	if readyPod == nil {
+		Log.Info("No ready RabbitMq pod off the stuck node(s) to verify live quorum; deferring consent")
+		return fmt.Errorf("no ready RabbitMq pod to verify live cluster quorum")
+	}
+	runningNodes, err := r.rmqRunningNodes(ctx, instance, readyPod, creds)
+	if err != nil {
+		Log.Error(err, "RabbitMq management API live-quorum check failed; deferring consent", "pod", readyPod.Name)
+		return err
+	}
+	if runningNodes < int(quorum) {
+		Log.Info("RabbitMq running nodes below quorum; deferring consent",
+			"runningNodes", runningNodes, "quorum", quorum)
+		return nil
+	}
+
+	// Grant consent to first candidate. One per reconcile.
+	candidate := candidates[0]
+	oldPVC := candidate.DeepCopy()
+	if candidate.Annotations == nil {
+		candidate.Annotations = make(map[string]string)
+	}
+	candidate.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+	if err := r.Patch(ctx, candidate, client.MergeFrom(oldPVC)); err != nil {
+		Log.Error(err, "Failed to set safe-to-delete on stuck PVC",
+			"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation])
+		return err
+	}
+
+	// Reflect consent in status immediately (deferred PatchInstance will persist it).
+	if entry, ok := instance.Status.PVCRemediation[candidate.Name]; ok {
+		entry.ConsentGranted = true
+		instance.Status.PVCRemediation[candidate.Name] = entry
+	}
+
+	Log.Info("Cluster healthy; granted safe-to-delete consent for stuck PVC",
+		"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+		"readyCount", instance.Status.ReadyCount)
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.config = mgr.GetConfig()
@@ -1734,6 +2105,17 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&topologyv1.Topology{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Watch PVCs for annotation changes so the RabbitMq controller reacts promptly
+		// when PodRemediator sets pvc-stuck-on-node. IsRabbitmqPVC pre-screens events
+		// so only RabbitMq StatefulSet PVCs trigger the mapper.
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.FindRabbitmqForPVC),
+			builder.WithPredicates(predicate.And(
+				predicate.AnnotationChangedPredicate{},
+				predicate.NewPredicateFuncs(IsRabbitmqPVC),
+			)),
+		).
 		Complete(r)
 }
 
