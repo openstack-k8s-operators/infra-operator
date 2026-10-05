@@ -301,6 +301,16 @@ type RabbitmqClusterDefaultUser struct {
 	ServiceReference *RabbitmqClusterServiceReference `json:"serviceReference,omitempty"`
 }
 
+// PVCRemediationStatus captures the in-progress PVC remediation handshake
+// state for a single PVC as seen by the RabbitMq controller.
+type PVCRemediationStatus struct {
+	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
+	StuckNode string `json:"stuckNode"`
+	// ConsentGranted is true once this controller has set safe-to-delete=true on the PVC.
+	// +kubebuilder:default=false
+	ConsentGranted bool `json:"consentGranted,omitempty"`
+}
+
 // RabbitMqStatus defines the observed state of RabbitMq
 type RabbitMqStatus struct {
 	// Conditions
@@ -359,6 +369,11 @@ type RabbitMqStatus struct {
 	// The proxy allows non-durable clients to work with quorum queues during the upgrade window.
 	// Only cleared when the AnnotationClientsReconfigured annotation is set to "true".
 	ProxyRequired string `json:"proxyRequired,omitempty"`
+
+	// PVCRemediation tracks in-flight PVC remediation handshakes with PodRemediator,
+	// keyed by PVC name. Nil when no PVCs carry the pvc-stuck-on-node annotation.
+	// +kubebuilder:validation:Optional
+	PVCRemediation map[string]PVCRemediationStatus `json:"pvcRemediation,omitempty"`
 }
 
 //+kubebuilder:object:root=true
