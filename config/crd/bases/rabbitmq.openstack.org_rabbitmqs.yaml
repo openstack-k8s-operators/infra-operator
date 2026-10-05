@@ -2044,6 +2044,12 @@ spec:
                       description: ConsentGranted is true once this controller has
                         set safe-to-delete=true on the PVC.
                       type: boolean
+                    pvcUID:
+                      description: |-
+                        PVCUID identifies the claim tracked by this status entry. A replacement
+                        PVC can reuse the same name, so the UID distinguishes recovery from an
+                        aborted deletion that left the original claim in place.
+                      type: string
                     stuckNode:
                       description: StuckNode is the Kubernetes node name set by PodRemediator
                         on the PVC.
@@ -2052,8 +2058,8 @@ spec:
                   - stuckNode
                   type: object
                 description: |-
-                  PVCRemediation tracks in-flight PVC remediation handshakes with PodRemediator,
-                  keyed by PVC name. Nil when no PVCs carry the pvc-stuck-on-node annotation.
+                  PVCRemediation tracks in-flight PVC remediation and replacement recovery,
+                  keyed by PVC name.
                 type: object
               queueType:
                 description: QueueType - the active queue type for this cluster

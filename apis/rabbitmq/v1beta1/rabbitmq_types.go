@@ -304,6 +304,10 @@ type RabbitmqClusterDefaultUser struct {
 // PVCRemediationStatus captures the in-progress PVC remediation handshake
 // state for a single PVC as seen by the RabbitMq controller.
 type PVCRemediationStatus struct {
+	// PVCUID identifies the claim tracked by this status entry. A replacement
+	// PVC can reuse the same name, so the UID distinguishes recovery from an
+	// aborted deletion that left the original claim in place.
+	PVCUID string `json:"pvcUID,omitempty"`
 	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
 	StuckNode string `json:"stuckNode"`
 	// ConsentGranted is true once this controller has set safe-to-delete=true on the PVC.
@@ -370,8 +374,8 @@ type RabbitMqStatus struct {
 	// Only cleared when the AnnotationClientsReconfigured annotation is set to "true".
 	ProxyRequired string `json:"proxyRequired,omitempty"`
 
-	// PVCRemediation tracks in-flight PVC remediation handshakes with PodRemediator,
-	// keyed by PVC name. Nil when no PVCs carry the pvc-stuck-on-node annotation.
+	// PVCRemediation tracks in-flight PVC remediation and replacement recovery,
+	// keyed by PVC name.
 	// +kubebuilder:validation:Optional
 	PVCRemediation map[string]PVCRemediationStatus `json:"pvcRemediation,omitempty"`
 }

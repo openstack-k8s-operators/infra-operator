@@ -1803,7 +1803,8 @@ func (r *Reconciler) rmqRunningNodes(ctx context.Context, instance *rabbitmqv1be
 	transport := &http.Transport{}
 	if creds.tls {
 		scheme, port = "https", rabbitmq.ManagementTLSPort
-		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12}
+		serverName := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace)
+		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12, ServerName: serverName}
 		if len(creds.caPEM) > 0 {
 			pool := x509.NewCertPool()
 			if !pool.AppendCertsFromPEM(creds.caPEM) {
@@ -1819,8 +1820,8 @@ func (r *Reconciler) rmqRunningNodes(ctx context.Context, instance *rabbitmqv1be
 		transport.TLSClientConfig = tlsCfg
 	}
 
-	// Address the pod by its StatefulSet FQDN so a configured TLS SAN can match.
-	host := fmt.Sprintf("%s.%s-nodes.%s.svc", pod.Name, instance.Name, instance.Namespace)
+	// Use the .svc hostname for DNS, while TLS verifies the certificate's SAN without that suffix.
+	host := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace) + ".svc"
 	url := fmt.Sprintf("%s://%s:%d/api/nodes?columns=running", scheme, host, port)
 
 	// Bound the request so a stalled endpoint cannot pin a reconcile worker indefinitely.
@@ -1874,10 +1875,8 @@ func (r *Reconciler) rmqRunningNodes(ctx context.Context, instance *rabbitmqv1be
 //     reconcile requeues — authorizing a destructive PVC deletion while live quorum is
 //     unknown could collapse the cluster. Uses no pods/exec privilege.
 //
-// Concurrency: at most one PVC may hold consent at a time. If any stuck PVC already has
-// safe-to-delete=true, no further consent is granted until that PVC is deleted (drops out
-// of the list) or its remediation annotations are cleared. This prevents PodRemediator
-// from deleting two members before either PVC is gone.
+// Concurrency: one remediation remains in progress until the replacement member is ready
+// and running in the cluster, so another PVC cannot be deleted during recovery.
 //
 // Status: instance.Status.PVCRemediation is updated on every call; nil when healthy.
 // Auto-detection: skipped silently if PodRemediator CRD is not installed (REST mapper).
@@ -1916,18 +1915,23 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 
 	// Single pass: build status map and candidates list.
 	newRemediationStatus := make(map[string]rabbitmqv1beta1.PVCRemediationStatus)
+	pvcByName := make(map[string]*corev1.PersistentVolumeClaim, len(pvcList.Items))
 	candidates := make([]*corev1.PersistentVolumeClaim, 0)
+	stuckNodes := make(map[string]bool)
 	for i := range pvcList.Items {
 		pvc := &pvcList.Items[i]
+		pvcByName[pvc.Name] = pvc
 		if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
 			continue
 		}
 		entry := rabbitmqv1beta1.PVCRemediationStatus{
+			PVCUID:         string(pvc.UID),
 			StuckNode:      pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
 			ConsentGranted: pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true",
 		}
 		newRemediationStatus[pvc.Name] = entry
-		if !entry.ConsentGranted {
+		stuckNodes[entry.StuckNode] = true
+		if !entry.ConsentGranted && pvc.DeletionTimestamp == nil {
 			// Exclude PVCs whose name has no valid ordinal suffix: they must not be
 			// ordered as ordinal 0 and win consent ahead of well-formed PVCs.
 			if _, ok := rmqPVCOrdinal(pvc.Name); !ok {
@@ -1937,6 +1941,34 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			candidates = append(candidates, pvc)
 		}
 	}
+	observedRemediationStatus := make(map[string]rabbitmqv1beta1.PVCRemediationStatus, len(newRemediationStatus))
+	for name, entry := range newRemediationStatus {
+		observedRemediationStatus[name] = entry
+	}
+	// Keep a granted remediation in status after its PVC leaves the stuck list. PVC deletion
+	// is only the start of recovery; do not authorize another member until RabbitMQ has
+	// restored the configured replica count. A consent cleared while the same PVC still
+	// exists means deletion was aborted or consent was withdrawn, so re-evaluate that
+	// request instead of waiting for a replacement that cannot exist yet.
+	hasRecoveryPending := false
+	pendingRecovery := make(map[string]bool)
+	for name, previous := range instance.Status.PVCRemediation {
+		if !previous.ConsentGranted {
+			continue
+		}
+		pvc, exists := pvcByName[name]
+		if exists && previous.PVCUID != "" && previous.PVCUID == string(pvc.UID) && pvc.DeletionTimestamp == nil {
+			// PodRemediator can abort a prepared deletion and clear the PVC handshake
+			// when its Pod-user snapshot changes. The same claim is still present, so
+			// this is a fresh-consent retry, not replacement recovery.
+			Log.Info("Re-evaluating consent for PVC still present after consent was cleared",
+				"pvc", name, "pvcUID", pvc.UID)
+			continue
+		}
+		newRemediationStatus[name] = previous
+		pendingRecovery[name] = true
+		hasRecoveryPending = true
+	}
 
 	if len(newRemediationStatus) == 0 {
 		instance.Status.PVCRemediation = nil
@@ -1944,18 +1976,17 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		instance.Status.PVCRemediation = newRemediationStatus
 	}
 
-	// Concurrency guard: never grant a second consent while one is outstanding.
-	// PodRemediator deletes one member at a time; concurrent consent could delete
-	// two members and break quorum.
+	// A PVC still carrying consent is awaiting deletion. A deleted PVC stays pending
+	// below until its replacement rejoins the cluster.
 	for name, entry := range newRemediationStatus {
-		if entry.ConsentGranted {
+		if entry.ConsentGranted && !pendingRecovery[name] {
 			Log.Info("A stuck PVC already holds safe-to-delete consent; deferring further consent",
 				"pvc", name)
 			return nil
 		}
 	}
 
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && !hasRecoveryPending {
 		return nil
 	}
 
@@ -1968,9 +1999,8 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		return oi < oj
 	})
 
-	// Safety gate 1 (k8s): use ReadyCount already set from sts.Status.ReadyReplicas.
 	quorum := *instance.Spec.Replicas/2 + 1
-	if instance.Status.ReadyCount < quorum {
+	if len(candidates) > 0 && instance.Status.ReadyCount < quorum {
 		Log.Info("RabbitMq cluster does not have enough replicas to safely lose one; deferring consent",
 			"readyCount", instance.Status.ReadyCount, "required", quorum,
 			"specReplicas", *instance.Spec.Replicas)
@@ -1986,14 +2016,8 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Error(err, "Failed to load RabbitMq management credentials; deferring consent")
 		return err
 	}
-	// Exclude pods on stuck/unhealthy nodes: such a pod can still report Ready during the
-	// node-monitor grace period and would give a stale cluster view.
-	stuckNodes := make(map[string]bool)
-	for _, entry := range newRemediationStatus {
-		if entry.StuckNode != "" {
-			stuckNodes[entry.StuckNode] = true
-		}
-	}
+	// Exclude currently stuck nodes: their pods may still report Ready during the
+	// node-monitor grace period. A recovering member is included in this check.
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
 		client.InNamespace(instance.Namespace),
@@ -2012,6 +2036,29 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Error(err, "RabbitMq management API live-quorum check failed; deferring consent", "pod", readyPod.Name)
 		return err
 	}
+	if hasRecoveryPending {
+		if instance.Status.ReadyCount < *instance.Spec.Replicas || runningNodes < int(*instance.Spec.Replicas) {
+			Log.Info("RabbitMq replacement has not rejoined; keeping remediation slot occupied",
+				"readyCount", instance.Status.ReadyCount, "runningNodes", runningNodes,
+				"replicas", *instance.Spec.Replicas)
+			return fmt.Errorf("RabbitMq replacement has not restored all %d replicas", *instance.Spec.Replicas)
+		}
+		for name := range pendingRecovery {
+			delete(newRemediationStatus, name)
+			if current, exists := observedRemediationStatus[name]; exists {
+				newRemediationStatus[name] = current
+			}
+		}
+	}
+	if len(newRemediationStatus) == 0 {
+		instance.Status.PVCRemediation = nil
+	} else {
+		instance.Status.PVCRemediation = newRemediationStatus
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
 	if runningNodes < int(quorum) {
 		Log.Info("RabbitMq running nodes below quorum; deferring consent",
 			"runningNodes", runningNodes, "quorum", quorum)
@@ -2020,12 +2067,20 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 
 	// Grant consent to first candidate. One per reconcile.
 	candidate := candidates[0]
+	requestID := candidate.Annotations[remediationv1.RequestIDAnnotation]
+	if requestID == "" {
+		Log.Info("Stuck PVC has no request-id; deferring consent until PodRemediator sets one",
+			"pvc", candidate.Name)
+		return nil
+	}
 	oldPVC := candidate.DeepCopy()
 	if candidate.Annotations == nil {
 		candidate.Annotations = make(map[string]string)
 	}
 	candidate.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
-	if err := r.Patch(ctx, candidate, client.MergeFrom(oldPVC)); err != nil {
+	candidate.Annotations[remediationv1.ConsentIDAnnotation] = requestID
+	patch := client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})
+	if err := r.Patch(ctx, candidate, patch); err != nil {
 		Log.Error(err, "Failed to set safe-to-delete on stuck PVC",
 			"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation])
 		return err
