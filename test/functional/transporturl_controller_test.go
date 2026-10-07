@@ -56,6 +56,29 @@ var _ = Describe("TransportURL controller", func() {
 		}
 	})
 
+	makePerPodServiceOverrides := func(amqpPorts, amqpsPorts []int64) []map[string]any {
+		services := make([]map[string]any, len(amqpPorts))
+		for i := range amqpPorts {
+			services[i] = map[string]any{
+				"metadata": map[string]any{
+					"annotations": map[string]any{
+						"metallb.universe.tf/address-pool":    "internalapi",
+						"metallb.universe.tf/allow-shared-ip": "internalapi",
+						"metallb.universe.tf/loadBalancerIPs": "192.0.2.30",
+					},
+				},
+				"spec": map[string]any{
+					"type": string(corev1.ServiceTypeLoadBalancer),
+					"ports": []map[string]any{
+						{"name": "amqp", "port": amqpPorts[i]},
+						{"name": "amqps", "port": amqpsPorts[i]},
+					},
+				},
+			}
+		}
+		return services
+	}
+
 	When("a non TLS TransportURL gets created", func() {
 		BeforeEach(func() {
 			CreateRabbitMQCluster(rabbitmqClusterName, GetDefaultRabbitMQClusterSpec(false))
@@ -210,41 +233,10 @@ var _ = Describe("TransportURL controller", func() {
 			spec["replicas"] = 3
 			spec["queueType"] = "Quorum"
 			spec["podOverride"] = map[string]any{
-				"services": []map[string]any{
-					{
-						"metadata": map[string]any{
-							"annotations": map[string]any{
-								"metallb.universe.tf/address-pool":    "internalapi",
-								"metallb.universe.tf/loadBalancerIPs": "192.0.2.11",
-							},
-						},
-						"spec": map[string]any{
-							"type": string(corev1.ServiceTypeLoadBalancer),
-						},
-					},
-					{
-						"metadata": map[string]any{
-							"annotations": map[string]any{
-								"metallb.universe.tf/address-pool":    "internalapi",
-								"metallb.universe.tf/loadBalancerIPs": "192.0.2.12",
-							},
-						},
-						"spec": map[string]any{
-							"type": string(corev1.ServiceTypeLoadBalancer),
-						},
-					},
-					{
-						"metadata": map[string]any{
-							"annotations": map[string]any{
-								"metallb.universe.tf/address-pool":    "internalapi",
-								"metallb.universe.tf/loadBalancerIPs": "192.0.2.13",
-							},
-						},
-						"spec": map[string]any{
-							"type": string(corev1.ServiceTypeLoadBalancer),
-						},
-					},
-				},
+				"services": makePerPodServiceOverrides(
+					[]int64{5672, 5673, 5674},
+					[]int64{5671, 5675, 5676},
+				),
 			}
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
@@ -259,24 +251,101 @@ var _ = Describe("TransportURL controller", func() {
 		It("should create a secret with multi-host transport URL", func() {
 			SimulateRabbitMQClusterReady(rabbitmqName)
 
-			// Wait for controller to populate ServiceHostnames from per-pod services
+			expectedHosts := []string{
+				fmt.Sprintf("%s-server-0.%s.svc:5672", rabbitmqName.Name, namespace),
+				fmt.Sprintf("%s-server-1.%s.svc:5673", rabbitmqName.Name, namespace),
+				fmt.Sprintf("%s-server-2.%s.svc:5674", rabbitmqName.Name, namespace),
+			}
+
+			// Wait for controller to populate per-pod host:port endpoints in status.
 			Eventually(func(g Gomega) {
 				rabbitmq := GetRabbitMQ(rabbitmqName)
-				g.Expect(rabbitmq.Status.ServiceHostnames).To(HaveLen(3))
+				g.Expect(rabbitmq.Status.ServiceHostnames).To(Equal(expectedHosts))
 			}, timeout, interval).Should(Succeed())
 
-			// Verify transport URL contains all three hosts
+			expectedTransportURL := fmt.Sprintf(
+				"rabbit://user:12345678@%s-server-0.%s.svc:5672,user:12345678@%s-server-1.%s.svc:5673,user:12345678@%s-server-2.%s.svc:5674/?ssl=0",
+				rabbitmqName.Name, namespace,
+				rabbitmqName.Name, namespace,
+				rabbitmqName.Name, namespace,
+			)
+
+			// Verify the generated secret preserves each status host:port.
 			Eventually(func(g Gomega) {
 				s := th.GetSecret(transportURLSecretName)
 				g.Expect(s.Data).To(HaveKey("transport_url"))
+				g.Expect(string(s.Data["transport_url"])).To(Equal(expectedTransportURL))
+			}, timeout, interval).Should(Succeed())
 
-				transportURL := string(s.Data["transport_url"])
-				// Should contain all three hosts in the format:
-				// rabbit://user:12345678@host1:5672,user:12345678@host2:5672,user:12345678@host3:5672/?ssl=0
-				g.Expect(transportURL).To(ContainSubstring(fmt.Sprintf("user:12345678@%s-server-0.%s.svc:5672", rabbitmqName.Name, namespace)))
-				g.Expect(transportURL).To(ContainSubstring(fmt.Sprintf("user:12345678@%s-server-1.%s.svc:5672", rabbitmqName.Name, namespace)))
-				g.Expect(transportURL).To(ContainSubstring(fmt.Sprintf("user:12345678@%s-server-2.%s.svc:5672", rabbitmqName.Name, namespace)))
-				g.Expect(transportURL).To(ContainSubstring("/?ssl=0"))
+			th.ExpectCondition(
+				transportURLName,
+				ConditionGetterFunc(TransportURLConditionGetter),
+				rabbitmqv1.TransportURLReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+	})
+
+	When("a TLS TransportURL gets created with RabbitMQ using per-pod services", func() {
+		var rabbitmqName types.NamespacedName
+
+		BeforeEach(func() {
+			rabbitmqName = types.NamespacedName{
+				Name:      "rabbitmq-pods-tls",
+				Namespace: namespace,
+			}
+
+			certSecretName := types.NamespacedName{Name: "cert-rabbitmq-pods-tls", Namespace: namespace}
+			CreateCertSecret(certSecretName)
+			DeferCleanup(th.DeleteSecret, certSecretName)
+
+			spec := GetDefaultRabbitMQSpec()
+			spec["containerImage"] = "quay.io/openstack-s2i-containers/openstack-rabbitmq:master-latest"
+			spec["replicas"] = 3
+			spec["queueType"] = "Quorum"
+			spec["tls"] = map[string]any{
+				"secretName": certSecretName.Name,
+			}
+			spec["podOverride"] = map[string]any{
+				"services": makePerPodServiceOverrides(
+					[]int64{5672, 5673, 5674},
+					[]int64{5671, 5675, 5676},
+				),
+			}
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+
+			tuSpec := map[string]any{
+				"rabbitmqClusterName": rabbitmqName.Name,
+			}
+			DeferCleanup(th.DeleteInstance, CreateTransportURL(transportURLName, tuSpec))
+		})
+
+		It("should preserve per-pod AMQPS ports in status and the transport URL secret", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			expectedHosts := []string{
+				fmt.Sprintf("%s-server-0.%s.svc:5671", rabbitmqName.Name, namespace),
+				fmt.Sprintf("%s-server-1.%s.svc:5675", rabbitmqName.Name, namespace),
+				fmt.Sprintf("%s-server-2.%s.svc:5676", rabbitmqName.Name, namespace),
+			}
+
+			Eventually(func(g Gomega) {
+				rabbitmq := GetRabbitMQ(rabbitmqName)
+				g.Expect(rabbitmq.Status.ServiceHostnames).To(Equal(expectedHosts))
+			}, timeout, interval).Should(Succeed())
+
+			expectedTransportURL := fmt.Sprintf(
+				"rabbit://user:12345678@%s-server-0.%s.svc:5671,user:12345678@%s-server-1.%s.svc:5675,user:12345678@%s-server-2.%s.svc:5676/?ssl=1",
+				rabbitmqName.Name, namespace,
+				rabbitmqName.Name, namespace,
+				rabbitmqName.Name, namespace,
+			)
+
+			Eventually(func(g Gomega) {
+				s := th.GetSecret(transportURLSecretName)
+				g.Expect(s.Data).To(HaveKey("transport_url"))
+				g.Expect(string(s.Data["transport_url"])).To(Equal(expectedTransportURL))
 			}, timeout, interval).Should(Succeed())
 
 			th.ExpectCondition(
