@@ -52,10 +52,11 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 		requestID = "request-uid"
 	)
 	testCases := []struct {
-		name        string
-		queues      string
-		wantConsent bool
-		wantError   bool
+		name            string
+		queues          string
+		wantConsent     bool
+		wantError       bool
+		failStatusPatch bool
 	}{
 		{
 			name:      "two-member quorum queue loses majority with candidate",
@@ -71,6 +72,12 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			name:        "no queues retains broker quorum",
 			queues:      `{"page":1,"page_count":0,"page_size":500,"item_count":0,"filtered_count":0,"items":[]}`,
 			wantConsent: true,
+		},
+		{
+			name:            "status recovery record is persisted before deletion consent",
+			queues:          `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			wantError:       true,
+			failStatusPatch: true,
 		},
 		{
 			name:      "missing queue membership fails closed",
@@ -133,6 +140,7 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "persistence-rabbitmq-server-0",
 					Namespace: namespace,
+					UID:       "pvc-uid",
 					Labels:    map[string]string{"app.kubernetes.io/name": instance.Name},
 					Annotations: map[string]string{
 						remediationv1.PVCStuckOnNodeAnnotation: "worker-0",
@@ -149,7 +157,7 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			}
 			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "remediation.openstack.org", Version: "v1beta1"}})
 			mapper.Add(schema.GroupVersionKind{Group: "remediation.openstack.org", Version: "v1beta1", Kind: "PodRemediator"}, meta.RESTScopeNamespace)
-			objects := []client.Object{pvc, &corev1.Secret{
+			objects := []client.Object{pvc, instance, &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "rabbitmq-default-user", Namespace: namespace},
 				Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("test-password")},
 			}}
@@ -160,9 +168,12 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 				objects = append(objects, &pod)
 			}
 			consentPatches := 0
-			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+			patchOrder := make([]string, 0, 2)
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).
+				WithStatusSubresource(&rabbitmqv1beta1.RabbitMq{}).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
 				Patch: func(ctx context.Context, delegate client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+						patchOrder = append(patchOrder, "pvc")
 						consentPatches++
 						data, err := patch.Data(obj)
 						if err != nil {
@@ -180,8 +191,27 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 							payload.Metadata.Annotations[remediationv1.ConsentIDAnnotation] != requestID {
 							t.Errorf("consent patch did not set safe-to-delete and consent-id together: %s", data)
 						}
+						persisted := &rabbitmqv1beta1.RabbitMq{}
+						if err := delegate.Get(ctx, client.ObjectKeyFromObject(instance), persisted); err != nil {
+							t.Errorf("get RabbitMq status before PVC consent: %v", err)
+						} else {
+							entry := persisted.Status.PVCRemediation[pvc.Name]
+							if entry.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted || entry.PVCUID != string(pvc.UID) || entry.RequestID != requestID {
+								t.Errorf("recovery record was not durable before PVC consent: %+v", entry)
+							}
+						}
 					}
 					return delegate.Patch(ctx, obj, patch, opts...)
+				},
+				SubResourcePatch: func(ctx context.Context, delegate client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if _, ok := obj.(*rabbitmqv1beta1.RabbitMq); ok && subResourceName == "status" {
+						if tc.failStatusPatch {
+							patchOrder = append(patchOrder, "status-failed")
+							return fmt.Errorf("injected status patch failure")
+						}
+						patchOrder = append(patchOrder, "status")
+					}
+					return delegate.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
 				},
 			}).Build()
 			queueRequests := 0
@@ -220,6 +250,12 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			if tc.wantConsent && consentPatches != 1 || !tc.wantConsent && consentPatches != 0 {
 				t.Fatalf("consent patch count = %d, want consent %v", consentPatches, tc.wantConsent)
 			}
+			if tc.wantConsent && (len(patchOrder) != 2 || patchOrder[0] != "status" || patchOrder[1] != "pvc") {
+				t.Fatalf("recovery status must be persisted before PVC consent; patch order = %v", patchOrder)
+			}
+			if tc.failStatusPatch && (len(patchOrder) != 1 || patchOrder[0] != "status-failed") {
+				t.Fatalf("status patch failure must prevent PVC consent; patch order = %v", patchOrder)
+			}
 			updatedPVC := &corev1.PersistentVolumeClaim{}
 			if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(pvc), updatedPVC); err != nil {
 				t.Fatal(err)
@@ -229,6 +265,16 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			}
 			if tc.wantConsent && updatedPVC.Annotations[remediationv1.ConsentIDAnnotation] != updatedPVC.Annotations[remediationv1.RequestIDAnnotation] {
 				t.Fatal("consent-id does not match the current request-id")
+			}
+			if tc.wantConsent {
+				persisted := &rabbitmqv1beta1.RabbitMq{}
+				if err := kubeClient.Get(context.Background(), client.ObjectKeyFromObject(instance), persisted); err != nil {
+					t.Fatal(err)
+				}
+				entry := persisted.Status.PVCRemediation[pvc.Name]
+				if entry.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted || entry.PVCUID != string(pvc.UID) || entry.RequestID != requestID {
+					t.Fatalf("persisted recovery status = %+v, want consent, PVC UID and request ID", entry)
+				}
 			}
 		})
 	}
@@ -287,6 +333,7 @@ func TestPVCRemediationConsentRequiresHealthySurvivorQuorum(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "persistence-rabbitmq-server-0",
 					Namespace: namespace,
+					UID:       "pvc-uid",
 					Labels:    map[string]string{"app.kubernetes.io/name": instance.Name},
 					Annotations: map[string]string{
 						remediationv1.PVCStuckOnNodeAnnotation: "worker-0",

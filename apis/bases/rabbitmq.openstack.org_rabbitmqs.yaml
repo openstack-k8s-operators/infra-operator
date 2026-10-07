@@ -2039,22 +2039,27 @@ spec:
                     PVCRemediationStatus captures the in-progress PVC remediation handshake
                     state for a single PVC as seen by the RabbitMq controller.
                   properties:
-                    consentGranted:
-                      default: false
-                      description: ConsentGranted is true once this controller has
-                        set safe-to-delete=true on the PVC.
-                      type: boolean
+                    consentState:
+                      description: ConsentState records whether this controller has
+                        granted safe-to-delete consent.
+                      enum:
+                      - Pending
+                      - Granted
+                      type: string
                     pvcUID:
                       description: |-
                         PVCUID identifies the claim tracked by this status entry. A replacement
                         PVC can reuse the same name, so the UID distinguishes recovery from an
                         aborted deletion that left the original claim in place.
                       type: string
-                    quorumQueuesGrown:
+                    queueReplicaState:
                       description: |-
-                        QuorumQueuesGrown records that quorum queue replicas were added to the
-                        replacement node, so retries do not repeat the membership change.
-                      type: boolean
+                        QueueReplicaState records whether quorum queue replicas have been grown
+                        on the replacement node.
+                      enum:
+                      - Pending
+                      - Grown
+                      type: string
                     requestID:
                       description: |-
                         RequestID is the PodRemediator request whose consent authorized deletion
@@ -2064,8 +2069,6 @@ spec:
                       description: StuckNode is the Kubernetes node name set by PodRemediator
                         on the PVC.
                       type: string
-                  required:
-                  - stuckNode
                   type: object
                 description: |-
                   PVCRemediation tracks in-flight PVC remediation and replacement recovery,

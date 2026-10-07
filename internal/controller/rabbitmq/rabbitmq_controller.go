@@ -1743,7 +1743,7 @@ func IsRabbitmqPod(obj client.Object) bool {
 
 // FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
 // The PVC label app.kubernetes.io/name equals the RabbitMq CR name directly.
-func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) []reconcile.Request {
+func (r *Reconciler) FindRabbitmqForPVC(_ context.Context, pvc client.Object) []reconcile.Request {
 	crName, ok := pvc.GetLabels()["app.kubernetes.io/name"]
 	if !ok {
 		return nil
@@ -1757,7 +1757,7 @@ func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) 
 }
 
 // FindRabbitmqForPod maps a RabbitMq pod event to its owning RabbitMq CR.
-func (r *Reconciler) FindRabbitmqForPod(ctx context.Context, pod client.Object) []reconcile.Request {
+func (r *Reconciler) FindRabbitmqForPod(_ context.Context, pod client.Object) []reconcile.Request {
 	crName, ok := pod.GetLabels()["app.kubernetes.io/name"]
 	if !ok {
 		return nil
@@ -1885,7 +1885,7 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 }
 
 // rmqManagementGet performs a bounded read from a ready broker's management API.
-func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, path string, result interface{}) error {
+func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, path string, result interface{}) (retErr error) {
 	scheme, port := "http", rabbitmq.ManagementPort
 	transport := &http.Transport{}
 	if creds.tls {
@@ -1928,7 +1928,15 @@ func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1b
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("close management API response body: %w", closeErr)
+			} else {
+				log.FromContext(ctx).V(1).Info("Failed to close RabbitMQ management API response body", "error", closeErr)
+			}
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("management API %s returned %d: %s", url, resp.StatusCode, string(body))
@@ -2196,16 +2204,21 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			continue
 		}
 		requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
+		consentState := rabbitmqv1beta1.PVCRemediationConsentPending
+		if pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" &&
+			requestID != "" && pvc.Annotations[remediationv1.ConsentIDAnnotation] == requestID {
+			consentState = rabbitmqv1beta1.PVCRemediationConsentGranted
+		}
 		entry := rabbitmqv1beta1.PVCRemediationStatus{
-			PVCUID:    string(pvc.UID),
-			StuckNode: pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
-			RequestID: requestID,
-			ConsentGranted: pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" &&
-				requestID != "" && pvc.Annotations[remediationv1.ConsentIDAnnotation] == requestID,
+			PVCUID:            string(pvc.UID),
+			StuckNode:         pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+			RequestID:         requestID,
+			ConsentState:      consentState,
+			QueueReplicaState: rabbitmqv1beta1.PVCRemediationQueueReplicasPending,
 		}
 		newRemediationStatus[pvc.Name] = entry
 		stuckNodes[entry.StuckNode] = true
-		if !entry.ConsentGranted && pvc.DeletionTimestamp == nil {
+		if entry.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted && pvc.DeletionTimestamp == nil {
 			// Exclude PVCs whose name has no valid ordinal suffix: they must not be
 			// ordered as ordinal 0 and win consent ahead of well-formed PVCs.
 			if _, ok := rmqPVCOrdinal(pvc.Name); !ok {
@@ -2227,7 +2240,7 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	hasRecoveryPending := false
 	pendingRecovery := make(map[string]bool)
 	for name, previous := range instance.Status.PVCRemediation {
-		if !previous.ConsentGranted {
+		if previous.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted {
 			continue
 		}
 		pvc, exists := pvcByName[name]
@@ -2253,7 +2266,7 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	// A PVC still carrying consent is awaiting deletion. A deleted PVC stays pending
 	// below until its replacement rejoins the cluster.
 	for name, entry := range newRemediationStatus {
-		if entry.ConsentGranted && !pendingRecovery[name] {
+		if entry.ConsentState == rabbitmqv1beta1.PVCRemediationConsentGranted && !pendingRecovery[name] {
 			Log.Info("A stuck PVC already holds safe-to-delete consent; deferring further consent",
 				"pvc", name)
 			return nil
@@ -2400,6 +2413,23 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			"pvc", candidate.Name)
 		return nil
 	}
+	entry, ok := instance.Status.PVCRemediation[candidate.Name]
+	if !ok {
+		return fmt.Errorf("PVC %s has no remediation status entry", candidate.Name)
+	}
+	entry.PVCUID = string(candidate.UID)
+	entry.RequestID = requestID
+	entry.ConsentState = rabbitmqv1beta1.PVCRemediationConsentGranted
+	instance.Status.PVCRemediation[candidate.Name] = entry
+
+	// Persist the request and PVC identity before publishing consent. PodRemediator
+	// can delete the claim as soon as it observes safe-to-delete=true.
+	if err := h.PatchInstance(ctx, instance); err != nil {
+		Log.Error(err, "Failed to persist PVC recovery record before granting consent",
+			"pvc", candidate.Name, "requestID", requestID)
+		return fmt.Errorf("persisting PVC recovery record before consent: %w", err)
+	}
+
 	oldPVC := candidate.DeepCopy()
 	if candidate.Annotations == nil {
 		candidate.Annotations = make(map[string]string)
@@ -2411,14 +2441,6 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Error(err, "Failed to set safe-to-delete on stuck PVC",
 			"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation])
 		return err
-	}
-
-	// Reflect consent in status immediately (deferred PatchInstance will persist it).
-	if entry, ok := instance.Status.PVCRemediation[candidate.Name]; ok {
-		entry.PVCUID = string(candidate.UID)
-		entry.RequestID = requestID
-		entry.ConsentGranted = true
-		instance.Status.PVCRemediation[candidate.Name] = entry
 	}
 
 	Log.Info("Cluster healthy; granted safe-to-delete consent for stuck PVC",
