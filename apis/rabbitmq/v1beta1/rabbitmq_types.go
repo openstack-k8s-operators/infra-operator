@@ -326,6 +326,9 @@ type PVCRemediationStatus struct {
 	// RequestID is the PodRemediator request whose consent authorized deletion
 	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
 	RequestID string `json:"requestID,omitempty"`
+	// QuorumQueuesGrown records that quorum queue replicas were added to the
+	// replacement node, so retries do not repeat the membership change.
+	QuorumQueuesGrown bool `json:"quorumQueuesGrown,omitempty"`
 	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
 	StuckNode string `json:"stuckNode"`
 	// ConsentGranted is true once this controller has set safe-to-delete=true on the PVC.
