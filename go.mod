@@ -11,10 +11,10 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/openshift/api v3.9.0+incompatible
 	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-00010101000000-000000000000
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20261009105430-6790c2298bb5
-	github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20261009105430-6790c2298bb5
-	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20261009105430-6790c2298bb5
-	github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20261009105430-6790c2298bb5
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20261013151427-9b94821abb9f
+	github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20261013151427-9b94821abb9f
+	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20261013151427-9b94821abb9f
+	github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20261013151427-9b94821abb9f
 	go.uber.org/zap v1.28.0
 	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67
 	k8s.io/api v0.33.13
@@ -108,6 +108,9 @@ require (
 )
 
 replace github.com/openstack-k8s-operators/infra-operator/apis => ./apis
+
+// Temporary replacement for lmiccini/lib-common service-override-ports at ea9f6a4d669d66527406099c5eeb44f875427fd6.
+replace github.com/openstack-k8s-operators/lib-common/modules/common => github.com/lmiccini/lib-common/modules/common v0.0.0-20261002070355-ea9f6a4d669d
 
 // mschuppert: map to latest commit from release-4.20 tag
 // must consistent within modules and service operators
