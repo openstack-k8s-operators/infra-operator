@@ -2050,6 +2050,11 @@ spec:
                         PVC can reuse the same name, so the UID distinguishes recovery from an
                         aborted deletion that left the original claim in place.
                       type: string
+                    quorumQueuesGrown:
+                      description: |-
+                        QuorumQueuesGrown records that quorum queue replicas were added to the
+                        replacement node, so retries do not repeat the membership change.
+                      type: boolean
                     requestID:
                       description: |-
                         RequestID is the PodRemediator request whose consent authorized deletion
