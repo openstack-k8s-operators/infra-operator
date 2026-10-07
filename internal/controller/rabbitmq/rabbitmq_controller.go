@@ -140,6 +140,10 @@ type Reconciler struct {
 // Required to label and delete pods during CR deletion
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=list;watch;update;delete
 
+// Required to run rabbitmqctl (forget_cluster_node/reset/join_cluster) when
+// repairing cluster membership of a pod recreated with a blank data directory
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
+
 // Required to manage PodDisruptionBudgets for multi-replica deployments
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
@@ -1024,6 +1028,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)
+	}
+
+	// Repair cluster membership before evaluating whether PVC recovery is complete.
+	// The operation is request-scoped by the pending PVC remediation record.
+	if requeue, err := r.ReconcileNodeRejoin(ctx, instance); err != nil {
+		Log.Info("Node rejoin deferred; requeuing", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	} else if requeue {
+		return ctrl.Result{RequeueAfter: time.Second * 15}, nil
 	}
 
 	// PVC remediation handshake with PodRemediator (optional feature).

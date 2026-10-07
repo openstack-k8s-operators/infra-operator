@@ -49,6 +49,18 @@ const (
 	// AnnotationClientsReconfigured - set to "true" when dataplane clients have been
 	// reconfigured for quorum queues, allowing the proxy sidecar to be removed
 	AnnotationClientsReconfigured = "rabbitmq.openstack.org/clients-reconfigured"
+
+	// AnnotationRejoinCluster - when set to "true" on a RabbitMQ pod, authorizes
+	// the controller to repair that node's cluster membership: forget the stale
+	// member from a surviving peer, then stop/reset/join the node back into the
+	// existing cluster. This is required because RabbitMQ 4.1+ designates the
+	// lowest-ordinal pod (server-0) as the peer-discovery seed node: if it is
+	// recreated with a blank data directory (e.g. after its PVC is replaced) it
+	// forms its own standalone cluster instead of rejoining. The annotation is an
+	// explicit, destructive opt-in per node and is removed by the controller once
+	// the node has rejoined. It is intentionally independent of any PVC
+	// remediation handshake so the repair works for any blank-boot cause.
+	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
 )
 
 // QueueType represents a RabbitMQ queue type
