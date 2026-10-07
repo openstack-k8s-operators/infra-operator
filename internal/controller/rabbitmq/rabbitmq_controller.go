@@ -138,9 +138,10 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 
 // Required to label and delete pods during CR deletion
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=list;watch;update;delete
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 
-// Required to run rabbitmqctl (forget_cluster_node/reset/join_cluster) when
+// Required to run rabbitmqctl (forget_cluster_node/join_cluster) when
 // repairing cluster membership of a pod recreated with a blank data directory
 // +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 
@@ -844,6 +845,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			sts.Spec.Template.Spec.Tolerations = desired.Spec.Template.Spec.Tolerations
 			sts.Spec.Template.Spec.TopologySpreadConstraints = desired.Spec.Template.Spec.TopologySpreadConstraints
 			sts.Spec.Template.Spec.AutomountServiceAccountToken = desired.Spec.Template.Spec.AutomountServiceAccountToken
+			sts.Spec.Template.Spec.ReadinessGates = desired.Spec.Template.Spec.ReadinessGates
 			if desired.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 				sts.Spec.Template.Spec.TerminationGracePeriodSeconds = desired.Spec.Template.Spec.TerminationGracePeriodSeconds
 			}
@@ -1033,9 +1035,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Repair cluster membership before evaluating whether PVC recovery is complete.
 	// The operation is request-scoped by the pending PVC remediation record.
 	if requeue, err := r.ReconcileNodeRejoin(ctx, instance); err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "NodeRejoinInProgress", condition.SeverityInfo,
+			"RabbitMQ node rejoin is waiting to complete"))
 		Log.Info("Node rejoin deferred; requeuing", "reason", err.Error())
 		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	} else if requeue {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "NodeRejoinInProgress", condition.SeverityInfo,
+			"RabbitMQ node rejoin is waiting to complete"))
 		return ctrl.Result{RequeueAfter: time.Second * 15}, nil
 	}
 
@@ -1710,6 +1718,12 @@ func IsRabbitmqPVC(obj client.Object) bool {
 	return ok && strings.HasPrefix(obj.GetName(), "persistence-")
 }
 
+// IsRabbitmqPod returns true for pods managed by a RabbitMq StatefulSet.
+func IsRabbitmqPod(obj client.Object) bool {
+	_, ok := obj.GetLabels()["app.kubernetes.io/name"]
+	return ok && strings.Contains(obj.GetName(), "-server-")
+}
+
 // FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
 // The PVC label app.kubernetes.io/name equals the RabbitMq CR name directly.
 func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) []reconcile.Request {
@@ -1722,6 +1736,17 @@ func (r *Reconciler) FindRabbitmqForPVC(ctx context.Context, pvc client.Object) 
 			Name:      crName,
 			Namespace: pvc.GetNamespace(),
 		},
+	}}
+}
+
+// FindRabbitmqForPod maps a RabbitMq pod event to its owning RabbitMq CR.
+func (r *Reconciler) FindRabbitmqForPod(ctx context.Context, pod client.Object) []reconcile.Request {
+	crName, ok := pod.GetLabels()["app.kubernetes.io/name"]
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: crName, Namespace: pod.GetNamespace()},
 	}}
 }
 
@@ -1937,10 +1962,13 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
 			continue
 		}
+		requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
 		entry := rabbitmqv1beta1.PVCRemediationStatus{
-			PVCUID:         string(pvc.UID),
-			StuckNode:      pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
-			ConsentGranted: pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true",
+			PVCUID:    string(pvc.UID),
+			StuckNode: pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+			RequestID: requestID,
+			ConsentGranted: pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" &&
+				requestID != "" && pvc.Annotations[remediationv1.ConsentIDAnnotation] == requestID,
 		}
 		newRemediationStatus[pvc.Name] = entry
 		stuckNodes[entry.StuckNode] = true
@@ -2101,6 +2129,8 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 
 	// Reflect consent in status immediately (deferred PatchInstance will persist it).
 	if entry, ok := instance.Status.PVCRemediation[candidate.Name]; ok {
+		entry.PVCUID = string(candidate.UID)
+		entry.RequestID = requestID
 		entry.ConsentGranted = true
 		instance.Status.PVCRemediation[candidate.Name] = entry
 	}
@@ -2182,6 +2212,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(predicate.And(
 				predicate.AnnotationChangedPredicate{},
 				predicate.NewPredicateFuncs(IsRabbitmqPVC),
+			)),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.FindRabbitmqForPod),
+			builder.WithPredicates(predicate.And(
+				predicate.ResourceVersionChangedPredicate{},
+				predicate.NewPredicateFuncs(IsRabbitmqPod),
 			)),
 		).
 		Complete(r)

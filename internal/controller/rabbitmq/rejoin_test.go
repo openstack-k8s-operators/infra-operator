@@ -38,8 +38,12 @@ import (
 )
 
 const (
-	testName = "rabbitmq"
-	testNS   = "openstack"
+	testName      = "rabbitmq"
+	testNS        = "openstack"
+	testPVCName   = "persistence-rabbitmq-server-0"
+	testRequestID = "podremediator-request-123"
+	oldPVCUID     = "old-pvc-uid"
+	newPVCUID     = "new-pvc-uid"
 )
 
 func node(pod string) string {
@@ -58,17 +62,29 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 	args := cmd[1:] // drop "rabbitmqctl"
 	f.calls = append(f.calls, podName.Name+":"+strings.Join(args, " "))
 
-	// Simulate the target joining: after join_cluster the target becomes a member
-	// of every other node's view.
+	// Model cluster metadata changes across all members.
+	if len(args) >= 2 && args[0] == "forget_cluster_node" {
+		staleNode := args[1]
+		for pod, nodes := range f.running {
+			f.running[pod] = withoutNode(nodes, staleNode)
+		}
+	}
 	if len(args) >= 1 && args[0] == "join_cluster" {
 		joined := node(podName.Name)
+		var clusterNodes []string
+		for _, nodes := range f.running {
+			for _, member := range nodes {
+				clusterNodes = appendUnique(clusterNodes, member)
+			}
+		}
+		clusterNodes = appendUnique(clusterNodes, joined)
 		for p := range f.running {
 			if p == podName.Name {
 				continue
 			}
-			f.running[p] = append(f.running[p], joined)
+			f.running[p] = appendUnique(f.running[p], joined)
 		}
-		f.running[podName.Name] = nil
+		f.running[podName.Name] = clusterNodes
 	}
 
 	if last := args[len(args)-1]; last == "cluster_status" {
@@ -79,6 +95,25 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 		return fun(&out, &bytes.Buffer{})
 	}
 	return nil
+}
+
+func appendUnique(nodes []string, node string) []string {
+	for _, current := range nodes {
+		if current == node {
+			return nodes
+		}
+	}
+	return append(nodes, node)
+}
+
+func withoutNode(nodes []string, unwanted string) []string {
+	filtered := make([]string, 0, len(nodes))
+	for _, current := range nodes {
+		if current != unwanted {
+			filtered = append(filtered, current)
+		}
+	}
+	return filtered
 }
 
 func (f *fakeExec) issued(call string) bool {
@@ -100,22 +135,67 @@ func (f *fakeExec) orderOf(substr string) int {
 	return -1
 }
 
-func readyPod(name string, annotated bool) *corev1.Pod {
+func clusterPod(name string, rejoinReady bool) *corev1.Pod {
+	gateStatus := corev1.ConditionFalse
+	podReady := corev1.ConditionFalse
+	gateReason := "RejoinPending"
+	if rejoinReady {
+		gateStatus = corev1.ConditionTrue
+		podReady = corev1.ConditionTrue
+		gateReason = "RejoinVerified"
+	}
 	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNS,
 			Labels:    rabbitmq.SelectorLabels(testName),
 		},
+		Spec: corev1.PodSpec{
+			ReadinessGates: []corev1.PodReadinessGate{{
+				ConditionType: corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
+			}},
+		},
 		Status: corev1.PodStatus{
-			Phase:      corev1.PodRunning,
-			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  rabbitmqContainerName,
+				Ready: true,
+			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: podReady},
+				{
+					Type:   corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
+					Status: gateStatus,
+					Reason: gateReason,
+				},
+			},
 		},
 	}
-	if annotated {
-		p.Annotations = map[string]string{rabbitmqv1beta1.AnnotationRejoinCluster: "true"}
-	}
 	return p
+}
+
+func replacementPod(requestID string) *corev1.Pod {
+	pod := clusterPod(testName+"-server-0", false)
+	pod.Spec.Volumes = []corev1.Volume{{
+		Name: "persistence",
+		VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			ClaimName: testPVCName,
+		}},
+	}}
+	if requestID != "" {
+		pod.Annotations = map[string]string{rabbitmqv1beta1.AnnotationRejoinCluster: requestID}
+	}
+	return pod
+}
+
+func replacementPVC(uid string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testPVCName,
+			Namespace: testNS,
+			UID:       types.UID(uid),
+		},
+	}
 }
 
 func newReconciler(t *testing.T, objs ...client.Object) *Reconciler {
@@ -127,7 +207,7 @@ func newReconciler(t *testing.T, objs ...client.Object) *Reconciler {
 	if err := rabbitmqv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(objs...).Build()
 	return &Reconciler{Client: c, Scheme: scheme}
 }
 
@@ -137,7 +217,21 @@ func instanceWith(replicas int32) *rabbitmqv1beta1.RabbitMq {
 		Spec: rabbitmqv1beta1.RabbitMqSpec{
 			RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{Replicas: ptr.To(replicas)},
 		},
+		Status: rabbitmqv1beta1.RabbitMqStatus{CurrentVersion: "4.2"},
 	}
+}
+
+func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
+	instance := instanceWith(replicas)
+	instance.Status.PVCRemediation = map[string]rabbitmqv1beta1.PVCRemediationStatus{
+		testPVCName: {
+			PVCUID:         oldPVCUID,
+			RequestID:      testRequestID,
+			StuckNode:      "worker-0",
+			ConsentGranted: true,
+		},
+	}
+	return instance
 }
 
 // swapExec installs the fake executor and returns a restore func for defer.
@@ -185,23 +279,82 @@ func TestClusterStatusParsing42(t *testing.T) {
 	}
 }
 
-func TestRejoinNoAnnotationIsNoop(t *testing.T) {
+func TestRejoinWithoutConsentDoesNotExec(t *testing.T) {
 	fx := &fakeExec{running: map[string][]string{}}
 	defer swapExec(fx)()
 
 	r := newReconciler(t,
-		readyPod(testName+"-server-0", false),
-		readyPod(testName+"-server-1", false))
+		clusterPod(testName+"-server-0", true),
+		clusterPod(testName+"-server-1", true))
 
 	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWith(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if requeue {
-		t.Error("expected no requeue when no pod requests rejoin")
+		t.Error("expected no requeue when there is no pending PVC remediation")
 	}
 	if len(fx.calls) != 0 {
 		t.Errorf("expected no exec calls, got %v", fx.calls)
+	}
+}
+
+func TestRejoinBindsAnnotationToRecordedRequestID(t *testing.T) {
+	fx := &fakeExec{running: map[string][]string{}}
+	defer swapExec(fx)()
+
+	target := replacementPod("true")
+	r := newReconciler(t,
+		replacementPVC(newPVCUID),
+		target,
+		clusterPod(testName+"-server-1", true))
+
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !requeue {
+		t.Fatal("expected requeue after binding the annotation to the consent request")
+	}
+	if len(fx.calls) != 0 {
+		t.Fatalf("stale annotation must not authorize rejoin, calls=%v", fx.calls)
+	}
+	got := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: target.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != testRequestID {
+		t.Fatalf("rejoin annotation = %q, want the consent request ID %q", got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster], testRequestID)
+	}
+	if podRejoinReady(got) {
+		t.Fatal("readiness gate must stay closed until membership is verified")
+	}
+}
+
+func TestRejoinWaitsForReplacementPVC(t *testing.T) {
+	fx := &fakeExec{running: map[string][]string{}}
+	defer swapExec(fx)()
+
+	r := newReconciler(t, replacementPod(testRequestID))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !requeue {
+		t.Fatal("expected requeue while waiting for replacement PVC")
+	}
+	if len(fx.calls) != 0 {
+		t.Fatalf("must not exec before the replacement PVC exists, calls=%v", fx.calls)
+	}
+	got := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: testName + "-server-0"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != testRequestID {
+		t.Fatalf("request annotation = %q, want %q", got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster], testRequestID)
+	}
+	if podRejoinReady(got) {
+		t.Fatal("readiness gate must stay closed while waiting for the replacement PVC")
 	}
 }
 
@@ -212,34 +365,35 @@ func TestRejoinRefusesWithoutHealthyPeer(t *testing.T) {
 	}}
 	defer swapExec(fx)()
 
-	r := newReconciler(t, readyPod(testName+"-server-0", true))
+	r := newReconciler(t, replacementPVC(newPVCUID), replacementPod(testRequestID))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWith(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !requeue {
 		t.Error("expected requeue while deferring")
 	}
-	if fx.issued(testName + "-server-0:reset") {
-		t.Error("must never reset the last surviving node")
+	if fx.orderOf("forget_cluster_node") >= 0 || fx.orderOf("join_cluster") >= 0 {
+		t.Errorf("must not change membership without a healthy peer, calls=%v", fx.calls)
 	}
 }
 
 func TestRejoinHappyPath(t *testing.T) {
 	fx := &fakeExec{running: map[string][]string{
-		testName + "-server-0": {node(testName + "-server-0")}, // standalone
-		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
-		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-0": {node(testName + "-server-0")}, // replacement is standalone
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
 	}}
 	defer swapExec(fx)()
 
-	target := readyPod(testName+"-server-0", true)
+	target := replacementPod(testRequestID)
 	r := newReconciler(t, target,
-		readyPod(testName+"-server-1", false),
-		readyPod(testName+"-server-2", false))
+		replacementPVC(newPVCUID),
+		clusterPod(testName+"-server-1", true),
+		clusterPod(testName+"-server-2", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWith(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,12 +403,11 @@ func TestRejoinHappyPath(t *testing.T) {
 
 	// forget happens on a peer, targeting the stale node; join happens on target.
 	// On 4.1+ join_cluster self-prepares, so no stop_app/reset/start_app.
-	forgetCall := testName + "-server-1:forget_cluster_node " + node(testName+"-server-0")
-	if !fx.issued(forgetCall) {
+	if fx.orderOf("forget_cluster_node "+node(testName+"-server-0")) < 0 {
 		t.Errorf("expected forget_cluster_node on peer, calls=%v", fx.calls)
 	}
-	joinCall := testName + "-server-0:join_cluster " + node(testName+"-server-1")
-	if !fx.issued(joinCall) {
+	if fx.orderOf(testName+"-server-0:join_cluster "+node(testName+"-server-1")) < 0 &&
+		fx.orderOf(testName+"-server-0:join_cluster "+node(testName+"-server-2")) < 0 {
 		t.Errorf("expected join_cluster on target, calls=%v", fx.calls)
 	}
 	for _, unwanted := range []string{"stop_app", "reset", "start_app"} {
@@ -275,28 +428,35 @@ func TestRejoinHappyPath(t *testing.T) {
 	if _, ok := got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster]; ok {
 		t.Error("expected rejoin annotation to be cleared")
 	}
+	if !podRejoinReady(got) {
+		t.Error("expected readiness gate to open after verifying membership")
+	}
 }
 
-func TestRejoinAlreadyMemberJustClears(t *testing.T) {
+func TestRejoinAlreadyMemberVerifiesAndClears(t *testing.T) {
 	fx := &fakeExec{running: map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1")},
 		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1")},
 	}}
 	defer swapExec(fx)()
 
-	target := readyPod(testName+"-server-0", true)
-	r := newReconciler(t, target, readyPod(testName+"-server-1", false))
+	target := replacementPod(testRequestID)
+	r := newReconciler(t, replacementPVC(newPVCUID), target, clusterPod(testName+"-server-1", true))
 
-	_, err := r.ReconcileNodeRejoin(context.Background(), instanceWith(3))
+	_, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if fx.issued(testName + "-server-0:reset") {
-		t.Error("must not reset a node that is already a cluster member")
+	if fx.orderOf("forget_cluster_node") >= 0 || fx.orderOf("join_cluster") >= 0 {
+		t.Errorf("must not change membership when target already agrees with cluster, calls=%v", fx.calls)
 	}
 	got := &corev1.Pod{}
 	_ = r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: testName + "-server-0"}, got)
 	if _, ok := got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster]; ok {
 		t.Error("expected annotation cleared when already a member")
+	}
+	if !podRejoinReady(got) {
+		t.Error("expected readiness gate to open after verifying existing membership")
 	}
 }
 
@@ -309,17 +469,27 @@ func TestRejoinRefusesNonStandaloneTarget(t *testing.T) {
 	defer swapExec(fx)()
 
 	r := newReconciler(t,
-		readyPod(testName+"-server-0", true),
-		readyPod(testName+"-server-1", false))
+		replacementPVC(newPVCUID),
+		replacementPod(testRequestID),
+		clusterPod(testName+"-server-1", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWith(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !requeue {
 		t.Error("expected requeue while deferring")
 	}
-	if fx.issued(testName + "-server-0:reset") {
-		t.Error("must not reset a target that is not standalone")
+	if fx.orderOf("forget_cluster_node") >= 0 || fx.orderOf("join_cluster") >= 0 {
+		t.Errorf("must not change membership when target is not standalone, calls=%v", fx.calls)
 	}
+}
+
+func podRejoinReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition) {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }

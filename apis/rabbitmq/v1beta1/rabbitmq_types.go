@@ -50,17 +50,20 @@ const (
 	// reconfigured for quorum queues, allowing the proxy sidecar to be removed
 	AnnotationClientsReconfigured = "rabbitmq.openstack.org/clients-reconfigured"
 
-	// AnnotationRejoinCluster - when set to "true" on a RabbitMQ pod, authorizes
-	// the controller to repair that node's cluster membership: forget the stale
-	// member from a surviving peer, then stop/reset/join the node back into the
+	// AnnotationRejoinCluster carries the PodRemediator request ID that authorizes
+	// the controller to repair this pod's cluster membership: forget the stale
+	// member from a surviving peer, then join this node back into the
 	// existing cluster. This is required because RabbitMQ 4.1+ designates the
 	// lowest-ordinal pod (server-0) as the peer-discovery seed node: if it is
-	// recreated with a blank data directory (e.g. after its PVC is replaced) it
-	// forms its own standalone cluster instead of rejoining. The annotation is an
-	// explicit, destructive opt-in per node and is removed by the controller once
-	// the node has rejoined. It is intentionally independent of any PVC
-	// remediation handshake so the repair works for any blank-boot cause.
+	// recreated with a blank data directory after a consented PVC replacement, it
+	// forms its own standalone cluster instead of rejoining. The request ID binds
+	// this destructive action to the PVC deletion consent; the controller removes
+	// the annotation after verifying cluster membership.
 	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
+
+	// RabbitMQRejoinReadyCondition gates Pod readiness until a consented replacement
+	// node has rejoined the RabbitMQ cluster.
+	RabbitMQRejoinReadyCondition = "rabbitmq.openstack.org/rejoin-ready"
 )
 
 // QueueType represents a RabbitMQ queue type
@@ -320,6 +323,9 @@ type PVCRemediationStatus struct {
 	// PVC can reuse the same name, so the UID distinguishes recovery from an
 	// aborted deletion that left the original claim in place.
 	PVCUID string `json:"pvcUID,omitempty"`
+	// RequestID is the PodRemediator request whose consent authorized deletion
+	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
+	RequestID string `json:"requestID,omitempty"`
 	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
 	StuckNode string `json:"stuckNode"`
 	// ConsentGranted is true once this controller has set safe-to-delete=true on the PVC.
