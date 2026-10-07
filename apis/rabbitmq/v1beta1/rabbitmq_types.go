@@ -326,15 +326,36 @@ type PVCRemediationStatus struct {
 	// RequestID is the PodRemediator request whose consent authorized deletion
 	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
 	RequestID string `json:"requestID,omitempty"`
-	// QuorumQueuesGrown records that quorum queue replicas were added to the
-	// replacement node, so retries do not repeat the membership change.
-	QuorumQueuesGrown bool `json:"quorumQueuesGrown,omitempty"`
+	// QueueReplicaState records whether quorum queue replicas have been grown
+	// on the replacement node.
+	// +kubebuilder:validation:Enum=Pending;Grown
+	QueueReplicaState PVCRemediationQueueReplicaState `json:"queueReplicaState,omitempty"`
 	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
-	StuckNode string `json:"stuckNode"`
-	// ConsentGranted is true once this controller has set safe-to-delete=true on the PVC.
-	// +kubebuilder:default=false
-	ConsentGranted bool `json:"consentGranted,omitempty"`
+	StuckNode string `json:"stuckNode,omitempty"`
+	// ConsentState records whether this controller has granted safe-to-delete consent.
+	// +kubebuilder:validation:Enum=Pending;Granted
+	ConsentState PVCRemediationConsentState `json:"consentState,omitempty"`
 }
+
+// PVCRemediationConsentState records the safe-to-delete consent state for one PVC.
+type PVCRemediationConsentState string
+
+const (
+	// PVCRemediationConsentPending means consent has not been granted.
+	PVCRemediationConsentPending PVCRemediationConsentState = "Pending"
+	// PVCRemediationConsentGranted means consent was persisted for this request.
+	PVCRemediationConsentGranted PVCRemediationConsentState = "Granted"
+)
+
+// PVCRemediationQueueReplicaState records queue replica recovery for one PVC.
+type PVCRemediationQueueReplicaState string
+
+const (
+	// PVCRemediationQueueReplicasPending means queue replicas still need to be grown.
+	PVCRemediationQueueReplicasPending PVCRemediationQueueReplicaState = "Pending"
+	// PVCRemediationQueueReplicasGrown means the queue replica growth command completed.
+	PVCRemediationQueueReplicasGrown PVCRemediationQueueReplicaState = "Grown"
+)
 
 // RabbitMqStatus defines the observed state of RabbitMq
 type RabbitMqStatus struct {

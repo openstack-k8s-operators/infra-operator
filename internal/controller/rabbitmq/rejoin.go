@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -38,6 +39,8 @@ import (
 const rabbitmqContainerName = "rabbitmq"
 
 const rabbitmqCommandTimeout = 2 * time.Minute
+
+var errQuorumQueueReplicaMissing = errors.New("quorum queue is missing the replacement replica")
 
 // clusterStatus is the subset of `rabbitmqctl --formatter json cluster_status`
 // output that we rely on.
@@ -252,7 +255,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	sort.Strings(keys)
 	for _, pvcName := range keys {
 		remediation := instance.Status.PVCRemediation[pvcName]
-		if !remediation.ConsentGranted {
+		if remediation.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted {
 			continue
 		}
 		ordinal, ok := rmqPVCOrdinal(pvcName)
@@ -270,7 +273,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		}
 
 		pod := podsByName[podName]
-		if pod != nil && remediation.QuorumQueuesGrown && podRejoinReady(pod) {
+		if pod != nil && remediation.QueueReplicaState == rabbitmqv1beta1.PVCRemediationQueueReplicasGrown && podRejoinReady(pod) {
 			if pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] == remediation.RequestID {
 				if err := r.clearRejoinAnnotation(ctx, pod); err != nil {
 					return true, err
@@ -444,6 +447,112 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	return true, r.finishNodeRejoin(ctx, instance, target, targetPVCName, remediation.RequestID)
 }
 
+// verifyQuorumQueueReplicasOnline keeps the replacement behind its readiness gate
+// until RabbitMQ reports it as an online member of every quorum queue.
+func (r *Reconciler) verifyQuorumQueueReplicasOnline(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	pod *corev1.Pod,
+	targetNode string,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	creds, err := r.rmqLoadMgmtCreds(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("reading management credentials: %w", err)
+	}
+
+	expectedPages := 0
+	expectedItems := 0
+	scannedItems := 0
+	seenQueues := make(map[string]bool)
+	missingReplicaQueue := ""
+	offlineReplicaQueue := ""
+	for page := 1; page <= 100; page++ {
+		var queues rmqQueuePage
+		path := fmt.Sprintf("/api/queues/detailed?pagination=true&page=%d&page_size=500&columns=name,vhost,type,members,online", page)
+		if err := r.rmqManagementGet(ctx, instance, pod, creds, path, &queues); err != nil {
+			return err
+		}
+		if queues.Page == nil || *queues.Page != page || queues.PageCount == nil ||
+			queues.PageSize == nil || *queues.PageSize != 500 || queues.ItemCount == nil ||
+			queues.FilteredCount == nil || queues.Items == nil ||
+			*queues.ItemCount != len(queues.Items) || *queues.FilteredCount < 0 {
+			return fmt.Errorf("RabbitMq queue page %d has incomplete pagination data", page)
+		}
+		if *queues.PageCount == 0 && page == 1 && *queues.ItemCount == 0 && *queues.FilteredCount == 0 {
+			return nil
+		}
+		if *queues.PageCount < page || *queues.PageCount > 100 ||
+			*queues.PageCount != (*queues.FilteredCount+499)/500 {
+			return fmt.Errorf("RabbitMq queue page %d has invalid pagination data", page)
+		}
+		if expectedPages == 0 {
+			expectedPages = *queues.PageCount
+			expectedItems = *queues.FilteredCount
+		} else if *queues.PageCount != expectedPages || *queues.FilteredCount != expectedItems {
+			return fmt.Errorf("RabbitMq queue pagination changed during rejoin")
+		}
+		if page < *queues.PageCount && len(queues.Items) != 500 {
+			return fmt.Errorf("RabbitMq queue page %d is incomplete", page)
+		}
+		scannedItems += len(queues.Items)
+		for _, queue := range queues.Items {
+			if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
+				return fmt.Errorf("RabbitMq queue page %d has a queue without name, vhost, or type", page)
+			}
+			key := queue.Vhost + "\x00" + queue.Name
+			if seenQueues[key] {
+				return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
+			}
+			seenQueues[key] = true
+			if queue.Type != "quorum" {
+				continue
+			}
+			if len(queue.Members) == 0 || queue.Online == nil {
+				return fmt.Errorf("RabbitMq quorum queue %s/%s has unknown membership", queue.Vhost, queue.Name)
+			}
+			members := make(map[string]bool, len(queue.Members))
+			for _, member := range queue.Members {
+				if member == "" || members[member] {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous membership", queue.Vhost, queue.Name)
+				}
+				members[member] = true
+			}
+			if !members[targetNode] {
+				missingReplicaQueue = queue.Vhost + "/" + queue.Name
+				continue
+			}
+			online := make(map[string]bool, len(queue.Online))
+			for _, member := range queue.Online {
+				if !members[member] || online[member] {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous online members", queue.Vhost, queue.Name)
+				}
+				online[member] = true
+			}
+			if !online[targetNode] {
+				offlineReplicaQueue = queue.Vhost + "/" + queue.Name
+			}
+		}
+		if page == *queues.PageCount {
+			if scannedItems != expectedItems {
+				return fmt.Errorf("RabbitMq queue pagination returned %d of %d queues", scannedItems, expectedItems)
+			}
+			// A missing replica needs another grow pass even if a different queue is
+			// still syncing. Check this only after scanning every queue.
+			if missingReplicaQueue != "" {
+				return fmt.Errorf("%w: %s does not include %s", errQuorumQueueReplicaMissing, missingReplicaQueue, targetNode)
+			}
+			if offlineReplicaQueue != "" {
+				return fmt.Errorf("RabbitMq quorum queue %s replacement member %s is not online yet", offlineReplicaQueue, targetNode)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("RabbitMq queue pagination exceeds 100 pages")
+}
+
 func (r *Reconciler) finishNodeRejoin(
 	ctx context.Context,
 	instance *rabbitmqv1beta1.RabbitMq,
@@ -452,11 +561,11 @@ func (r *Reconciler) finishNodeRejoin(
 	requestID string,
 ) error {
 	remediation, ok := instance.Status.PVCRemediation[pvcName]
-	if !ok || !remediation.ConsentGranted || remediation.RequestID != requestID || requestID == "" {
+	if !ok || remediation.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted || remediation.RequestID != requestID || requestID == "" {
 		return fmt.Errorf("PVC %s no longer has the consented request for RabbitMQ rejoin", pvcName)
 	}
-	if !remediation.QuorumQueuesGrown {
-		nodeName := rejoinNodeName(instance, pod.Name)
+	nodeName := rejoinNodeName(instance, pod.Name)
+	growQueues := func() error {
 		output, err := r.rabbitmqCommand(ctx,
 			types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name},
 			"rabbitmq-queues", "grow", nodeName, "all", "--errors-only", "--silent")
@@ -466,8 +575,27 @@ func (r *Reconciler) finishNodeRejoin(
 		if outputText := strings.TrimSpace(strings.TrimSpace(output.stdout) + "\n" + strings.TrimSpace(output.stderr)); outputText != "" {
 			return fmt.Errorf("growing quorum queue replicas on %s reported per-queue errors: %s", nodeName, outputText)
 		}
-		remediation.QuorumQueuesGrown = true
+		return nil
+	}
+	if remediation.QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
+		if err := growQueues(); err != nil {
+			return err
+		}
+		remediation.QueueReplicaState = rabbitmqv1beta1.PVCRemediationQueueReplicasGrown
 		instance.Status.PVCRemediation[pvcName] = remediation
+	}
+	err := r.verifyQuorumQueueReplicasOnline(ctx, instance, pod, nodeName)
+	if errors.Is(err, errQuorumQueueReplicaMissing) {
+		// RabbitMQ can declare a new quorum queue while the replacement is held
+		// unready. Grow skips queues that already include this node, so retry only
+		// when the management API confirms that membership is missing.
+		if growErr := growQueues(); growErr != nil {
+			return growErr
+		}
+		err = r.verifyQuorumQueueReplicasOnline(ctx, instance, pod, nodeName)
+	}
+	if err != nil {
+		return fmt.Errorf("verifying quorum queue replicas on %s: %w", pod.Name, err)
 	}
 	if _, err := r.setRejoinReady(ctx, pod, true); err != nil {
 		return err

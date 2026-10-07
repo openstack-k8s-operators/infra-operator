@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +73,8 @@ type fakeExec struct {
 	running            map[string][]string        // podName -> running node names it reports
 	configured         map[string][]string        // podName -> disk_nodes + ram_nodes it reports
 	quorumQueueMembers map[string]map[string]bool // queue name -> node names holding a replica
+	quorumQueueOnline  map[string]map[string]bool // queue name -> online replica node names
+	queueGrowOnline    bool                       // whether a successful grow has finished syncing
 	calls              []string                   // "<pod>:<command> <args...>" in invocation order
 	queueGrowErr       error
 	queueGrowOutput    string            // per-queue failures can be reported with exit status 0
@@ -102,8 +106,11 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 			stderr.WriteString(f.queueGrowStderr)
 			return fun(&out, &stderr)
 		}
-		for _, members := range f.quorumQueueMembers {
+		for queue, members := range f.quorumQueueMembers {
 			members[args[1]] = true
+			if f.queueGrowOnline {
+				f.quorumQueueOnline[queue][args[1]] = true
+			}
 		}
 	}
 
@@ -183,15 +190,6 @@ func withoutNode(nodes []string, unwanted string) []string {
 	return filtered
 }
 
-func (f *fakeExec) issued(call string) bool {
-	for _, c := range f.calls {
-		if c == call {
-			return true
-		}
-	}
-	return false
-}
-
 // orderOf returns the index of the first call matching substr, or -1.
 func (f *fakeExec) orderOf(substr string) int {
 	for i, c := range f.calls {
@@ -229,6 +227,17 @@ func newFakeExecWithQuorumQueues(running map[string][]string) *fakeExec {
 				node(testName + "-server-2"): true,
 			},
 		},
+		quorumQueueOnline: map[string]map[string]bool{
+			"orders": {
+				node(testName + "-server-1"): true,
+				node(testName + "-server-2"): true,
+			},
+			"notifications": {
+				node(testName + "-server-1"): true,
+				node(testName + "-server-2"): true,
+			},
+		},
+		queueGrowOnline:   true,
 		statusOutput:      map[string]string{},
 		statusErr:         map[string]error{},
 		postForgetRunning: map[string][]string{},
@@ -318,6 +327,44 @@ func replacementPVC(uid string) *corev1.PersistentVolumeClaim {
 	}
 }
 
+func managementClientFor(fx *fakeExec) *http.Client {
+	return &http.Client{Transport: rabbitMQManagementTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/queues/detailed" || request.URL.Query().Get("page") != "1" ||
+			request.URL.Query().Get("page_size") != "500" {
+			return nil, fmt.Errorf("unexpected management request %s", request.URL.String())
+		}
+		type queue struct {
+			Name    string   `json:"name"`
+			Vhost   string   `json:"vhost"`
+			Type    string   `json:"type"`
+			Members []string `json:"members"`
+			Online  []string `json:"online"`
+		}
+		queues := make([]queue, 0, len(fx.quorumQueueMembers))
+		for name, members := range fx.quorumQueueMembers {
+			item := queue{Name: name, Vhost: "/", Type: "quorum"}
+			for member := range members {
+				item.Members = append(item.Members, member)
+			}
+			for member := range fx.quorumQueueOnline[name] {
+				item.Online = append(item.Online, member)
+			}
+			queues = append(queues, item)
+		}
+		body, err := json.Marshal(map[string]interface{}{
+			"page": 1, "page_count": 1, "page_size": 500, "item_count": len(queues),
+			"filtered_count": len(queues), "items": queues,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body))),
+			Header: make(http.Header), Request: request,
+		}, nil
+	})}
+}
+
 func newReconciler(t *testing.T, executor *fakeExec, objs ...client.Object) *rabbitmqcontroller.Reconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -327,8 +374,15 @@ func newReconciler(t *testing.T, executor *fakeExec, objs ...client.Object) *rab
 	if err := rabbitmqv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testName + "-default-user", Namespace: testNS},
+		Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("test-password")},
+	}
+	objs = append(objs, secret)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1.Pod{}).WithObjects(objs...).Build()
-	return &rabbitmqcontroller.Reconciler{Client: c, Scheme: scheme, PodCommandExecutor: executor.run}
+	return &rabbitmqcontroller.Reconciler{
+		Client: c, Scheme: scheme, PodCommandExecutor: executor.run, ManagementHTTPClient: managementClientFor(executor),
+	}
 }
 
 func instanceWith(replicas int32) *rabbitmqv1beta1.RabbitMq {
@@ -345,10 +399,10 @@ func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
 	instance := instanceWith(replicas)
 	instance.Status.PVCRemediation = map[string]rabbitmqv1beta1.PVCRemediationStatus{
 		testPVCName: {
-			PVCUID:         oldPVCUID,
-			RequestID:      testRequestID,
-			StuckNode:      "worker-0",
-			ConsentGranted: true,
+			PVCUID:       oldPVCUID,
+			RequestID:    testRequestID,
+			StuckNode:    "worker-0",
+			ConsentState: rabbitmqv1beta1.PVCRemediationConsentGranted,
 		},
 	}
 	return instance
@@ -567,7 +621,7 @@ func TestRejoinHappyPath(t *testing.T) {
 		}
 	}
 	// Ordering: forget (on peer) precedes join (on target).
-	if !(fx.orderOf("forget_cluster_node") < fx.orderOf("join_cluster")) {
+	if fx.orderOf("forget_cluster_node") >= fx.orderOf("join_cluster") {
 		t.Errorf("repair steps out of order: %v", fx.calls)
 	}
 	queueGrowth := testName + "-server-0:rabbitmq-queues grow " + node(testName+"-server-0") + " all --errors-only --silent"
@@ -578,7 +632,7 @@ func TestRejoinHappyPath(t *testing.T) {
 	if fx.lastOrderOf("rabbitmqctl --formatter json cluster_status") >= fx.orderOf(queueGrowth) {
 		t.Errorf("queue growth must follow cluster membership verification, calls=%v", fx.calls)
 	}
-	if !instance.Status.PVCRemediation[testPVCName].QuorumQueuesGrown {
+	if instance.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
 		t.Error("expected successful queue growth to be recorded in PVC remediation status")
 	}
 
@@ -639,16 +693,21 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "cluster-config-v1", Namespace: "kube-system"},
 			Data:       map[string]string{"install-config": "{}"},
 		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: testName + "-default-user", Namespace: testNS},
+			Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("test-password")},
+		},
 	}
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&rabbitmqv1beta1.RabbitMq{}, &corev1.Pod{}).
 		WithObjects(objects...).Build()
 	r := &rabbitmqcontroller.Reconciler{
-		Client:             c,
-		Kclient:            kubernetesfake.NewSimpleClientset(),
-		Scheme:             scheme,
-		PodCommandExecutor: fx.run,
+		Client:               c,
+		Kclient:              kubernetesfake.NewSimpleClientset(),
+		Scheme:               scheme,
+		PodCommandExecutor:   fx.run,
+		ManagementHTTPClient: managementClientFor(fx),
 	}
 
 	completed := false
@@ -672,10 +731,117 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: testName}, persisted); err != nil {
 		t.Fatal(err)
 	}
-	if !persisted.Status.PVCRemediation[testPVCName].QuorumQueuesGrown {
-		t.Fatal("deferred reconcile status patch did not persist quorumQueuesGrown")
+	if persisted.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
+		t.Fatal("deferred reconcile status patch did not persist queueReplicaState=Grown")
 	}
 	assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), true)
+}
+
+func TestRejoinKeepsReadinessClosedUntilQuorumReplicasAreOnline(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	modelOfflineStaleSeed(fx)
+	fx.queueGrowOnline = false
+
+	target := replacementPod(testRequestID)
+	r := newReconciler(t, fx, target,
+		replacementPVC(newPVCUID),
+		clusterPod(testName+"-server-1", true),
+		clusterPod(testName+"-server-2", true))
+	instance := instanceWithRecovery(3)
+
+	if _, err := r.ReconcileNodeRejoin(context.Background(), instance); err == nil || !strings.Contains(err.Error(), "not online yet") {
+		t.Fatalf("expected rejoin to wait for online queue replicas, got %v", err)
+	}
+	if instance.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
+		t.Fatal("successful growth command should be recorded while replicas synchronize")
+	}
+	got := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: target.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if podRejoinReady(got) {
+		t.Fatal("readiness gate opened before all quorum replicas were online")
+	}
+
+	for queue := range fx.quorumQueueMembers {
+		fx.quorumQueueOnline[queue][node(target.Name)] = true
+	}
+	if requeue, err := r.ReconcileNodeRejoin(context.Background(), instance); err != nil || !requeue {
+		t.Fatalf("rejoin did not finish after replicas became online: requeue=%v err=%v", requeue, err)
+	}
+	if fx.orderOf("rabbitmq-queues grow") != fx.lastOrderOf("rabbitmq-queues grow") {
+		t.Fatalf("growth command should not repeat while waiting for replica sync, calls=%v", fx.calls)
+	}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: target.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if !podRejoinReady(got) {
+		t.Fatal("readiness gate should open after every quorum replica is online")
+	}
+}
+
+func TestRejoinGrowsQuorumQueuesCreatedDuringRecovery(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	modelOfflineStaleSeed(fx)
+	fx.queueGrowOnline = false
+
+	target := replacementPod(testRequestID)
+	r := newReconciler(t, fx, target,
+		replacementPVC(newPVCUID),
+		clusterPod(testName+"-server-1", true),
+		clusterPod(testName+"-server-2", true))
+	instance := instanceWithRecovery(3)
+
+	if _, err := r.ReconcileNodeRejoin(context.Background(), instance); err == nil || !strings.Contains(err.Error(), "not online yet") {
+		t.Fatalf("expected rejoin to wait for initial replicas to sync, got %v", err)
+	}
+	if instance.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
+		t.Fatal("successful initial growth command should be recorded while replicas synchronize")
+	}
+
+	// A queue declared while the replacement pod is held unready has no member
+	// on that node, even though the initial grow command already completed.
+	fx.quorumQueueMembers["late-queue"] = map[string]bool{
+		node(testName + "-server-1"): true,
+		node(testName + "-server-2"): true,
+	}
+	fx.quorumQueueOnline["late-queue"] = map[string]bool{
+		node(testName + "-server-1"): true,
+		node(testName + "-server-2"): true,
+	}
+	fx.queueGrowOnline = true
+
+	if requeue, err := r.ReconcileNodeRejoin(context.Background(), instance); err != nil || !requeue {
+		t.Fatalf("rejoin did not grow a queue created during recovery: requeue=%v err=%v", requeue, err)
+	}
+	assertQuorumQueueMembership(t, fx, node(target.Name), true)
+	if !fx.quorumQueueMembers["late-queue"][node(target.Name)] || !fx.quorumQueueOnline["late-queue"][node(target.Name)] {
+		t.Fatal("late quorum queue did not gain an online replacement replica")
+	}
+	growCalls := 0
+	for _, call := range fx.calls {
+		if strings.Contains(call, "rabbitmq-queues grow") {
+			growCalls++
+		}
+	}
+	if growCalls != 2 {
+		t.Fatalf("growth should run once initially and once for the late queue, got %d calls: %v", growCalls, fx.calls)
+	}
+	got := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: target.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if !podRejoinReady(got) {
+		t.Fatal("readiness gate should open after late queue replica is online")
+	}
 }
 
 func TestRejoinRetriesFailedQuorumQueueGrowth(t *testing.T) {
@@ -711,7 +877,7 @@ func TestRejoinRetriesFailedQuorumQueueGrowth(t *testing.T) {
 	if got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != testRequestID {
 		t.Fatal("request annotation must remain until queue growth succeeds")
 	}
-	if instance.Status.PVCRemediation[testPVCName].QuorumQueuesGrown {
+	if instance.Status.PVCRemediation[testPVCName].QueueReplicaState == rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
 		t.Fatal("failed queue growth must not be recorded as complete")
 	}
 	if fx.orderOf("rabbitmq-queues grow") < 0 {
@@ -733,7 +899,7 @@ func TestRejoinRetriesFailedQuorumQueueGrowth(t *testing.T) {
 	if strings.Count(strings.Join(fx.calls, "\n"), "rabbitmqctl join_cluster") != 1 {
 		t.Fatalf("retry should continue the existing cluster membership without joining again, calls=%v", fx.calls)
 	}
-	if !instance.Status.PVCRemediation[testPVCName].QuorumQueuesGrown {
+	if instance.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
 		t.Fatal("expected successful queue growth to be recorded")
 	}
 	assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), true)
@@ -776,7 +942,7 @@ func TestRejoinKeepsGateClosedOnPerQueueGrowErrors(t *testing.T) {
 				t.Fatalf("expected errors-only silent queue growth command, calls=%v", fx.calls)
 			}
 			assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), false)
-			if instance.Status.PVCRemediation[testPVCName].QuorumQueuesGrown {
+			if instance.Status.PVCRemediation[testPVCName].QueueReplicaState == rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
 				t.Fatal("per-queue errors must not be recorded as successful growth")
 			}
 			got := &corev1.Pod{}
