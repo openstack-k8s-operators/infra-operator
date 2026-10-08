@@ -87,6 +87,7 @@ func Deployment(
 	dnsmasqCmd := []string{ServiceCommand}
 	dnsmasqCmd = append(dnsmasqCmd, "--interface=*")
 	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
+	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d/cnames")
 	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
 	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
 	// Disable the pidfile: k8s manages the process lifecycle, and writing the

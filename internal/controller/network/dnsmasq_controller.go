@@ -396,25 +396,13 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	serviceAnnotations := map[string]string{}
 	configMapVars := make(map[string]env.Setter)
 
-	// create Configmap for dnsmasq input
-	err := r.generateServiceConfigMaps(ctx, helper, instance, &configMapVars)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ServiceConfigReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.ServiceConfigReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
-	}
-
 	labelSelectorMap := map[string]string{networkv1.DNSDataLabelSelectorKey: strings.ToLower(instance.Spec.DNSDataLabelSelectorValue)}
 	configMaps := &corev1.ConfigMapList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(instance.GetNamespace()),
 		client.MatchingLabels(labelSelectorMap),
 	}
-	err = r.List(ctx, configMaps, listOpts...)
+	err := r.List(ctx, configMaps, listOpts...)
 	if err != nil {
 		err = fmt.Errorf("error listing configmaps for labels: %v - %w", labelSelectorMap, err)
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -430,6 +418,20 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	sort.Slice(configMaps.Items, func(i, j int) bool {
 		return configMaps.Items[i].Name < configMaps.Items[j].Name
 	})
+	cnameData, cnameErr := dnsmasq.AggregateCNAMEConfigMaps(configMaps)
+
+	// Create the DNSMasq options ConfigMap with the CNAMEs merged from all
+	// selected DNSData ConfigMaps.
+	err = r.generateServiceConfigMaps(ctx, helper, instance, &configMapVars, cnameData)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
 
 	cmNames := []string{}
 	for _, cm := range configMaps.Items {
@@ -462,7 +464,16 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, err
 	}
 	instance.Status.Hash[common.InputHashName] = inputHash
-	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+	if cnameErr != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			cnameErr.Error()))
+	} else {
+		instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+	}
 
 	// expose the service
 	svcOverride := instance.Spec.Override.Service
@@ -638,6 +649,7 @@ func (r *DNSMasqReconciler) generateServiceConfigMaps(
 	h *helper.Helper,
 	instance *networkv1.DNSMasq,
 	envVars *map[string]env.Setter,
+	cnameData string,
 ) error {
 	cmLabels := labels.GetLabels(instance, labels.GetGroupLabel(dnsmasq.ServiceName), map[string]string{})
 
@@ -653,6 +665,8 @@ func (r *DNSMasqReconciler) generateServiceConfigMaps(
 		cfg += "\n"
 	}
 	configMapData[instance.Name] = cfg
+	// shortcut: aggregated CNAME data has a 1 MiB ConfigMap limit; split it if workloads can exceed it.
+	configMapData[instance.Name+"-cnames"] = cnameData
 
 	cms := []util.Template{
 		{

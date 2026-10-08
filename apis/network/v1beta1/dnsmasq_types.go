@@ -26,9 +26,6 @@ import (
 )
 
 const (
-	// AnnotationHostnameKey -
-	AnnotationHostnameKey = "dnsmasq.network.openstack.org/hostname"
-
 	// DNSDataLabelSelectorKey - label selector to identify config maps with hosts data
 	DNSDataLabelSelectorKey = "dnsmasqhosts"
 

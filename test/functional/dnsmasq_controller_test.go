@@ -184,13 +184,17 @@ var _ = Describe("DNSMasq controller", func() {
 				depl := th.GetDeployment(deploymentName)
 
 				g.Expect(int(*depl.Spec.Replicas)).To(Equal(1))
-				g.Expect(depl.Spec.Template.Spec.Volumes).To(HaveLen(3))
+				// +1 for the always-present "cnames" emptyDir volume backing
+				// --conf-dir=/etc/dnsmasq.d/cnames.
+				g.Expect(depl.Spec.Template.Spec.Volumes).To(HaveLen(4))
 				g.Expect(depl.Spec.Template.Spec.Containers).To(HaveLen(1))
 				g.Expect(depl.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 				g.Expect(depl.Spec.Selector.MatchLabels).To(Equal(map[string]string{"service": "dnsmasq"}))
 
 				container := depl.Spec.Template.Spec.Containers[0]
-				g.Expect(container.VolumeMounts).To(HaveLen(3))
+				g.Expect(container.VolumeMounts).To(HaveLen(5))
+				g.Expect(container.VolumeMounts).To(ContainElement(HaveField(
+					"MountPath", Equal("/etc/dnsmasq.d/cnames/aliases.conf"))))
 				g.Expect(container.Image).To(Equal(containerImage))
 
 				g.Expect(container.LivenessProbe.TCPSocket.Port.IntVal).To(Equal(int32(5353)))
