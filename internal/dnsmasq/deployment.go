@@ -64,6 +64,7 @@ func Deployment(
 	labels map[string]string,
 	annotations map[string]string,
 	cms *corev1.ConfigMapList,
+	cnameShards []string,
 	topology *topologyv1.Topology,
 ) *appsv1.Deployment {
 	terminationGracePeriodSeconds := int64(10)
@@ -87,6 +88,7 @@ func Deployment(
 	dnsmasqCmd := []string{ServiceCommand}
 	dnsmasqCmd = append(dnsmasqCmd, "--interface=*")
 	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d")
+	dnsmasqCmd = append(dnsmasqCmd, "--conf-dir=/etc/dnsmasq.d/cnames")
 	dnsmasqCmd = append(dnsmasqCmd, "--hostsdir=/etc/dnsmasq.d/hosts")
 	dnsmasqCmd = append(dnsmasqCmd, "--keep-in-foreground")
 	// Disable the pidfile: k8s manages the process lifecycle, and writing the
@@ -153,7 +155,7 @@ func Deployment(
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
 						},
 					},
-					Volumes: getVolumes(instance.Name, cms),
+					Volumes: getVolumes(instance.Name, cms, cnameShards),
 					InitContainers: []corev1.Container{
 						{
 							Name:            "init",

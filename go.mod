@@ -11,7 +11,7 @@ require (
 	github.com/onsi/gomega v1.44.0
 	github.com/openshift/api v3.9.0+incompatible
 	github.com/openstack-k8s-operators/infra-operator/apis v0.0.0-00010101000000-000000000000
-	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20261023124652-eebd8803b178
+	github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20261027101321-e57613990d8a
 	github.com/openstack-k8s-operators/lib-common/modules/edpm v0.0.0-20261023124652-eebd8803b178
 	github.com/openstack-k8s-operators/lib-common/modules/test v0.6.1-0.20261023124652-eebd8803b178
 	github.com/openstack-k8s-operators/lib-common/modules/users v0.0.0-20261023124652-eebd8803b178

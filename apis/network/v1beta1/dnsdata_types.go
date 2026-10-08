@@ -29,8 +29,20 @@ type DNSHost struct {
 	IP string `json:"ip"`
 
 	// +kubebuilder:validation:Required
-	// Hostnames for the IP address.
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern="^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"
+	// Hostnames for the IP address. Names must be DNS-1123 subdomains.
 	Hostnames []string `json:"hostnames"`
+
+	// +kubebuilder:validation:Optional
+	// +listType=atomic
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern="^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$"
+	// CNAMEs are additional hostnames registered as DNS aliases (dnsmasq `cname=`
+	// records) of the first entry in Hostnames, instead of duplicate host-file
+	// entries. Aliases and the canonical name must be DNS-1123 subdomains, and
+	// exactly one entry in Hostnames is required.
+	CNAMEs []string `json:"cnames,omitempty"`
 }
 
 // DNSDataSpec defines the desired state of DNSData
