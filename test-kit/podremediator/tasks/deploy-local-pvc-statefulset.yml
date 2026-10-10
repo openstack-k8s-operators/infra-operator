@@ -1,0 +1,95 @@
+# Deploy Service + StatefulSet test workload (local PVC via StorageClass).
+# Manifests: tasks/manifests/local_pvc_statefulset.yml (bundled; same as main E2E workload names).
+# The same steps are inlined in test-e2e-podremediator-pvc-remediation.yml (first play) when e2e_deploy_bundled_test_statefulset is true.
+# OC login matches test-e2e-podremediator-pvc-remediation.yml (first play): kubeconfig API discovery + kubeadmin.
+# Expects: kubeconfig_path, oc_bin, kubeadmin_password_file (optional), oc_api_server (optional), oc_login_timeout_seconds (optional).
+
+- name: Get API server from kubeconfig
+  ansible.builtin.shell: |
+    awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+  register: kubeconfig_server
+  changed_when: false
+  failed_when: false
+
+- name: Set API server fact for oc login
+  ansible.builtin.set_fact:
+    oc_api_server_auto: "{{ (kubeconfig_server.stdout | trim) if (kubeconfig_server.stdout is defined and kubeconfig_server.stdout | trim | length > 0) else '' }}"
+
+- name: OC login
+  ansible.builtin.shell: |
+    SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+    if [[ -n "$SERVER" ]]; then
+      timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+    else
+      timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+- name: Load bundled StatefulSet lab manifests (Service + StatefulSet)
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../tasks/manifests/local_pvc_statefulset.yml"
+
+- name: Delete existing test StatefulSet and PVC (allow re-run with updated spec)
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api_version }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: openstack-operators
+    kubeconfig: "{{ kubeconfig_path }}"
+  loop:
+    - { api_version: "apps/v1", kind: "StatefulSet", name: "test-podremediator" }
+    - { api_version: "v1", kind: "PersistentVolumeClaim", name: "data-test-podremediator-0" }
+  ignore_errors: true
+
+- name: Apply StatefulSet test resources (Service and StatefulSet)
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+    kubeconfig: "{{ kubeconfig_path }}"
+  loop: "{{ local_pvc_statefulset_resources }}"
+
+- name: Wait for StatefulSet test pod to be Running
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} rollout status statefulset/test-podremediator -n openstack-operators --timeout=300s"
+  register: sts_rollout
+  failed_when: false
+
+- name: Get test pod node name
+  ansible.builtin.command:
+    cmd: "{{ oc_bin }} get pod -n openstack-operators test-podremediator-0 -o jsonpath='{.spec.nodeName}'"
+  register: step6_pod_node
+  changed_when: false
+
+- name: Get PV node from test PVC (same logic as PodRemediator)
+  ansible.builtin.shell: |
+    pv_name=$({{ oc_bin }} get pvc -n openstack-operators data-test-podremediator-0 -o jsonpath='{.spec.volumeName}')
+    {{ oc_bin }} get pv "$pv_name" -o json | python3 -c 'import sys,json
+    d=json.load(sys.stdin)
+    aff=d.get("spec",{}).get("nodeAffinity",{}).get("required",{}).get("nodeSelectorTerms",[])
+    for term in aff:
+        for m in term.get("matchExpressions",[])+term.get("matchFields",[]):
+            k=m.get("key","")
+            if "node" in k or "hostname" in k:
+                v=m.get("values",[])
+                if v: print(v[0]); sys.exit(0)'
+  register: step6_pv_node
+  changed_when: false
+
+- name: Assert pod and PVC PV are on the same node (required for node-failure E2E)
+  ansible.builtin.assert:
+    that: step6_pod_node.stdout | trim == step6_pv_node.stdout | trim
+    fail_msg: |
+      Test pod is on node '{{ step6_pod_node.stdout | trim }}' but PVC is bound to a PV on node '{{ step6_pv_node.stdout | trim }}'.
+      Node-failure E2E would not delete this PVC. Delete StatefulSet + PVC and re-run with a manifest where the pod schedules on the PV node.
+    success_msg: "Pod and PVC PV are both on node {{ step6_pod_node.stdout | trim }} (ready for virsh E2E on this node)."
+
+- name: StatefulSet local-PVC test workload ready
+  ansible.builtin.debug:
+    msg: |
+      StatefulSet test-podremediator applied. Pod: test-podremediator-0, PVC: data-test-podremediator-0.
+      When the node goes down and PodRemediator deletes the PVC, the StatefulSet controller can recreate the workload.
+      Check: oc get pv,pvc,pod,statefulset -n openstack-operators | grep -E 'test-podremediator|data-test-podremediator'

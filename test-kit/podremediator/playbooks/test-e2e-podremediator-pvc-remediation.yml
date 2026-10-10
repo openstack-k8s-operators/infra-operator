@@ -1,0 +1,883 @@
+# Base PodRemediator E2E (recommended first): uses the bundled lab StatefulSet test-podremediator
+# (manifests in tasks/manifests/local_pvc_statefulset.yml) to validate core remediation behaviour on a
+# minimal workload we control. Independent from RabbitMQ/Galera scenarios — those assume OpenStack already
+# deployed real workloads and use separate wrapper playbooks (they skip this bundled deploy).
+#
+# Flow: simulate real node death (virsh destroy VM on had-18).
+# NHC/SNR detect the node down; PodRemediator deletes the local PVC on that node.
+# Before destroying the VM, the playbook asserts that the test pod and the PVC's PV
+# are on the same node (otherwise PodRemediator would correctly skip the PVC and the test would time out).
+# NHC/SNR typically take more than 5 minutes to detect node failure; the playbook
+# uses longer wait timeouts and polls for PVC deletion accordingly.
+# Same login and inventory logic as the runbook (controller0 from had-18 as zuul).
+#
+# Prerequisite: run this playbook **from had-18** (where libvirt runs the cluster VMs).
+# The virsh domain is derived from the node where the test pod runs: prefix + node name
+# (default prefix: cifmw-ocp-, so node worker-2 -> domain cifmw-ocp-worker-2). No need to pass
+# e2e_virsh_domain unless your naming differs.
+#
+# From had-18 (as zuul), from repo root:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/test-e2e-podremediator-pvc-remediation.yml
+#
+# RabbitMQ / Galera: same virsh+remediation mechanics but separate entry points; they target workloads
+# already installed with OpenStack (see wrapper playbooks). Do not confuse with this lab StatefulSet test.
+#
+# Advanced (avoid wrappers): pass workload vars on this playbook and set e2e_deploy_bundled_test_statefulset=false,
+# or use the dedicated wrapper playbooks. Example extra-vars for RabbitMQ inline:
+#   -e e2e_workload_namespace=openstack -e e2e_test_pod_name=rabbitmq-server-0 \
+#   -e e2e_test_pvc_name=persistence-rabbitmq-server-0 -e e2e_statefulset_name=rabbitmq-server
+# Galera: prefer test-e2e-podremediator-pvc-remediation-galera.yml (defaults/overrides per cluster).
+# Bundled lab StatefulSet deploy is the first phase of this playbook (same manifests as runbook Step 6).
+# Skip that deploy when targeting an existing workload (RabbitMQ/Galera wrappers set e2e_deploy_bundled_test_statefulset=false).
+# Deploy only, no virsh: -e e2e_stop_after_sts_deploy=true
+# PodRemediator spec.namespaces must include the workload namespace.
+#
+# Optional: -e "e2e_virsh_domain=<name>" to force a domain; -e "e2e_virsh_domain_prefix=<prefix>" (default cifmw-ocp-)
+# To skip restarting the VM at the end: -e "e2e_skip_restore=true"
+# If oc is not in PATH on controller0: -e "oc_cmd=/home/zuul/bin/oc" (or the actual path)
+# If oc login hangs (API discovery): -e "oc_api_server=https://api.<cluster>:6443" and optionally -e "oc_login_timeout_seconds=30"
+# If PVC poll times out (NHC/SNR slow): -e "e2e_pvc_deleted_timeout_seconds=1200" (e.g. 20 min)
+#
+# Multi-PVC observability (same node as PodRemediator): set e2e_report_all_local_pvcs_on_test_node=true
+# to list every Bound+local PVC in the workload namespace whose PV is pinned to the node under test,
+# then log each watched PVC on every poll iteration (success still depends only on e2e_test_pvc_name).
+# Optional explicit names: -e 'e2e_watch_extra_pvc_names=["mysql-db-openstack-galera-2"]'
+# Galera wrapper enables discovery by default (see test-e2e-podremediator-pvc-remediation-galera.yml).
+#
+# Galera victim pod (optional, Galera StatefulSet only): set e2e_galera_victim_selection to override the
+# default test ordinal before virsh destroy:
+#   max_wsrep_last_committed — kill the node hosting the member with highest wsrep_last_committed (tie: lowest ordinal).
+#   random_member or random — pick uniformly among Running members that accept mysql.
+# Requires mysql in the galera container; PVC name is derived as mysql-db-<statefulset_name>-<ordinal>.
+# Example: E2E_EXTRA_ANSIBLE_ARGS='-e e2e_galera_victim_selection=max_wsrep_last_committed'
+# Lab – force different wsrep_last_committed across members before max victim pick (wsrep_desync on peers + INSERT churn):
+#   -e e2e_galera_wsrep_spread_before_fault=true
+# Optional: -e e2e_galera_wsrep_spread_desync_ordinals=1,2 -e e2e_galera_wsrep_spread_churn_ordinal=0
+#   -e e2e_galera_wsrep_spread_churn_inserts=800 -e e2e_galera_wsrep_spread_min_delta=5
+#
+# Galera DB / wsrep monitoring (optional): Galera wrapper sets e2e_galera_wsrep_monitor=true and runs
+# tasks/e2e-galera-wsrep-monitor.yml at key steps (before destroy, NotReady, NHC, PVC wait, reschedule, node Ready).
+# When e2e_k8s_events_report=true (default in Galera wrapper), each snapshot prints oc get events for
+# workload + operator namespaces (by default filtered to Galera/remediation-relevant lines; see e2e-galera-wsrep-monitor.yml).
+# With e2e_galera_compact_log=true (Galera default), snapshots are table + filtered events only (no per-pod SHOW dump).
+# Disable final strict assert with -e "e2e_galera_wsrep_assert_final=false" (snapshots still run).
+# Override MariaDB container name if needed: -e "e2e_galera_mysql_container=galera"
+#
+# Note: virsh plays (destroy/start) use become: true on had-18; run with -b if you are zuul
+# (e.g. ansible-playbook ... -b) or run the playbook as root.
+#
+# e2e_workload_ns / e2e_operator_ns use lookup('ansible.builtin.vars', ...) instead of
+# {{ e2e_workload_namespace | default(...) }} in play vars — otherwise Ansible can hit
+# "recursive loop / maximum recursion depth" when resolving similar variable names.
+
+---
+- name: E2E – OC login and test pod node name
+  hosts: controllers
+  gather_facts: false
+  # run-e2e.sh uses -b; kubernetes.core.k8s must align with zuul kubeconfig (same as former local-statefulset-only play).
+  become: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    e2e_operator_ns: "{{ lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    test_pvc_name: "{{ e2e_test_pvc_name | default('data-test-podremediator-0') }}"
+    e2e_sts_name: "{{ e2e_statefulset_name | default('test-podremediator') }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+  tasks:
+    - name: Get API server from kubeconfig
+      ansible.builtin.shell: |
+        awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+      register: kubeconfig_server
+      changed_when: false
+      failed_when: false
+
+    - name: Set API server fact for oc login
+      ansible.builtin.set_fact:
+        oc_api_server_auto: "{{ (kubeconfig_server.stdout | trim) if (kubeconfig_server.stdout is defined and kubeconfig_server.stdout | trim | length > 0) else '' }}"
+
+    - name: OC login
+      ansible.builtin.shell: |
+        SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+        if [[ -n "$SERVER" ]]; then
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        else
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    # Bundled Service + StatefulSet (tasks/manifests/local_pvc_statefulset.yml) — inlined; wrappers turn off via e2e_deploy_bundled_test_statefulset=false.
+    - name: Load bundled StatefulSet lab manifests (Service + StatefulSet)
+      ansible.builtin.set_fact:
+        local_pvc_statefulset_resources: "{{ (lookup('ansible.builtin.file', playbook_dir ~ '/../tasks/manifests/local_pvc_statefulset.yml') | from_yaml).local_pvc_statefulset_resources }}"
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Delete existing test StatefulSet and PVC (allow re-run with updated spec)
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: openstack-operators
+        kubeconfig: "{{ kubeconfig_path }}"
+      loop:
+        - { api_version: "apps/v1", kind: "StatefulSet", name: "test-podremediator" }
+        - { api_version: "v1", kind: "PersistentVolumeClaim", name: "data-test-podremediator-0" }
+      ignore_errors: true
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Apply StatefulSet test resources (Service and StatefulSet)
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      loop: "{{ local_pvc_statefulset_resources }}"
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Wait for StatefulSet test pod to be Running
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} rollout status statefulset/test-podremediator -n openstack-operators --timeout=300s"
+      register: sts_rollout
+      failed_when: false
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Get test pod node name (bundled StatefulSet lab)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n openstack-operators test-podremediator-0 -o jsonpath='{.spec.nodeName}'"
+      register: step6_pod_node
+      changed_when: false
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Get PV node from test PVC (same logic as PodRemediator)
+      ansible.builtin.shell: |
+        pv_name=$({{ oc_bin }} get pvc -n openstack-operators data-test-podremediator-0 -o jsonpath='{.spec.volumeName}')
+        {{ oc_bin }} get pv "$pv_name" -o json | python3 -c 'import sys,json
+        d=json.load(sys.stdin)
+        aff=d.get("spec",{}).get("nodeAffinity",{}).get("required",{}).get("nodeSelectorTerms",[])
+        for term in aff:
+            for m in term.get("matchExpressions",[])+term.get("matchFields",[]):
+                k=m.get("key","")
+                if "node" in k or "hostname" in k:
+                    v=m.get("values",[])
+                    if v: print(v[0]); sys.exit(0)'
+      register: step6_pv_node
+      changed_when: false
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Assert pod and PVC PV are on the same node (bundled lab workload)
+      ansible.builtin.assert:
+        that: step6_pod_node.stdout | trim == step6_pv_node.stdout | trim
+        fail_msg: |
+          Test pod is on node '{{ step6_pod_node.stdout | trim }}' but PVC is bound to a PV on node '{{ step6_pv_node.stdout | trim }}'.
+          Node-failure E2E would not delete this PVC. Delete StatefulSet + PVC and re-run with a manifest where the pod schedules on the PV node.
+        success_msg: "Pod and PVC PV are both on node {{ step6_pod_node.stdout | trim }} (ready for virsh E2E on this node)."
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Bundled StatefulSet lab workload applied
+      ansible.builtin.debug:
+        msg: |
+          StatefulSet test-podremediator applied. Pod: test-podremediator-0, PVC: data-test-podremediator-0.
+          Proceeding to virsh node-failure E2E (unless e2e_stop_after_sts_deploy).
+          Check: oc get pv,pvc,pod,statefulset -n openstack-operators | grep -E 'test-podremediator|data-test-podremediator'
+      when: e2e_deploy_bundled_test_statefulset | default(true) | bool
+
+    - name: Stop playbook after lab StatefulSet deploy (no virsh / no further plays)
+      ansible.builtin.meta: end_play
+      when:
+        - e2e_deploy_bundled_test_statefulset | default(true) | bool
+        - e2e_stop_after_sts_deploy | default(false) | bool
+
+    - name: Galera lab – widen wsrep_last_committed before victim pick (wsrep_desync + churn)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-spread-before-fault.yml"
+      when:
+        - e2e_galera_wsrep_spread_before_fault | default(false) | bool
+        - e2e_sts_name | default('') | lower is search('galera', ignorecase=False)
+
+    - name: Galera E2E — pick victim pod (max wsrep_last_committed or random member)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-select-victim-pod.yml"
+      when:
+        - e2e_galera_victim_selection | default('') | trim | length > 0
+        - (e2e_galera_victim_selection | default('') | trim) not in ['fixed', 'none', 'false', '0']
+        - e2e_sts_name | default('') | lower is search('galera', ignorecase=False)
+
+    - name: Galera lab – clear wsrep_desync after victim chosen (before virsh destroy)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-spread-cleanup.yml"
+      when:
+        - e2e_galera_wsrep_spread_before_fault | default(false) | bool
+        - e2e_sts_name | default('') | lower is search('galera', ignorecase=False)
+
+    - name: Get node name of test pod
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n {{ e2e_workload_ns }} {{ test_pod_name }} -o jsonpath='{.spec.nodeName}'"
+      register: e2e_node_result
+      changed_when: false
+      failed_when: e2e_node_result.rc != 0 or e2e_node_result.stdout | length == 0
+
+    - name: Set E2E test node name fact
+      ansible.builtin.set_fact:
+        e2e_test_node_name: "{{ e2e_node_result.stdout }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['controllers'] }}"
+
+    - name: Assert test pod exists
+      ansible.builtin.assert:
+        that: e2e_node_result.stdout | length > 0
+        fail_msg: "Pod {{ test_pod_name }} not found in {{ e2e_workload_ns }}. Enable bundled deploy (e2e_deploy_bundled_test_statefulset=true, default) for lab STS, run runbook Step 6, or deploy RabbitMQ/Galera."
+
+    - name: Show node under test (we will simulate death of this node only)
+      ansible.builtin.debug:
+        msg: "Test pod runs on node {{ e2e_node_result.stdout }}. E2E will destroy the VM for this node only (not any other worker)."
+
+- name: E2E – Verify PVC exists before test
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pvc_name: "{{ e2e_test_pvc_name | default('data-test-podremediator-0') }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Check test PVC exists
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }}"
+      register: pvc_before
+      changed_when: false
+      failed_when: pvc_before.rc != 0
+
+    - name: Assert PVC exists before test
+      ansible.builtin.assert:
+        that: pvc_before.rc == 0
+        fail_msg: "PVC {{ test_pvc_name }} not found. Run runbook Step 6 first."
+
+    # PodRemediator skips unbound PVCs (no spec.volumeName) — E2E would always time out.
+    - name: Get test PVC phase and volume name
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o jsonpath='{.status.phase}{\"\\t\"}{.spec.volumeName}'"
+      register: pvc_phase_vol
+      changed_when: false
+      failed_when: pvc_phase_vol.rc != 0
+
+    - name: Assert PVC is Bound with a volume (required for PodRemediator remediation)
+      ansible.builtin.assert:
+        that:
+          - pvc_phase_vol.stdout.split('\t') | length >= 2
+          - pvc_phase_vol.stdout.split('\t') | first == 'Bound'
+          - (pvc_phase_vol.stdout.split('\t'))[1] | length > 0
+        fail_msg: |
+          PVC {{ test_pvc_name }} must be Phase=Bound with spec.volumeName set.
+          PodRemediator never deletes unbound PVCs (see operator log "Skipping PVC (unbound)").
+          Current phase/volume from oc: "{{ pvc_phase_vol.stdout }}"
+          Fix OpenStack/RabbitMQ storage (lvms-local-storage / capacity on the node) before E2E.
+
+- name: E2E – Assert pod and PVC PV are on the same node (required for remediation)
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pvc_name: "{{ e2e_test_pvc_name | default('data-test-podremediator-0') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Get PV name bound to test PVC
+      ansible.builtin.shell: |
+        {{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o jsonpath='{.spec.volumeName}'
+      register: pv_name_out
+      changed_when: false
+      failed_when: pv_name_out.stdout | length == 0
+
+    - name: "Get node name from PV (same logic as PodRemediator: topology.topolvm.io/node, topology.lvms.io/node, kubernetes.io/hostname)"
+      ansible.builtin.shell: |
+        pv_name="{{ pv_name_out.stdout }}"
+        {{ oc_bin }} get pv "$pv_name" -o json | python3 -c 'import sys,json
+        d=json.load(sys.stdin)
+        aff=d.get("spec",{}).get("nodeAffinity",{}).get("required",{}).get("nodeSelectorTerms",[])
+        for term in aff:
+            for m in term.get("matchExpressions",[])+term.get("matchFields",[]):
+                k=m.get("key","")
+                if "node" in k or "hostname" in k:
+                    v=m.get("values",[])
+                    if v: print(v[0]); sys.exit(0)'
+      register: pv_node_out
+      changed_when: false
+      failed_when: pv_node_out.stdout | length == 0
+
+    - name: Set PV node fact
+      ansible.builtin.set_fact:
+        e2e_pv_node_name: "{{ pv_node_out.stdout | trim }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['controllers'] }}"
+
+    - name: Assert pod node matches PVC PV node (otherwise PodRemediator will not delete the PVC)
+      ansible.builtin.assert:
+        that: hostvars['controller0']['e2e_test_node_name'] == hostvars['controller0']['e2e_pv_node_name']
+        fail_msg: |
+          Pod and volume are on different nodes. E2E would destroy the VM for the pod node ({{ hostvars['controller0']['e2e_test_node_name'] }}),
+          but the test PVC is bound to a PV on node {{ hostvars['controller0']['e2e_pv_node_name'] }}. PodRemediator only deletes PVCs whose PV is on an unhealthy node,
+          so it would correctly skip this PVC and the test would time out.
+          Re-run runbook Step 6 (delete StatefulSet + PVC, then re-apply) so the new PVC is provisioned on the same node as the pod, then run E2E again.
+        success_msg: "Pod and PVC PV are both on node {{ hostvars['controller0']['e2e_pv_node_name'] }}. Safe to destroy that node's VM."
+
+    - name: "Set initial PVC volume name (for E2E success – StatefulSet recreates PVC with same name, so we accept volume change)"
+      ansible.builtin.set_fact:
+        e2e_initial_pvc_volume_name: "{{ pv_name_out.stdout | trim }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['controllers'] }}"
+
+    - name: Discover all Bound+local PVCs pinned to the test node (same scope PodRemediator will remediate)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-discover-local-pvcs-on-node.yml"
+      when: e2e_report_all_local_pvcs_on_test_node | default(false) | bool
+      run_once: true
+
+    - name: Galera DB / wsrep snapshot (before virsh destroy)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "after pod/PV colocation check — before virsh destroy"
+
+# We destroy the VM that corresponds to the node where the test pod runs (e2e_test_node_name from play 1).
+# Virsh domain is derived as: e2e_virsh_domain_prefix + node_name (e.g. cifmw-ocp- + worker-2 -> cifmw-ocp-worker-2).
+# Override: -e "e2e_virsh_domain=<name>" or -e "e2e_virsh_domain_prefix=<prefix>" (default prefix: cifmw-ocp-).
+- name: E2E – Simulate node death (virsh destroy on had-18)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    _e2e_node_name: "{{ hostvars['controller0']['e2e_test_node_name'] | default('') }}"
+    # Prefix from -e or default; avoid self-reference (no var defining itself)
+    _e2e_virsh_prefix: "{{ e2e_virsh_domain_prefix if (e2e_virsh_domain_prefix is defined and e2e_virsh_domain_prefix != '') else 'cifmw-ocp-' }}"
+    e2e_virsh_domain_resolved: "{{ e2e_virsh_domain | default(_e2e_virsh_prefix + _e2e_node_name) }}"
+  tasks:
+    - name: Confirm we target the node that runs the test pod
+      ansible.builtin.debug:
+        msg: "Will destroy VM '{{ e2e_virsh_domain_resolved }}' (node {{ _e2e_node_name }} where test pod runs). Override with -e e2e_virsh_domain=<name> or -e e2e_virsh_domain_prefix=<prefix>."
+
+    - name: Check virsh domain exists (node where test pod runs)
+      ansible.builtin.command:
+        cmd: virsh dominfo "{{ e2e_virsh_domain_resolved }}"
+      register: virsh_info
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with hint if virsh domain not found
+      ansible.builtin.fail:
+        msg: "Virsh domain '{{ e2e_virsh_domain_resolved }}' not found. This is the node where the test pod runs (from spec.nodeName). If the libvirt domain has a different name on had-18, run with -e \"e2e_virsh_domain=<actual-domain-name>\" (e.g. overcloud-worker-0). List domains: virsh list --all"
+      when: virsh_info.rc != 0
+
+    - name: Destroy VM (simulate real node outage – the node that runs the test pod)
+      ansible.builtin.command:
+        cmd: virsh destroy "{{ e2e_virsh_domain_resolved }}"
+      register: virsh_destroy
+      changed_when: virsh_destroy.rc == 0
+      # Idempotent: already shut off from a previous run is OK
+      failed_when: virsh_destroy.rc != 0 and 'domain is not running' not in (virsh_destroy.stderr | default(''))
+
+    - name: Show that VM was destroyed (or already shut off)
+      ansible.builtin.debug:
+        msg: "VM {{ e2e_virsh_domain_resolved }} {{ 'destroyed' if virsh_destroy.rc == 0 else 'was already shut off' }}. Control plane will mark node NotReady; NHC/SNR will detect the failure."
+
+- name: E2E – Wait for node to become NotReady
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Get test node name
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n {{ e2e_workload_ns }} {{ test_pod_name }} -o jsonpath='{.spec.nodeName}'"
+      register: node_name_wait
+      changed_when: false
+      failed_when: false
+
+    - name: Poll until node is NotReady (control plane marks node after virsh destroy)
+      ansible.builtin.shell: |
+        set -e
+        # Allow up to ~10 min for control plane to mark node NotReady
+        for i in $(seq 1 120); do
+          status=$({{ oc_bin }} get node {{ node_name_wait.stdout }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+          if [[ "$status" != "True" ]]; then
+            echo "Node is NotReady"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "Timeout waiting for NotReady (VM destroyed; control plane may need longer to mark node down)"
+        exit 1
+      args:
+        executable: /bin/bash
+      register: poll_not_ready
+      failed_when: poll_not_ready.rc != 0
+
+    - name: Galera DB / wsrep snapshot (node NotReady)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "node NotReady (after virsh destroy)"
+
+- name: E2E – Verify NHC/SNR detect the node down
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    e2e_node_name: "{{ hostvars['controller0']['e2e_test_node_name'] }}"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Show node status (NotReady – NHC/SNR see it as unhealthy)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get node {{ e2e_node_name }} -o wide"
+      register: node_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display node status
+      ansible.builtin.debug:
+        var: node_status.stdout_lines
+
+    - name: List NodeHealthChecks (NHC detects unhealthy nodes)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get nodehealthchecks -A -o wide"
+      register: nhc_list
+      changed_when: false
+      failed_when: false
+
+    - name: Display NHC
+      ansible.builtin.debug:
+        var: nhc_list.stdout_lines
+
+    - name: Optional – show NHC status for remediation
+      ansible.builtin.shell: |
+        {{ oc_bin }} get nodehealthchecks -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions}{"\n"}{end}' 2>/dev/null || true
+      register: nhc_status
+      changed_when: false
+      failed_when: false
+
+    - name: Galera DB / wsrep snapshot (NHC / unhealthy node path)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "after NHC listing (unhealthy node visible to remediation stack)"
+
+- name: E2E – Wait for reconcile and verify PVC was deleted (or volume changed – StatefulSet recreates same name)
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    e2e_operator_ns: "{{ lookup('ansible.builtin.vars', 'e2e_operator_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    test_pvc_name: "{{ e2e_test_pvc_name | default('data-test-podremediator-0') }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    # Initial volume name: success when PVC is gone OR PVC has a different volume (StatefulSet recreated it)
+    e2e_initial_pvc_volume_name: "{{ hostvars['controller0']['e2e_initial_pvc_volume_name'] | default('') }}"
+    # NHC/SNR often take >5 min to detect node failure; then PodRemediator reconciles and deletes PVC
+    e2e_pvc_deleted_timeout_seconds: 720   # 12 min total
+    e2e_pvc_poll_interval_seconds: 30
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+    _e2e_local_pvcs_discovered: "{{ hostvars['controller0']['e2e_pvcs_local_on_test_node'] | default([]) if (e2e_report_all_local_pvcs_on_test_node | default(false) | bool) else [] }}"
+    e2e_watched_pvcs_for_monitoring: "{{ ([test_pvc_name] + (e2e_watch_extra_pvc_names | default([])) + _e2e_local_pvcs_discovered) | unique | list }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Galera DB / wsrep snapshot (start PVC remediation wait)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "start PVC deletion / volume-change poll"
+
+    # Wrap oc in timeout so a stuck API cannot hang the whole until-loop with no log lines.
+    # Do not reference the task register (pvc_poll_one) inside this shell — avoids templating edge cases.
+    - name: Poll until PVC deleted or volume changed (StatefulSet recreates PVC with same name)
+      ansible.builtin.shell: |
+        echo "[$(date -Iseconds)] pvc poll (max wait {{ e2e_pvc_deleted_timeout_seconds }}s, interval {{ e2e_pvc_poll_interval_seconds }}s)"
+        INITIAL_VOL="{{ e2e_initial_pvc_volume_name }}"
+        OC_TO="{{ e2e_oc_cmd_timeout_seconds | default(90) }}"
+        vol=$(timeout "$OC_TO" {{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o jsonpath='{.spec.volumeName}' 2>/dev/null)
+        r=$?
+        if [[ $r -eq 124 ]]; then echo "oc get jsonpath timed out after ${OC_TO}s"; exit 1; fi
+        if [[ $r -ne 0 ]]; then
+          echo "PVC deleted (success)"
+          exit 0
+        fi
+        if [[ -n "$vol" && "$vol" != "$INITIAL_VOL" ]]; then
+          echo "PVC volume changed (old deleted, StatefulSet recreated with new PV) – success"
+          exit 0
+        fi
+        timeout "$OC_TO" {{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o wide 2>&1 || echo "(oc get -o wide timed out)"
+        WATCH="{{ e2e_watched_pvcs_for_monitoring | join(' ') }}"
+        if [[ -n "${WATCH// }" ]]; then
+          echo "--- watched PVCs (test + extras + discovered on failed node) ---"
+          for p in $WATCH; do
+            if [[ -z "$p" ]]; then continue; fi
+            if vol_w=$(timeout "$OC_TO" {{ oc_bin }} get pvc -n {{ e2e_workload_ns }} "$p" -o jsonpath='{.spec.volumeName}' 2>/dev/null); then
+              if [[ -z "$vol_w" ]]; then
+                echo "  $p: exists, no volumeName yet (Pending/unbound)"
+              else
+                echo "  $p: volumeName=$vol_w"
+              fi
+            else
+              echo "  $p: not found (deleted)"
+            fi
+          done
+        fi
+        echo "rc=1 (still waiting)"
+        exit 1
+      register: pvc_poll_one
+      until: pvc_poll_one.rc == 0
+      retries: "{{ ((e2e_pvc_deleted_timeout_seconds | int) / (e2e_pvc_poll_interval_seconds | int)) | int }}"
+      delay: "{{ e2e_pvc_poll_interval_seconds | int }}"
+      failed_when: false
+      timeout: "{{ ((e2e_oc_cmd_timeout_seconds | default(90)) | int) + 30 }}"
+      vars:
+        e2e_pvc_max_attempts: "{{ ((e2e_pvc_deleted_timeout_seconds | int) / (e2e_pvc_poll_interval_seconds | int)) | int }}"
+
+    - name: Assert remediated or show diagnostics
+      block:
+        - name: Fail if PVC was not remediated within timeout
+          ansible.builtin.fail:
+            msg: "PVC {{ test_pvc_name }} was not deleted (or volume changed) within {{ e2e_pvc_deleted_timeout_seconds }}s (last rc={{ pvc_poll_one.rc }})."
+          when: pvc_poll_one.rc != 0
+      rescue:
+        - name: Diagnostics – PVC still exists after timeout
+          ansible.builtin.debug:
+            msg: |
+              E2E timeout: PVC {{ test_pvc_name }} was not deleted within {{ e2e_pvc_deleted_timeout_seconds }}s.
+              Check the following to understand why PodRemediator did not delete it:
+        - name: Show PodRemediator CR status
+          ansible.builtin.shell: |
+            {{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o wide 2>/dev/null || true
+            {{ oc_bin }} get podremediator -n {{ e2e_operator_ns }} -o jsonpath='{range .items[*]}{.metadata.name}{"\n  conditions: "}{.status.conditions}{"\n"}{end}' 2>/dev/null || true
+          register: diag_pr
+          changed_when: false
+          failed_when: false
+        - name: Display PodRemediator status
+          ansible.builtin.debug:
+            var: diag_pr.stdout_lines
+        - name: Show NHC status (unhealthy node detection)
+          ansible.builtin.shell: |
+            {{ oc_bin }} get nodehealthchecks -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n  conditions: "}{.status.conditions}{"\n"}{end}' 2>/dev/null || true
+          register: diag_nhc
+          changed_when: false
+          failed_when: false
+        - name: Display NHC status
+          ansible.builtin.debug:
+            var: diag_nhc.stdout_lines
+        - name: Show node status (test node should be NotReady)
+          ansible.builtin.shell: |
+            {{ oc_bin }} get node {{ hostvars['controller0']['e2e_test_node_name'] }} -o wide 2>/dev/null || true
+          register: diag_node
+          changed_when: false
+          failed_when: false
+        - name: Display node status
+          ansible.builtin.debug:
+            var: diag_node.stdout_lines
+        - name: Hint – pod/PV node mismatch, timeout, or operator logs
+          ansible.builtin.debug:
+            msg: |
+              If the test failed: (1) Ensure pod and PVC's PV are on the same node (the play 'E2E – Assert pod and PVC PV are on the same node' checks this before virsh destroy).
+              (2) If NHC/SNR take longer, re-run with -e "e2e_pvc_deleted_timeout_seconds=1800" (30 min).
+              (3) PodRemediator skips PVCs with no volumeName (Pending/unbound) and non-local PVs — check: oc get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o yaml
+              (4) Check infra-operator logs: oc logs -n {{ e2e_operator_ns }} -l app.kubernetes.io/name=infra-operator --tail=200
+              Look for "Skipping PVC (unbound)", "Skipping PVC (node not unhealthy)", "Skipping PVC (PV not local)".
+        - name: Galera lab – clear wsrep_desync after E2E failure
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-spread-cleanup.yml"
+          vars:
+            e2e_sts_name: "{{ e2e_statefulset_name | default('openstack-galera', true) }}"
+          when:
+            - e2e_galera_wsrep_spread_before_fault | default(false) | bool
+            - (e2e_statefulset_name | default('')) | lower is search('galera')
+        - name: Fail the play after diagnostics
+          ansible.builtin.fail:
+            msg: "PVC {{ test_pvc_name }} still exists after {{ e2e_pvc_deleted_timeout_seconds }}s. See diagnostics above. Increase e2e_pvc_deleted_timeout_seconds or check NHC/SNR and PodRemediator."
+
+    - name: Get current PVC volume name (if PVC exists – StatefulSet may have recreated it)
+      ansible.builtin.shell: |
+        {{ oc_bin }} get pvc -n {{ e2e_workload_ns }} {{ test_pvc_name }} -o jsonpath='{.spec.volumeName}' 2>/dev/null
+      register: pvc_after_volume
+      changed_when: false
+      failed_when: false
+
+    - name: Assert PVC was remediated (deleted or volume changed; StatefulSet recreates same name)
+      ansible.builtin.assert:
+        that: pvc_after_volume.rc != 0 or (pvc_after_volume.stdout | trim) != (e2e_initial_pvc_volume_name | trim)
+        fail_msg: "E2E failed: PVC {{ test_pvc_name }} still exists with same volume. PodRemediator did not remediate it."
+        success_msg: "E2E passed: PodRemediator remediated the PVC (deleted or volume changed when node became NotReady)."
+
+    - name: Post-remediation — watched PVCs (observe multiple deletions on same node)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        NS="{{ e2e_workload_ns }}"
+        OC="{{ oc_bin }}"
+        OC_TO="{{ e2e_oc_cmd_timeout_seconds | default(90) }}"
+        echo "Watched PVC count: {{ e2e_watched_pvcs_for_monitoring | length }}"
+        for p in {{ e2e_watched_pvcs_for_monitoring | join(' ') }}; do
+          if [[ -z "$p" ]]; then continue; fi
+          if vol_w=$(timeout "$OC_TO" "$OC" get pvc -n "$NS" "$p" -o jsonpath='{.spec.volumeName}' 2>/dev/null); then
+            if [[ -z "$vol_w" ]]; then
+              echo "  $p: exists, no volumeName (Pending/unbound)"
+            else
+              echo "  $p: volumeName=$vol_w"
+            fi
+          else
+            echo "  $p: not found (deleted)"
+          fi
+        done
+      register: e2e_watched_pvcs_post_remediate
+      changed_when: false
+      when: (e2e_watched_pvcs_for_monitoring | length) > 0
+
+    - name: Show post-remediation watched PVC lines
+      ansible.builtin.debug:
+        var: e2e_watched_pvcs_post_remediate.stdout_lines
+      when:
+        - (e2e_watched_pvcs_for_monitoring | length) > 0
+        - e2e_watched_pvcs_post_remediate is defined
+
+    - name: Galera DB / wsrep snapshot (PVC remediated)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "PVC remediated (deleted or new volumeName)"
+
+- name: E2E – Wait for StatefulSet pod to be rescheduled (simulates Galera/RabbitMQ recovery)
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_sts_name: "{{ e2e_statefulset_name | default('test-podremediator') }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+    e2e_pod_reschedule_timeout_s: "{{ e2e_pod_reschedule_timeout_seconds | default(300) }}"
+    e2e_pod_reschedule_poll_seconds: 15
+    e2e_pod_ready_wait_s: "{{ e2e_pod_ready_wait_seconds | default(0) }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Poll until StatefulSet pod is Running again (rescheduled on another node)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n {{ e2e_workload_ns }} {{ test_pod_name }} -o jsonpath='{.status.phase}'"
+      register: pod_phase_check
+      until: pod_phase_check.stdout == 'Running'
+      retries: "{{ ((e2e_pod_reschedule_timeout_s | int) / e2e_pod_reschedule_poll_seconds) | int }}"
+      delay: "{{ e2e_pod_reschedule_poll_seconds }}"
+      failed_when: false
+
+    - name: Wait for pod Ready condition (optional – e.g. RabbitMQ after Mnesia sync)
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} wait pod/{{ test_pod_name }} -n {{ e2e_workload_ns }} --for=condition=Ready --timeout={{ e2e_pod_ready_wait_s }}s"
+      register: pod_ready_wait
+      changed_when: false
+      failed_when: false
+      when: (e2e_pod_ready_wait_s | int) > 0
+
+    - name: Fail if optional Ready wait failed
+      ansible.builtin.fail:
+        msg: "Pod {{ test_pod_name }} did not become Ready within {{ e2e_pod_ready_wait_s }}s (oc wait)."
+      when:
+        - (e2e_pod_ready_wait_s | int) > 0
+        - pod_ready_wait is defined
+        - pod_ready_wait.rc != 0
+
+    - name: Get node where rescheduled pod is running
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get pod -n {{ e2e_workload_ns }} {{ test_pod_name }} -o jsonpath='{.spec.nodeName}'"
+      register: pod_rescheduled_node
+      changed_when: false
+
+    - name: Show where the pod was rescheduled (StatefulSet recovery)
+      ansible.builtin.debug:
+        msg: "StatefulSet pod {{ test_pod_name }} is Running on node {{ pod_rescheduled_node.stdout }} (was on {{ hostvars['controller0']['e2e_test_node_name'] }} before node failure). Reschedule OK."
+      when: pod_rescheduled_node.stdout | length > 0
+
+    - name: Galera DB / wsrep snapshot (test pod Running after reschedule)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool
+      vars:
+        wsrep_monitor_stage: "StatefulSet test pod Running (post-reschedule)"
+
+    - name: Fail if pod did not come back within timeout
+      ansible.builtin.fail:
+        msg: "Pod {{ test_pod_name }} did not become Running within {{ e2e_pod_reschedule_timeout_s }}s. StatefulSet may not have recreated it yet."
+      when: pod_phase_check.stdout != 'Running'
+
+- name: E2E – Restore node (virsh start VM on had-18)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  vars:
+    _e2e_skip_restore: "{{ e2e_skip_restore | default(false) | bool }}"
+    _e2e_node_name_restore: "{{ hostvars['controller0']['e2e_test_node_name'] | default('') }}"
+    _e2e_virsh_prefix_restore: "{{ e2e_virsh_domain_prefix if (e2e_virsh_domain_prefix is defined and e2e_virsh_domain_prefix != '') else 'cifmw-ocp-' }}"
+    e2e_virsh_domain_restore: "{{ e2e_virsh_domain | default(_e2e_virsh_prefix_restore + _e2e_node_name_restore) }}"
+  tasks:
+    - name: Start VM (restore node)
+      ansible.builtin.command:
+        cmd: virsh start "{{ e2e_virsh_domain_restore }}"
+      when: not _e2e_skip_restore
+      register: virsh_start
+      failed_when: virsh_start.rc != 0
+
+    - name: Skip restore (e2e_skip_restore=true)
+      ansible.builtin.debug:
+        msg: "Restore skipped. Start the VM manually: virsh start <domain>"
+      when: _e2e_skip_restore
+
+- name: E2E – Wait for node to become Ready again
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    test_pod_name: "{{ e2e_test_pod_name | default('test-podremediator-0') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+    - name: Poll until node is Ready again
+      ansible.builtin.shell: |
+        set -e
+        node="{{ e2e_test_node_name }}"
+        for i in $(seq 1 60); do
+          status=$({{ oc_bin }} get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "Unknown")
+          if [[ "$status" == "True" ]]; then
+            echo "Node is Ready"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "Timeout waiting for Ready"
+        exit 1
+      args:
+        executable: /bin/bash
+      when: not (e2e_skip_restore | default(false) | bool)
+      register: poll_ready
+      failed_when: poll_ready.rc != 0
+
+    - name: Galera DB / wsrep snapshot (worker node Ready again)
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-monitor.yml"
+      when: e2e_galera_wsrep_monitor | default(false) | bool and not (e2e_skip_restore | default(false) | bool)
+      vars:
+        wsrep_monitor_stage: "target worker node Ready after virsh start"
+
+- name: E2E – Optional Galera post-recovery DB assert
+  hosts: controllers
+  gather_facts: false
+  vars:
+    e2e_workload_ns: "{{ lookup('ansible.builtin.vars', 'e2e_workload_namespace', default='openstack-operators') }}"
+    e2e_statefulset_name: "{{ lookup('ansible.builtin.vars', 'e2e_statefulset_name', default('')) }}"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _server) if (_server | length > 0) else '' }}"
+  tasks:
+    - name: Galera post-recovery DB assert (wsrep healthy)
+      when: e2e_galera_wsrep_monitor | default(false) | bool and (e2e_galera_wsrep_assert_final | default(true) | bool)
+      block:
+        - name: OC login
+          ansible.builtin.shell: |
+            timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+          args:
+            executable: /bin/bash
+          changed_when: false
+          timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 5 }}"
+
+        - name: Assert Galera wsrep healthy (size = STS replicas, Primary, Synced)
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-assert-final.yml"
+
+- name: E2E – Summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: E2E test completed
+      ansible.builtin.debug:
+        msg: |
+          E2E PodRemediator PVC remediation test completed.
+          VM was destroyed (virsh destroy); node went NotReady; NHC/SNR detected the failure;
+          PodRemediator deleted the test PVC; StatefulSet recreated the pod on another node.
+          VM was restarted (virsh start). The test pod (StatefulSet) stays running.
+      when: true

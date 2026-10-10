@@ -1,0 +1,615 @@
+# PodRemediator POC – single playbook (optional bootstrap + steps 1–7).
+# Run from infra-operator repo root.
+#
+# The playbook is designed to be **launched from the jump host** (not on controller-0). Ansible runs on the jump host;
+# steps that need the cluster (oc, kubernetes API) run on controller0 via SSH (hosts: controllers).
+# Virsh checks run on the jump host (localhost). So: execute ansible-playbook on the jump host.
+#
+# From laptop (inventory with jump host + controller0 via ProxyCommand; cwd = repo root):
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory.yml \
+#     test-kit/podremediator/playbooks/runbook-podremediator-poc.yml -e "custom_operator_image=quay.io/...@sha256:..."
+#   # optional: add SSH key to controller-0 before connecting:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory.yml \
+#     test-kit/podremediator/playbooks/runbook-podremediator-poc.yml -e "bootstrap_controller0_ssh=true" -e "custom_operator_image=..."
+#
+# From the jump host (inventory without jump; recommended):
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/runbook-podremediator-poc.yml -e "custom_operator_image=..."
+#   If oc is not in PATH on controller0: -e "oc_cmd=/home/zuul/bin/oc"
+#
+# Variables: custom_operator_image (required for step 2), oc_cmd (default: oc; use /home/zuul/bin/oc on controller0 if needed),
+#   oc_api_server (optional; e.g. https://api.ocp.openstack.lab:6443 – avoids oc login hang after jump host/cluster redeploy),
+#   oc_login_timeout_seconds (default 45), bootstrap_controller0_ssh (default false), run_local_pvc_test, run_smoke_test (default true).
+
+---
+- name: "(Optional) Bootstrap – load SSH public key for controller-0"
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  tasks:
+    - name: Set public key path (explicit or default)
+      ansible.builtin.set_fact:
+        _key_file: "{{ (ssh_pubkey_path | expanduser) if (ssh_pubkey_path | default('') | length > 0) else ((ansible_env.HOME + '/.ssh/id_ed25519.pub') if (ansible_env.HOME + '/.ssh/id_ed25519.pub') is file else (ansible_env.HOME + '/.ssh/id_rsa.pub')) }}"
+      when: bootstrap_controller0_ssh | default(false) | bool and (groups['jump_hosts'] is defined and groups['jump_hosts'] | length > 0)
+
+    - name: Fail if no public key file found (bootstrap requested)
+      ansible.builtin.fail:
+        msg: "No SSH public key found. Set ssh_pubkey_path= or create ~/.ssh/id_ed25519.pub / id_rsa.pub"
+      when: (bootstrap_controller0_ssh | default(false) | bool and (groups['jump_hosts'] is defined and groups['jump_hosts'] | length > 0)) and (_key_file is not defined or _key_file is not file)
+
+    - name: Load public key content
+      ansible.builtin.set_fact:
+        ssh_pubkey_content: "{{ lookup('file', _key_file) }}"
+      when: bootstrap_controller0_ssh | default(false) | bool and (groups['jump_hosts'] is defined and groups['jump_hosts'] | length > 0) and _key_file is file
+
+    - name: Show which key will be deployed
+      ansible.builtin.debug:
+        msg: "Will add key from {{ _key_file }} to zuul@controller-0"
+      when: bootstrap_controller0_ssh | default(false) | bool and (groups['jump_hosts'] is defined and groups['jump_hosts'] | length > 0)
+
+- name: "(Optional) Bootstrap – deploy key to zuul@controller-0 from jump host"
+  hosts: jump_hosts
+  gather_facts: false
+  vars:
+    controller0_host: "{{ hostvars['controller0']['ansible_host'] | default('<controller-host>') }}"
+  tasks:
+    - name: Copy public key to jump host
+      ansible.builtin.copy:
+        content: "{{ hostvars['localhost']['ssh_pubkey_content'] }}"
+        dest: /tmp/controller0_bootstrap_key.pub
+        mode: '0644'
+      when: bootstrap_controller0_ssh | default(false) | bool
+
+    - name: Append key to zuul@controller-0 authorized_keys
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 zuul@{{ controller0_host }} \
+          "mkdir -p .ssh && chmod 700 .ssh && grep -qF \"$(cat /tmp/controller0_bootstrap_key.pub)\" .ssh/authorized_keys 2>/dev/null || cat /tmp/controller0_bootstrap_key.pub >> .ssh/authorized_keys && chmod 600 .ssh/authorized_keys"
+      args:
+        executable: /bin/bash
+      register: _deploy
+      changed_when: "_deploy.rc == 0"
+      when: bootstrap_controller0_ssh | default(false) | bool
+
+    - name: Remove temp key from jump host
+      ansible.builtin.file:
+        path: /tmp/controller0_bootstrap_key.pub
+        state: absent
+      when: bootstrap_controller0_ssh | default(false) | bool
+
+    - name: Confirm key deployed
+      ansible.builtin.debug:
+        msg: "Key added to zuul@{{ controller0_host }}. Continuing with POC steps."
+      when: bootstrap_controller0_ssh | default(false) | bool
+
+- name: Set repo root (relative to playbook dir)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Set repo_root fact (repo root = three levels above playbook_dir; entry playbooks live under test-kit/podremediator/playbooks/)
+      ansible.builtin.set_fact:
+        repo_root: "{{ playbook_dir }}/../../.."
+    - name: Set repo_root for other hosts
+      ansible.builtin.set_fact:
+        repo_root: "{{ playbook_dir }}/../../.."
+      delegate_to: "{{ item }}"
+      delegate_facts: true
+      loop: "{{ groups['controllers'] | default([]) }}"
+      when: groups['controllers'] is defined
+
+# When run from the jump host (inventory-from-jumphost.yml defines virsh_hosts): start worker VMs if shut off, then ensure all are running.
+- name: Start worker VMs when down, then ensure running (virsh on jump host)
+  hosts: virsh_hosts
+  gather_facts: false
+  vars:
+    _worker_pattern: "{{ virsh_worker_domain_pattern | default('worker') }}"
+  tasks:
+    - name: Get shut-off domain names (virsh)
+      ansible.builtin.command: virsh list --state-shutoff --name
+      register: virsh_shutoff
+      changed_when: false
+      failed_when: false
+
+    - name: Set list of shut-off worker domains to start
+      ansible.builtin.set_fact:
+        _shutoff_worker_domains: "{{ (virsh_shutoff.stdout_lines | default([]) | select('search', _worker_pattern) | list) }}"
+
+    - name: Start worker VM(s) when down
+      ansible.builtin.command: virsh start {{ item }}
+      loop: "{{ _shutoff_worker_domains }}"
+      when: _shutoff_worker_domains | length > 0
+      register: _start_result
+
+    - name: Pause after starting worker VMs (allow them to boot)
+      ansible.builtin.pause:
+        seconds: "{{ 45 }}"
+      when: _shutoff_worker_domains | length > 0 and (_start_result.results | default([]) | selectattr('changed', 'equalto', true) | list | length > 0)
+
+    - name: Get virsh list of all domains (for final check)
+      ansible.builtin.command: virsh list --all
+      register: virsh_list
+      changed_when: false
+
+    - name: Ensure no worker VMs are shut off
+      ansible.builtin.assert:
+        that: >
+          (virsh_list.stdout_lines | default([]) | select('search', 'shut off') | select('search', _worker_pattern) | list | length) == 0
+        fail_msg: "Some worker VM(s) are still shut off after start attempt. Start them manually: virsh start <domain>. Output: {{ virsh_list.stdout_lines }}"
+        success_msg: "All worker VMs (matching '{{ _worker_pattern }}') are running."
+
+- name: Step 1 – Verify cluster (controller0)
+  hosts: controllers
+  gather_facts: true
+  become: false
+  vars:
+    operator_namespace: openstack-operators
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+  tasks:
+    - name: Get API server from kubeconfig (avoids oc login hang after redeploy)
+      ansible.builtin.shell: |
+        awk '/server:/{print $2; exit}' {{ kubeconfig_path }} 2>/dev/null || true
+      register: kubeconfig_server
+      changed_when: false
+      failed_when: false
+
+    - name: Set API server fact for oc login
+      ansible.builtin.set_fact:
+        oc_api_server_auto: "{{ (kubeconfig_server.stdout | trim) if (kubeconfig_server.stdout is defined and kubeconfig_server.stdout | trim | length > 0) else '' }}"
+
+    - name: OC login to cluster
+      ansible.builtin.shell: |
+        SERVER="{{ oc_api_server | default(oc_api_server_auto | default('')) }}"
+        if [[ -n "$SERVER" ]]; then
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login --server="$SERVER" -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        else
+          timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login -u kubeadmin -p "$(cat {{ kubeadmin_password_file }})" --insecure-skip-tls-verify
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 10 }}"
+
+    - name: Get nodes
+      ansible.builtin.command: "{{ oc_bin }} get nodes --no-headers"
+      register: oc_nodes
+      changed_when: false
+
+    - name: Ensure cluster has nodes
+      ansible.builtin.assert:
+        that: oc_nodes.stdout_lines | length > 0
+        fail_msg: "No nodes returned by oc get nodes"
+        success_msg: "Cluster has {{ oc_nodes.stdout_lines | length }} node(s)"
+
+    - name: Get worker nodes (name and Ready status)
+      ansible.builtin.shell: |
+        {{ oc_bin }} get nodes -l node-role.kubernetes.io/worker -o jsonpath='{range .items[*]}{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}'
+      register: worker_nodes_status
+      changed_when: false
+
+    - name: Ensure all worker nodes are Ready and schedulable
+      ansible.builtin.assert:
+        that: >
+          (worker_nodes_status.stdout_lines | default([]) | reject('search', ' False') | list | length == worker_nodes_status.stdout_lines | default([]) | length)
+          and (worker_nodes_status.stdout_lines | default([]) | length) > 0
+        fail_msg: "Not all worker nodes are Ready. Start worker VMs on the jump host (virsh start <domain>), wait for nodes to become Ready, then re-run. Current: {{ worker_nodes_status.stdout_lines | default([]) }}"
+        success_msg: "All {{ worker_nodes_status.stdout_lines | default([]) | length }} worker node(s) are Ready."
+
+    - name: Check Python kubernetes library (required by kubernetes.core for Step 2+)
+      ansible.builtin.command: python3 -c "import kubernetes"
+      register: python_kubernetes_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install python3-kubernetes on controller0 when missing
+      ansible.builtin.dnf:
+        name: python3-kubernetes
+        state: present
+      when: python_kubernetes_check.rc != 0
+      become: true
+
+    - name: Install python3-cryptography on controller0 when kubernetes was missing (dependency for google.auth)
+      ansible.builtin.dnf:
+        name: python3-cryptography
+        state: present
+      when: python_kubernetes_check.rc != 0
+      become: true
+
+    - name: Re-check Python kubernetes library after install
+      ansible.builtin.command: python3 -c "import kubernetes"
+      register: python_kubernetes_recheck
+      changed_when: false
+      when: python_kubernetes_check.rc != 0
+
+    - name: Fail if Python kubernetes library still missing after install
+      ansible.builtin.fail:
+        msg: |
+          python3-kubernetes (or a dependency) is still not usable on controller0 (required by Ansible kubernetes.core for Steps 2–7).
+          Install on controller0: dnf install -y python3-kubernetes python3-cryptography
+      when: python_kubernetes_check.rc != 0 and python_kubernetes_recheck.rc != 0
+
+- name: Step 2 – Deploy custom infra-operator image (controller0)
+  hosts: controllers
+  gather_facts: false
+  become: false
+  vars:
+    operator_namespace: openstack-operators
+    openstack_operator_deployments_to_scale:
+      - openstack-operator-controller-manager
+      - openstack-operator-controller-init
+      - openstack-operator-controller-operator
+    infra_operator_deployment: infra-operator-controller-manager
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _oc_server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _oc_server) if (_oc_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ controller_user_home }}/.kube/kubeadmin-password)" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 10 }}"
+
+    - name: Check if OpenStack operator deployment exists
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: "{{ item }}"
+        namespace: "{{ operator_namespace }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: osp_deploy_check
+      loop: "{{ openstack_operator_deployments_to_scale }}"
+      ignore_errors: true
+
+    - name: Scale down OpenStack operator deployment (only if present)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ item.item }}"
+            namespace: "{{ operator_namespace }}"
+          spec:
+            replicas: 0
+        kubeconfig: "{{ kubeconfig_path }}"
+      loop: "{{ osp_deploy_check.results }}"
+      when: (item.resources | default([]) | length) > 0
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Patch infra-operator deployment image
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ infra_operator_deployment }}"
+            namespace: "{{ operator_namespace }}"
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: manager
+                    image: "{{ custom_operator_image }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      when: custom_operator_image is defined and custom_operator_image | length > 0
+
+    # Rollout can hang if: new pod ImagePullBackOff/CrashLoopBackOff, readiness probe not passing, or old pod stuck Terminating. Next tasks show state and on timeout dump pod describe + events.
+    - name: Show deployment status and pods before rollout wait
+      ansible.builtin.shell: |
+        echo "=== Deployment ==="
+        {{ oc_bin }} get deployment "{{ infra_operator_deployment }}" -n "{{ operator_namespace }}" -o wide 2>/dev/null || true
+        {{ oc_bin }} get deployment "{{ infra_operator_deployment }}" -n "{{ operator_namespace }}" -o jsonpath='{range .status.conditions[*]}{.type}: {.status} - {.message}{"\n"}{end}' 2>/dev/null || true
+        echo ""
+        echo "=== Pods (control-plane=controller-manager) ==="
+        {{ oc_bin }} get pods -n "{{ operator_namespace }}" -l control-plane=controller-manager -o wide 2>/dev/null || true
+        echo ""
+        echo "=== Recent events (namespace {{ operator_namespace }}) ==="
+        {{ oc_bin }} get events -n "{{ operator_namespace }}" --sort-by='.lastTimestamp' 2>/dev/null | tail -25
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: custom_operator_image is defined and custom_operator_image | length > 0
+
+    - name: Wait for infra-operator deployment rollout
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} rollout status deployment/{{ infra_operator_deployment }} -n {{ operator_namespace }} --timeout=300s"
+      register: rollout_status
+      failed_when: false
+      when: custom_operator_image is defined and custom_operator_image | length > 0
+
+    - name: Show why rollout did not complete (pods and events)
+      ansible.builtin.shell: |
+        echo "=== Rollout status failed; showing pod details and events ==="
+        {{ oc_bin }} get pods -n "{{ operator_namespace }}" -l control-plane=controller-manager -o wide
+        for p in $({{ oc_bin }} get pods -n "{{ operator_namespace }}" -l control-plane=controller-manager -o jsonpath='{.items[*].metadata.name}'); do
+          echo "--- describe pod $p ---"
+          {{ oc_bin }} describe pod "$p" -n "{{ operator_namespace }}" | tail -50
+        done
+        echo "=== Recent events ==="
+        {{ oc_bin }} get events -n "{{ operator_namespace }}" --sort-by='.lastTimestamp' | tail -40
+      args:
+        executable: /bin/bash
+      when: custom_operator_image is defined and (rollout_status is defined and rollout_status.get('rc', -1) != 0)
+      changed_when: false
+
+    - name: Fail if rollout did not complete
+      ansible.builtin.fail:
+        msg: "infra-operator deployment rollout did not complete within timeout. Check task output above for pod/events."
+      when: custom_operator_image is defined and (rollout_status is defined and rollout_status.get('rc', -1) != 0)
+
+# Step 3 applies CRD and RBAC: podremediator_cluster_setup.yaml (CRD), config/rbac/role.yaml (ClusterRole),
+# config/podremediator_role_binding.yaml (ClusterRoleBinding to openstack-operators SA). Re-applying RBAC
+# ensures the controller can list/watch nodes, PVCs, podremediators (as per lmiccini).
+- name: Step 3 – Apply PodRemediator CRD and RBAC (controller0)
+  hosts: controllers
+  gather_facts: false
+  become: false
+  vars:
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    cluster_setup_file: "{{ repo_root }}/config/podremediator_cluster_setup.yaml"
+    rbac_role_file: "{{ repo_root }}/config/rbac/role.yaml"
+    rbac_binding_file: "{{ repo_root }}/config/podremediator_role_binding.yaml"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _oc_server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _oc_server) if (_oc_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ controller_user_home }}/.kube/kubeadmin-password)" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 10 }}"
+
+    - name: Load cluster setup and RBAC YAML (CRD + ClusterRole + ClusterRoleBinding)
+      ansible.builtin.set_fact:
+        cluster_setup_docs: "{{ (lookup('file', cluster_setup_file) | from_yaml_all) + (lookup('file', rbac_role_file) | from_yaml_all) + (lookup('file', rbac_binding_file) | from_yaml_all) }}"
+
+    - name: Apply each resource from cluster setup and RBAC
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+      loop: "{{ cluster_setup_docs }}"
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name | default('') }}"
+
+# Step 4 runs on the jump host (localhost). Copy kubeconfig from controller0 via zuul's SSH (ssh controller-0),
+# then run NHC/SNR playbook as zuul so /home/zuul/.kube/config is used.
+- name: Step 4 – Install NHC and SNR (on jump host)
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+  vars:
+    ci_framework_repo: "https://github.com/openstack-k8s-operators/ci-framework.git"
+    ci_framework_path: "/tmp/ci-framework"
+    nhc_playbook_path: "{{ ci_framework_path }}/playbook-nhc-snr.yml"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    # Short host name so zuul's ~/.ssh/config is used (e.g. controller-0 -> <controller-host>)
+    controller0_ssh_host: "{{ controller0_ssh_host_var | default('controller-0') }}"
+  tasks:
+    - name: Ensure .kube exists on jump host (for kubeconfig from controller0)
+      ansible.builtin.file:
+        path: "{{ controller_user_home }}/.kube"
+        state: directory
+        mode: "0700"
+        owner: zuul
+        group: zuul
+
+    - name: Ensure kubeconfig and kubeadmin password path writable by zuul (fix ownership from previous root runs)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: touch
+        mode: "0600"
+        owner: zuul
+        group: zuul
+      loop:
+        - "{{ kubeconfig_path }}"
+        - "{{ kubeadmin_password_file }}"
+
+    - name: Copy kubeconfig from controller0 to jump host (ssh controller-0 as zuul)
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ controller0_ssh_host }} "cat {{ controller_user_home }}/.kube/config" > {{ kubeconfig_path }}
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: zuul
+      changed_when: true
+
+    - name: Copy kubeadmin password from controller0 to jump host
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ controller0_ssh_host }} "cat {{ kubeadmin_password_file }}" > {{ kubeadmin_password_file }}
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: zuul
+      changed_when: true
+
+    # ansible.builtin.git may run clone and fail if dest exists (even with a broken/partial .git).
+    # Always remove the path first so clone is reliable on re-runs.
+    - name: Remove existing ci-framework path before clone (on jump host)
+      ansible.builtin.file:
+        path: "{{ ci_framework_path }}"
+        state: absent
+      become: true
+
+    - name: Clone ci-framework (on jump host)
+      ansible.builtin.git:
+        repo: "{{ ci_framework_repo }}"
+        dest: "{{ ci_framework_path }}"
+        version: main
+        depth: 1
+        force: true
+
+    - name: Copy NHC/SNR playbook to ci-framework dir (on jump host)
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/test-kit/podremediator/playbooks/playbook-nhc-snr.yml"
+        dest: "{{ nhc_playbook_path }}"
+        mode: "0644"
+
+    - name: Run cifmw_snr_nhc playbook on jump host (as zuul so kubeconfig is used)
+      ansible.builtin.shell: |
+        cd {{ ci_framework_path }} && ansible-playbook -i localhost, playbook-nhc-snr.yml
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: zuul
+      environment:
+        KUBECONFIG: "{{ kubeconfig_path }}"
+      changed_when: true
+
+- name: Step 5 – Create PodRemediator CR (controller0)
+  hosts: controllers
+  gather_facts: false
+  become: false
+  vars:
+    operator_namespace: openstack-operators
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    podremediator_sample_file: "{{ repo_root }}/config/samples/remediation_v1beta1_podremediator.yaml"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _oc_server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _oc_server) if (_oc_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ controller_user_home }}/.kube/kubeadmin-password)" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 10 }}"
+
+    - name: Load PodRemediator sample
+      ansible.builtin.set_fact:
+        podremediator_cr: "{{ lookup('file', podremediator_sample_file) | from_yaml }}"
+
+    - name: Ensure PodRemediator CR exists
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ podremediator_cr }}"
+        namespace: "{{ operator_namespace }}"
+        kubeconfig: "{{ kubeconfig_path }}"
+
+- name: Step 6 – Optional local PVC test (StatefulSet; same manifests as first phase of test-e2e-podremediator-pvc-remediation.yml)
+  hosts: controllers
+  gather_facts: false
+  become: false
+  vars:
+    kubeadmin_password_file: "{{ controller_user_home }}/.kube/kubeadmin-password"
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+  tasks:
+    - name: StatefulSet local-PVC test workload (shared task file)
+      ansible.builtin.import_tasks: "{{ playbook_dir }}/../tasks/deploy-local-pvc-statefulset.yml"
+      when: run_local_pvc_test | default(true) | bool
+
+- name: Step 7 – Smoke test (controller0)
+  hosts: controllers
+  gather_facts: false
+  become: false
+  vars:
+    operator_namespace: openstack-operators
+    kubeconfig_path: "{{ controller_user_home }}/.kube/config"
+    oc_bin: "{{ oc_cmd | default('oc') }}"
+    _oc_server: "{{ oc_api_server | default(hostvars['controller0']['oc_api_server_auto'] | default('')) }}"
+    oc_login_server: "{{ ('--server=' + _oc_server) if (_oc_server | length > 0) else '' }}"
+  tasks:
+    - name: OC login
+      ansible.builtin.shell: |
+        timeout {{ oc_login_timeout_seconds | default(45) }} {{ oc_bin }} login {{ oc_login_server }} -u kubeadmin -p "$(cat {{ controller_user_home }}/.kube/kubeadmin-password)" --insecure-skip-tls-verify
+      args:
+        executable: /bin/bash
+      changed_when: false
+      timeout: "{{ (oc_login_timeout_seconds | default(45)) | int + 10 }}"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – CRD podremediators.remediation.openstack.org"
+      kubernetes.core.k8s_info:
+        kind: CustomResourceDefinition
+        name: podremediators.remediation.openstack.org
+        kubeconfig: "{{ kubeconfig_path }}"
+      register: smoke_crd
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert CRD exists
+      ansible.builtin.assert:
+        that: smoke_crd.resources | length > 0
+        fail_msg: "CRD podremediators.remediation.openstack.org not found"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – infra-operator pod Running"
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} -n {{ operator_namespace }} get pods -l app.kubernetes.io/name=infra-operator --no-headers"
+      register: smoke_pods
+      changed_when: false
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert at least one infra-operator pod is Running
+      ansible.builtin.assert:
+        that: smoke_pods.stdout is search('Running')
+        fail_msg: "No Running infra-operator pod in {{ operator_namespace }}"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – NodeHealthCheck exists"
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get nodehealthchecks -A --no-headers"
+      register: smoke_nhc
+      changed_when: false
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert NodeHealthCheck exists
+      ansible.builtin.assert:
+        that: smoke_nhc.stdout | length > 0
+        fail_msg: "No NodeHealthCheck found"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – SelfNodeRemediationTemplate exists"
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get selfnoderemediationtemplates -A --no-headers"
+      register: smoke_snr
+      changed_when: false
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert SelfNodeRemediationTemplate exists
+      ansible.builtin.assert:
+        that: smoke_snr.stdout | length > 0
+        fail_msg: "No SelfNodeRemediationTemplate found"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – PodRemediator CR exists"
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get podremediator -n {{ operator_namespace }} --no-headers"
+      register: smoke_pr
+      changed_when: false
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert PodRemediator CR exists
+      ansible.builtin.assert:
+        that: smoke_pr.stdout | length > 0
+        fail_msg: "No PodRemediator CR in {{ operator_namespace }}"
+      when: run_smoke_test | default(true) | bool
+
+    - name: "Smoke check – PodRemediator Ready=True"
+      ansible.builtin.command:
+        cmd: "{{ oc_bin }} get podremediator -n {{ operator_namespace }} -o jsonpath='{.items[0].status.conditions[?(@.type==\"Ready\")].status}'"
+      register: smoke_ready
+      changed_when: false
+      failed_when: false
+      when: run_smoke_test | default(true) | bool
+
+    - name: Assert PodRemediator Ready
+      ansible.builtin.assert:
+        that: smoke_ready.stdout == "True"
+        fail_msg: "PodRemediator Ready={{ smoke_ready.stdout | default('') }} (expected True)"
+      when: run_smoke_test | default(true) | bool and smoke_ready is defined
+
+    - name: All smoke checks passed
+      ansible.builtin.debug:
+        msg: "All required checks passed."
+      when: run_smoke_test | default(true) | bool
