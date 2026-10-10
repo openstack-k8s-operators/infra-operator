@@ -44,7 +44,7 @@ var _ = Describe("InstanceHa webhook", func() {
 			Expect(instanceha.Spec.InstanceHaConfigMap).To(Equal("instanceha-config"))
 			Expect(instanceha.Spec.InstanceHaKdumpPort).To(Equal(int32(7410)))
 			Expect(instanceha.Spec.InstanceHaHeartbeatPort).To(Equal(int32(7411)))
-			Expect(instanceha.Spec.MetricsTLS.MinTLSVersion).To(Equal("1.2"))
+			Expect(instanceha.Spec.MetricsTLS.MinTLSVersion).To(Equal("1.3"))
 			Expect(instanceha.Spec.MetricsTLS.CipherSuites).To(Equal("HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"))
 		})
 
@@ -186,6 +186,44 @@ var _ = Describe("InstanceHa webhook", func() {
 					OpenStackCloud: "default",
 					MetricsTLS: instancehav1beta1.InstanceHaMetricsTLS{
 						CipherSuites: "HIGH:!NULL:!aNULL",
+					},
+				},
+			}
+
+			warnings, err := instanceha.ValidateCreate(ctx, k8sClient)
+			Expect(warnings).To(BeEmpty())
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should reject minTLSVersion 1.2 (no post-quantum key exchange)", func() {
+			instanceha := &instancehav1beta1.InstanceHa{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-create-tls12",
+					Namespace: "default",
+				},
+				Spec: instancehav1beta1.InstanceHaSpec{
+					OpenStackCloud: "default",
+					MetricsTLS: instancehav1beta1.InstanceHaMetricsTLS{
+						MinTLSVersion: "1.2",
+					},
+				},
+			}
+
+			_, err := instanceha.ValidateCreate(ctx, k8sClient)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("minTLSVersion"))
+		})
+
+		It("should accept minTLSVersion 1.3", func() {
+			instanceha := &instancehav1beta1.InstanceHa{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-create-tls13",
+					Namespace: "default",
+				},
+				Spec: instancehav1beta1.InstanceHaSpec{
+					OpenStackCloud: "default",
+					MetricsTLS: instancehav1beta1.InstanceHaMetricsTLS{
+						MinTLSVersion: "1.3",
 					},
 				},
 			}
