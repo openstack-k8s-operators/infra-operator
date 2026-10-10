@@ -49,6 +49,21 @@ const (
 	// AnnotationClientsReconfigured - set to "true" when dataplane clients have been
 	// reconfigured for quorum queues, allowing the proxy sidecar to be removed
 	AnnotationClientsReconfigured = "rabbitmq.openstack.org/clients-reconfigured"
+
+	// AnnotationRejoinCluster carries the PodRemediator request ID that authorizes
+	// the controller to repair this pod's cluster membership: forget the stale
+	// member from a surviving peer, then join this node back into the
+	// existing cluster. This is required because RabbitMQ 4.1+ designates the
+	// lowest-ordinal pod (server-0) as the peer-discovery seed node: if it is
+	// recreated with a blank data directory after a consented PVC replacement, it
+	// forms its own standalone cluster instead of rejoining. The request ID binds
+	// this destructive action to the PVC deletion consent; the controller removes
+	// the annotation after verifying cluster membership.
+	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
+
+	// RabbitMQRejoinReadyCondition gates Pod readiness until a consented replacement
+	// node has rejoined the RabbitMQ cluster.
+	RabbitMQRejoinReadyCondition = "rabbitmq.openstack.org/rejoin-ready"
 )
 
 // QueueType represents a RabbitMQ queue type
@@ -301,6 +316,47 @@ type RabbitmqClusterDefaultUser struct {
 	ServiceReference *RabbitmqClusterServiceReference `json:"serviceReference,omitempty"`
 }
 
+// PVCRemediationStatus captures the in-progress PVC remediation handshake
+// state for a single PVC as seen by the RabbitMq controller.
+type PVCRemediationStatus struct {
+	// PVCUID identifies the claim tracked by this status entry. A replacement
+	// PVC can reuse the same name, so the UID distinguishes recovery from an
+	// aborted deletion that left the original claim in place.
+	PVCUID string `json:"pvcUID,omitempty"`
+	// RequestID is the PodRemediator request whose consent authorized deletion
+	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
+	RequestID string `json:"requestID,omitempty"`
+	// QueueReplicaState records whether quorum queue replicas have been grown
+	// on the replacement node.
+	// +kubebuilder:validation:Enum=Pending;Grown
+	QueueReplicaState PVCRemediationQueueReplicaState `json:"queueReplicaState,omitempty"`
+	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
+	StuckNode string `json:"stuckNode,omitempty"`
+	// ConsentState records whether this controller has granted safe-to-delete consent.
+	// +kubebuilder:validation:Enum=Pending;Granted
+	ConsentState PVCRemediationConsentState `json:"consentState,omitempty"`
+}
+
+// PVCRemediationConsentState records the safe-to-delete consent state for one PVC.
+type PVCRemediationConsentState string
+
+const (
+	// PVCRemediationConsentPending means consent has not been granted.
+	PVCRemediationConsentPending PVCRemediationConsentState = "Pending"
+	// PVCRemediationConsentGranted means consent was persisted for this request.
+	PVCRemediationConsentGranted PVCRemediationConsentState = "Granted"
+)
+
+// PVCRemediationQueueReplicaState records queue replica recovery for one PVC.
+type PVCRemediationQueueReplicaState string
+
+const (
+	// PVCRemediationQueueReplicasPending means queue replicas still need to be grown.
+	PVCRemediationQueueReplicasPending PVCRemediationQueueReplicaState = "Pending"
+	// PVCRemediationQueueReplicasGrown means the queue replica growth command completed.
+	PVCRemediationQueueReplicasGrown PVCRemediationQueueReplicaState = "Grown"
+)
+
 // RabbitMqStatus defines the observed state of RabbitMq
 type RabbitMqStatus struct {
 	// Conditions
@@ -359,6 +415,11 @@ type RabbitMqStatus struct {
 	// The proxy allows non-durable clients to work with quorum queues during the upgrade window.
 	// Only cleared when the AnnotationClientsReconfigured annotation is set to "true".
 	ProxyRequired string `json:"proxyRequired,omitempty"`
+
+	// PVCRemediation tracks in-flight PVC remediation and replacement recovery,
+	// keyed by PVC name.
+	// +kubebuilder:validation:Optional
+	PVCRemediation map[string]PVCRemediationStatus `json:"pvcRemediation,omitempty"`
 }
 
 //+kubebuilder:object:root=true

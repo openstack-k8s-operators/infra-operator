@@ -2033,6 +2033,47 @@ spec:
                 - "False"
                 - ""
                 type: string
+              pvcRemediation:
+                additionalProperties:
+                  description: |-
+                    PVCRemediationStatus captures the in-progress PVC remediation handshake
+                    state for a single PVC as seen by the RabbitMq controller.
+                  properties:
+                    consentState:
+                      description: ConsentState records whether this controller has
+                        granted safe-to-delete consent.
+                      enum:
+                      - Pending
+                      - Granted
+                      type: string
+                    pvcUID:
+                      description: |-
+                        PVCUID identifies the claim tracked by this status entry. A replacement
+                        PVC can reuse the same name, so the UID distinguishes recovery from an
+                        aborted deletion that left the original claim in place.
+                      type: string
+                    queueReplicaState:
+                      description: |-
+                        QueueReplicaState records whether quorum queue replicas have been grown
+                        on the replacement node.
+                      enum:
+                      - Pending
+                      - Grown
+                      type: string
+                    requestID:
+                      description: |-
+                        RequestID is the PodRemediator request whose consent authorized deletion
+                        of PVCUID. It scopes the replacement pod's destructive rejoin action.
+                      type: string
+                    stuckNode:
+                      description: StuckNode is the Kubernetes node name set by PodRemediator
+                        on the PVC.
+                      type: string
+                  type: object
+                description: |-
+                  PVCRemediation tracks in-flight PVC remediation and replacement recovery,
+                  keyed by PVC name.
+                type: object
               queueType:
                 description: QueueType - the active queue type for this cluster
                 type: string
