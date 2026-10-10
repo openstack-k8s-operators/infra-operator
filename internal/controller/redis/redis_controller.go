@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -99,6 +100,9 @@ type Reconciler struct {
 
 // RBAC for services
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete;
+
+// RBAC for configmaps (config-data, scripts, and the operator-maintained cluster state)
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete;
 
 // service account, role, rolebinding
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
@@ -449,6 +453,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return sfres, sferr
 	}
 
+	// Maintain the operator-controlled cluster-state ConfigMap that the startup
+	// scripts read to decide whether bootstrapping a new master is allowed.
+	// Bootstrap is authorized only when the whole StatefulSet is down (fresh
+	// deployment or full outage); while any pod is Ready an existing master may
+	// be serving, so unilateral bootstrap must be refused to avoid split-brain.
+	if err := r.reconcileClusterState(ctx, instance, ss.GetStatefulSet().Status.ReadyReplicas); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if commonstatefulset.IsReady(ss.GetStatefulSet()) {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 	} else {
@@ -508,6 +521,38 @@ func (r *Reconciler) generateConfigMaps(
 	}
 
 	return nil
+}
+
+// reconcileClusterState creates/updates the operator-maintained ConfigMap that
+// the redis/sentinel startup scripts read to decide whether bootstrapping a new
+// master is authorized. It is deliberately kept out of the input hash so that
+// updates never trigger a StatefulSet rollout; mounted ConfigMap content is
+// refreshed in place by the kubelet.
+func (r *Reconciler) reconcileClusterState(
+	ctx context.Context,
+	instance *redisv1.Redis,
+	readyReplicas int32,
+) error {
+	// Authorize bootstrap only when no pod is Ready. This covers a fresh
+	// deployment and a full outage (all data is ephemeral, so a full outage is
+	// effectively a fresh start), while refusing bootstrap during failovers,
+	// rolling restarts, or network partitions where a master may still serve.
+	bootstrapAuthorized := strconv.FormatBool(readyReplicas == 0)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-redis-state", instance.Name),
+			Namespace: instance.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrPatch(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["bootstrap-authorized"] = bootstrapAuthorized
+		return controllerutil.SetControllerReference(instance, cm, r.Scheme)
+	})
+	return err
 }
 
 // SetupWithManager sets up the controller with the Manager.
