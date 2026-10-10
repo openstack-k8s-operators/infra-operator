@@ -1,0 +1,10 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      # These Node/SNR fields are synthetic controller inputs. This scenario
+      # exercises the live API server, PVC-protection controller, and deployed
+      # PodRemediator RBAC; it does not simulate physical fencing or validate
+      # Medik8s controller behavior.
+      oc patch node podremediator-lease-node --subresource=status --type=merge --patch '{"status":{"conditions":[{"type":"Ready","status":"False","reason":"KuttlSyntheticNode","message":"synthetic fenced-node fixture","lastHeartbeatTime":"2026-09-25T00:00:00Z","lastTransitionTime":"2026-09-25T00:00:00Z"}]}}'
+      oc patch pod podremediator-lease-0 -n "$NAMESPACE" --type=merge --patch '{"metadata":{"finalizers":["test.kuttl.dev/hold-committed-pod"]}}'
