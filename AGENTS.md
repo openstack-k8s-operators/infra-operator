@@ -131,6 +131,17 @@ After modifying Go code, always run: `make generate manifests fmt vet`.
 - When adding a new field or feature, add corresponding test cases in
   `test/functional/` with fixture data.
 
+## AI-assisted contributions
+
+- Add provenance trailers to the commit message when AI generated or assisted
+  the contribution:
+  - Use `Generated-By: <tool> <model/version>` when generative AI produced a
+    substantial portion of the submitted material, not merely small fragments
+    or suggestions.
+  - Use `Assisted-By: <tool> <model/version>` for predictive AI, suggestions,
+    minor edits, or other assistance to human-authored work.
+  Identify the tool and model when known.
+
 ## Key dependencies
 
 - [lib-common](https://github.com/openstack-k8s-operators/lib-common): shared modules for conditions, endpoints, database, TLS, secrets, etc.
