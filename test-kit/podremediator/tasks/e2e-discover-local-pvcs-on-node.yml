@@ -1,0 +1,99 @@
+---
+# List PVC names in e2e_workload_ns that are Bound to a "local-like" PV whose node affinity
+# matches e2e_test_node_name (same heuristic as PodRemediator: local / CSI+affinity / hostPath+affinity).
+# Sets host fact e2e_pvcs_local_on_test_node (JSON array string consumed by from_json in caller).
+#
+# Required hostvars on controller0: e2e_test_node_name. Caller must pass e2e_workload_ns, oc_bin.
+- name: Discover local PVCs pinned to E2E test node (JSON array on stdout)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NS="{{ e2e_workload_ns }}"
+    TARGET="{{ hostvars['controller0']['e2e_test_node_name'] }}"
+    OC="{{ oc_bin }}"
+    python3 - "$NS" "$TARGET" "$OC" <<'PY'
+    import json, subprocess, sys
+
+    ns, target, oc = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    def run_json(cmd):
+        out = subprocess.check_output(cmd, timeout=180)
+        return json.loads(out.decode())
+
+    def is_local(pv):
+        spec = pv.get("spec") or {}
+        if spec.get("local"):
+            return True
+        if spec.get("csi") and spec.get("nodeAffinity"):
+            return True
+        if spec.get("hostPath") and spec.get("nodeAffinity"):
+            req = (spec.get("nodeAffinity") or {}).get("required") or {}
+            return bool(req.get("nodeSelectorTerms"))
+        return False
+
+    def pv_node(pv):
+        spec = pv.get("spec") or {}
+        na = spec.get("nodeAffinity") or {}
+        req = na.get("required") or {}
+        terms = req.get("nodeSelectorTerms") or []
+        priority_keys = (
+            "kubernetes.io/hostname",
+            "topology.topolvm.io/node",
+            "topology.lvms.io/node",
+        )
+        for term in terms:
+            for expr in term.get("matchExpressions") or []:
+                key = expr.get("key") or ""
+                vals = expr.get("values") or []
+                if not vals:
+                    continue
+                if key in priority_keys:
+                    return vals[0]
+            for expr in term.get("matchFields") or []:
+                key = expr.get("key") or ""
+                vals = expr.get("values") or []
+                if vals and ("hostname" in key or key.endswith("hostname")):
+                    return vals[0]
+        if spec.get("csi") and len(terms) == 1:
+            for expr in terms[0].get("matchExpressions") or []:
+                key = expr.get("key") or ""
+                vals = expr.get("values") or []
+                if len(vals) != 1:
+                    continue
+                if "hostname" in key or key.endswith("/node") or ".node" in key or key == "topology.lvms.io/node":
+                    return vals[0]
+        return ""
+
+    pvcs = run_json([oc, "get", "pvc", "-n", ns, "-o", "json"])
+    pvs = run_json([oc, "get", "pv", "-o", "json"])
+    by_name = {p["metadata"]["name"]: p for p in pvs.get("items", [])}
+
+    hits = []
+    for item in pvcs.get("items", []):
+        name = item["metadata"]["name"]
+        vn = (item.get("spec") or {}).get("volumeName") or ""
+        if not vn:
+            continue
+        pv = by_name.get(vn)
+        if not pv or not is_local(pv):
+            continue
+        node = pv_node(pv)
+        if node == target:
+            hits.append(name)
+
+    hits.sort()
+    print(json.dumps(hits))
+    PY
+  register: e2e_discover_local_pvcs_json
+  changed_when: false
+  failed_when: e2e_discover_local_pvcs_json.rc != 0
+
+- name: Record discovered PVC names as fact on controller
+  ansible.builtin.set_fact:
+    e2e_pvcs_local_on_test_node: "{{ e2e_discover_local_pvcs_json.stdout | trim | from_json }}"
+
+- name: Show PVCs with local PV on the node under test (PodRemediator may delete all of these)
+  ansible.builtin.debug:
+    msg: >-
+      Node {{ hostvars['controller0']['e2e_test_node_name'] }}:
+      {{ e2e_pvcs_local_on_test_node | length }} Bound local-like PVC(s) in {{ e2e_workload_ns }}:
+      {{ e2e_pvcs_local_on_test_node | join(', ') if (e2e_pvcs_local_on_test_node | length) > 0 else '(none)' }}.

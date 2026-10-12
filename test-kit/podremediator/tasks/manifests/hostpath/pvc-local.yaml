@@ -1,0 +1,16 @@
+# PVC that will bind to the test local PV. Must be in a namespace watched by
+# PodRemediator (e.g. openstack-operators when spec.namespaces is empty).
+# Apply with: oc apply -f pvc-local.yaml -n openstack-operators
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-local-pvc-podremediator
+  namespace: openstack-operators
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ""
+  volumeName: test-local-pv-podremediator

@@ -1,0 +1,4 @@
+# Install with: ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: kubernetes.core
+    version: ">=2.4.0"
