@@ -16,6 +16,8 @@ package helpers
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,6 +33,11 @@ import (
 	"k8s.io/utils/ptr"
 
 	base "github.com/openstack-k8s-operators/lib-common/modules/common/test/helpers"
+)
+
+const (
+	memcachedPort    = 11211
+	memcachedTLSPort = 11212
 )
 
 // TestHelper is a collection of helpers for testing operators. It extends the
@@ -142,80 +149,89 @@ func (tc *TestHelper) GetMemcached(name types.NamespacedName) *memcachedv1.Memca
 
 // SimulateMemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster.
 func (tc *TestHelper) SimulateMemcachedReady(name types.NamespacedName) {
-	t.Eventually(func(g t.Gomega) {
-		mc := tc.GetMemcached(name)
-		mc.Status.ObservedGeneration = mc.Generation
-		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
-		mc.Status.ReadyCount = *mc.Spec.Replicas
-
-		serverList := []string{}
-		serverListWithInet := []string{}
-		for i := 0; i < int(*mc.Spec.Replicas); i++ {
-			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-		}
-		mc.Status.ServerList = serverList
-		mc.Status.ServerListWithInet = serverListWithInet
-
-		// This can return conflict so we have the t.Eventually block to retry
-		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
-
-	}, tc.Timeout, tc.Interval).Should(t.Succeed())
-
+	tc.simulateMemcachedReady(name, false, false, corev1.IPv4Protocol)
 	tc.Logger.Info("Simulated memcached ready", "on", name)
 }
 
 // SimulateTLSMemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster which supports TLS.
 func (tc *TestHelper) SimulateTLSMemcachedReady(name types.NamespacedName) {
-	t.Eventually(func(g t.Gomega) {
-		mc := tc.GetMemcached(name)
-		mc.Status.ObservedGeneration = mc.Generation
-		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
-		mc.Status.ReadyCount = *mc.Spec.Replicas
-
-		serverList := []string{}
-		serverListWithInet := []string{}
-		for i := 0; i < int(*mc.Spec.Replicas); i++ {
-			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-		}
-		mc.Status.ServerList = serverList
-		mc.Status.ServerListWithInet = serverListWithInet
-		mc.Status.TLSSupport = true
-
-		// This can return conflict so we have the t.Eventually block to retry
-		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
-
-	}, tc.Timeout, tc.Interval).Should(t.Succeed())
-
+	tc.simulateMemcachedReady(name, true, false, corev1.IPv4Protocol)
 	tc.Logger.Info("Simulated memcached ready", "on", name)
 }
 
 // SimulateMTLSMemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster which supports TLS and uses MTLS auth
 func (tc *TestHelper) SimulateMTLSMemcachedReady(name types.NamespacedName) {
+	tc.simulateMemcachedReady(name, true, true, corev1.IPv4Protocol)
+	tc.Logger.Info("Simulated memcached with MTLS ready", "on", name)
+}
+
+// SimulateIPv6MemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster with IPv6 server list formatting.
+func (tc *TestHelper) SimulateIPv6MemcachedReady(name types.NamespacedName) {
+	tc.simulateMemcachedReady(name, false, false, corev1.IPv6Protocol)
+	tc.Logger.Info("Simulated IPv6 memcached ready", "on", name)
+}
+
+func (tc *TestHelper) simulateMemcachedReady(
+	name types.NamespacedName,
+	tlsSupport bool,
+	mtls bool,
+	ipFamily corev1.IPFamily,
+) {
 	t.Eventually(func(g t.Gomega) {
 		mc := tc.GetMemcached(name)
 		mc.Status.ObservedGeneration = mc.Generation
 		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
 		mc.Status.ReadyCount = *mc.Spec.Replicas
-
-		serverList := []string{}
-		serverListWithInet := []string{}
-		for i := 0; i < int(*mc.Spec.Replicas); i++ {
-			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet:%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
+		mc.Status.ServerList, mc.Status.ServerListWithInet = memcachedServerLists(
+			name,
+			*mc.Spec.Replicas,
+			tlsSupport,
+			ipFamily,
+		)
+		mc.Status.TLSSupport = tlsSupport
+		mc.Status.MTLSCert = ""
+		if mtls {
+			mc.Status.MTLSCert = "cert-memcached-mtls"
 		}
-		mc.Status.ServerList = serverList
-		mc.Status.ServerListWithInet = serverListWithInet
-		mc.Status.TLSSupport = true
-		mc.Status.MTLSCert = "cert-memcached-mtls"
 
 		// This can return conflict so we have the t.Eventually block to retry
 		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
 
 	}, tc.Timeout, tc.Interval).Should(t.Succeed())
+}
 
-	tc.Logger.Info("Simulated memcached with MTLS ready", "on", name)
+func memcachedServerLists(
+	name types.NamespacedName,
+	replicas int32,
+	tlsSupport bool,
+	ipFamily corev1.IPFamily,
+) ([]string, []string) {
+	serverListPort := memcachedPort
+	if tlsSupport {
+		serverListPort = memcachedTLSPort
+	}
+
+	serverList := make([]string, 0, replicas)
+	serverListWithInet := make([]string, 0, replicas)
+	prefix := "inet"
+	if ipFamily == corev1.IPv6Protocol {
+		prefix = "inet6"
+	}
+	for i := int32(0); i < replicas; i++ {
+		server := fmt.Sprintf("%s-%d.%s.%s.svc", name.Name, i, name.Name, name.Namespace)
+		serverList = append(serverList, net.JoinHostPort(server, strconv.Itoa(serverListPort)))
+
+		if ipFamily == corev1.IPv6Protocol {
+			server = fmt.Sprintf("[%s]", server)
+		}
+		serverListWithInet = append(serverListWithInet, fmt.Sprintf(
+			"%s:%s",
+			prefix,
+			net.JoinHostPort(server, strconv.Itoa(memcachedPort)),
+		))
+	}
+
+	return serverList, serverListWithInet
 }
 
 // GetDefaultMemcachedSpec returns memcachedv1.MemcachedSpec for test-helpers
@@ -225,29 +241,4 @@ func (tc *TestHelper) GetDefaultMemcachedSpec() memcachedv1.MemcachedSpec {
 			Replicas: ptr.To(int32(3)),
 		},
 	}
-}
-
-// SimulateIPv6MemcachedReady simulates a ready state for a Memcached instance in a Kubernetes cluster with IPv6 server list formatting.
-func (tc *TestHelper) SimulateIPv6MemcachedReady(name types.NamespacedName) {
-	t.Eventually(func(g t.Gomega) {
-		mc := tc.GetMemcached(name)
-		mc.Status.ObservedGeneration = mc.Generation
-		mc.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
-		mc.Status.ReadyCount = *mc.Spec.Replicas
-
-		serverList := []string{}
-		serverListWithInet := []string{}
-		for i := 0; i < int(*mc.Spec.Replicas); i++ {
-			serverList = append(serverList, fmt.Sprintf("%s-%d.%s.%s.svc:11211", mc.Name, i, mc.Name, mc.Namespace))
-			serverListWithInet = append(serverListWithInet, fmt.Sprintf("inet6:[%s-%d.%s.%s.svc]:11211", mc.Name, i, mc.Name, mc.Namespace))
-		}
-		mc.Status.ServerList = serverList
-		mc.Status.ServerListWithInet = serverListWithInet
-
-		// This can return conflict so we have the t.Eventually block to retry
-		g.Expect(tc.K8sClient.Status().Update(tc.Ctx, mc)).To(t.Succeed())
-
-	}, tc.Timeout, tc.Interval).Should(t.Succeed())
-
-	tc.Logger.Info("Simulated IPv6 memcached ready", "on", name)
 }
