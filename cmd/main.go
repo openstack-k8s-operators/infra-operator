@@ -140,6 +140,15 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
+	// Pin TLS 1.3 as the minimum. Do NOT lower this to TLS 1.2: only TLS 1.3
+	// carries the hybrid post-quantum key exchange (X25519MLKEM768), which the
+	// Go stdlib negotiates by default. Likewise, do NOT set c.CurvePreferences
+	// here — leaving it unset keeps the post-quantum-capable default; overriding
+	// it with a classical-only list would silently disable PQ key exchange.
+	tlsOpts = append(tlsOpts, func(c *tls.Config) {
+		c.MinVersion = tls.VersionTLS13
+	})
+
 	// Create watchers for metrics and webhooks certificates
 	var metricsCertWatcher, webhookCertWatcher *certwatcher.CertWatcher
 

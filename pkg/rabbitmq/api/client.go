@@ -86,17 +86,29 @@ type Policy struct {
 func NewClient(baseURL, username, password string, tlsEnabled bool, caCert []byte) (*Client, error) {
 	httpClient := &http.Client{}
 
-	if tlsEnabled && len(caCert) > 0 {
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA certificate PEM data")
+	if tlsEnabled {
+		// Pin TLS 1.3 as the minimum for every TLS-enabled client. Do NOT lower
+		// this to TLS 1.2: only TLS 1.3 carries the hybrid post-quantum key
+		// exchange (X25519MLKEM768), which the Go stdlib negotiates by default.
+		// Do NOT set CurvePreferences here — leaving it unset keeps the
+		// post-quantum-capable default; a classical-only list would silently
+		// disable PQ key exchange.
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		}
+
+		// Trust the supplied CA when provided; otherwise fall back to the
+		// system trust store (RootCAs left nil).
+		if len(caCert) > 0 {
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("failed to parse CA certificate PEM data")
+			}
+			tlsConfig.RootCAs = caCertPool
 		}
 
 		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				RootCAs:    caCertPool,
-			},
+			TLSClientConfig: tlsConfig,
 		}
 	}
 
