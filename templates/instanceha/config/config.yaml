@@ -14,6 +14,10 @@ config:
   POLL: "45"
   # Seconds of service staleness before considering a host failed
   DELTA: "30"
+  # Consecutive poll cycles a host must be down before it is fenced
+  # (1 = fence on first detection; higher values grant a ~(N-1)*POLL second
+  # grace period for the host to recover, e.g. reconnect to RabbitMQ)
+  FENCE_AFTER_DOWN_CYCLES: "1"
   # Max percentage of failed hosts before evacuation is blocked (0-100)
   THRESHOLD: "50"
   # Max hosts to fence per poll cycle (limits blast radius)

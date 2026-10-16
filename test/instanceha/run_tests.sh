@@ -72,6 +72,7 @@ run_test_file() {
 
 # Initialize test results
 unit_core_tests_passed=0
+fence_grace_tests_passed=0
 fencing_tests_passed=0
 kdump_tests_passed=0
 security_tests_passed=0
@@ -95,6 +96,12 @@ aggregate_threshold_tests_passed=0
 echo -e "${BLUE}Running Core Unit Tests...${NC}"
 if run_test_file "test_unit_core.py" "Core Unit Tests"; then
     unit_core_tests_passed=1
+fi
+
+# Run fencing grace period tests
+echo -e "${BLUE}Running Fencing Grace Period Tests...${NC}"
+if run_test_file "test_fence_grace_period.py" "Fencing Grace Period Tests"; then
+    fence_grace_tests_passed=1
 fi
 
 echo
@@ -264,13 +271,19 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}            Test Summary                ${NC}"
 echo -e "${BLUE}========================================${NC}"
 
-total_passed=$((unit_core_tests_passed + fencing_tests_passed + kdump_tests_passed + security_tests_passed + critical_error_tests_passed + evacuation_workflow_tests_passed + config_features_tests_passed + helper_functions_tests_passed + functional_tests_passed + integration_tests_passed + region_isolation_tests_passed + coverage_gaps_tests_passed + orchestrated_evacuation_tests_passed + k8s_events_tests_passed + k8s_partition_tests_passed + thread_safety_tests_passed + heartbeat_detection_tests_passed + heartbeat_scale_tests_passed + aggregate_threshold_tests_passed))
-total_tests=19
+total_passed=$((unit_core_tests_passed + fence_grace_tests_passed + fencing_tests_passed + kdump_tests_passed + security_tests_passed + critical_error_tests_passed + evacuation_workflow_tests_passed + config_features_tests_passed + helper_functions_tests_passed + functional_tests_passed + integration_tests_passed + region_isolation_tests_passed + coverage_gaps_tests_passed + orchestrated_evacuation_tests_passed + k8s_events_tests_passed + k8s_partition_tests_passed + thread_safety_tests_passed + heartbeat_detection_tests_passed + heartbeat_scale_tests_passed + aggregate_threshold_tests_passed))
+total_tests=20
 
 if [ $unit_core_tests_passed -eq 1 ]; then
     echo -e "${GREEN}[PASS] Core Unit Tests: PASSED${NC}"
 else
     echo -e "${RED}[FAIL] Core Unit Tests: FAILED${NC}"
+fi
+
+if [ $fence_grace_tests_passed -eq 1 ]; then
+    echo -e "${GREEN}[PASS] Fencing Grace Period Tests: PASSED${NC}"
+else
+    echo -e "${RED}[FAIL] Fencing Grace Period Tests: FAILED${NC}"
 fi
 
 if [ $fencing_tests_passed -eq 1 ]; then

@@ -110,6 +110,7 @@ _config_map: Dict[str, ConfigItem] = {
     'DELTA': ConfigItem('int', 30, 10, 300),
     'POLL': ConfigItem('int', 45, 15, 600),
     'THRESHOLD': ConfigItem('int', 50, 0, 100),
+    'FENCE_AFTER_DOWN_CYCLES': ConfigItem('int', 1, 1, 100),
     'WORKERS': ConfigItem('int', 4, 1, 100),
     'DELAY': ConfigItem('int', 0, 0, 300),
     'LOGLEVEL': ConfigItem('str', 'INFO'),
@@ -197,6 +198,10 @@ def __init__(self, config_manager: ConfigManager, cloud_client: Optional[OpenSta
     self.heartbeat_previous_active_count = 0        # Cliff detection baseline
     self.heartbeat_consecutive_cliff_cycles = 0
     self.last_poll_time = time.monotonic()
+
+    # Per-host consecutive down-cycle counts for the fencing grace period
+    # (FENCE_AFTER_DOWN_CYCLES). Mutated only by the main loop -- no lock.
+    self.host_down_cycles = defaultdict(int)
 
     self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
     if self.heartbeat_hmac_keys:
@@ -470,11 +475,24 @@ def validate_input(value: str, validation_type: str, context: str) -> bool:
                             │
                             ▼
     ┌──────────────────────────────────────────────────┐
+    │ 3b. Record Down Cycles (grace counters)          │
+    │    - Increment consecutive down-cycle count per  │
+    │      host on the FULL detected-down set          │
+    │    - Reset counter when a host recovers          │
+    │    - Deferral itself happens inside step 4 (after│
+    │      the safety gates), not here                 │
+    └──────────────────────────────────────────────────┘
+                            │
+                            ▼
+    ┌──────────────────────────────────────────────────┐
     │ 4. Admit Stale Services (async)                  │
     │    - Filter processing hosts (deduplication)     │
-    │    - Filter by servers, tags, aggregates         │
     │    - Filter reachable hosts (heartbeat check)    │
+    │    - Check all-services-stale (full down set)    │
+    │    - Filter by servers, tags, aggregates         │
     │    - Check threshold (total cluster health)      │
+    │    - Defer hosts within the grace period         │
+    │      (FENCE_AFTER_DOWN_CYCLES)                   │
     │    - Check critical services operational         │
     │    - Submit accepted hosts to executor           │
     │      (non-blocking -- main loop continues)       │
@@ -684,6 +702,11 @@ Poll cycle starts
   │   Rationale: if InstanceHA's worker node is network-isolated,
   │   Nova's service list may be stale -- fencing would hit healthy hosts
   │
+  ├─ Pre-admit: record_down_cycles (grace counters)
+  │   Updates per-host consecutive down-cycle counters on the FULL detected-down
+  │   set (increment if down, reset on recovery). Does NOT filter -- the deferral
+  │   decision happens at Gate 7b so the gates below still see the full set.
+  │
   │   ─── enters _admit_stale_services ───
   │
   ├─ Pre-gate: _filter_processing_hosts
@@ -737,6 +760,25 @@ Poll cycle starts
   │   Counts in-flight hosts toward their aggregate failure budget
   │   If total impacted count (new + in-flight) > instanceha:max_failures metadata -> skip hosts in that aggregate
   │   to_resume hosts bypass this gate (only compute_nodes are filtered)
+  │
+  ├─ Gate 7b: Fence grace period (FENCE_AFTER_DOWN_CYCLES)
+  │   Question: "Has this host been down long enough to give up on it?"
+  │   Defers hosts with fewer than FENCE_AFTER_DOWN_CYCLES consecutive down cycles
+  │   (default 1 = no deferral); counters are maintained by record_down_cycles above
+  │   Deferred (not skipped): the host is re-evaluated next cycle. The per-host
+  │   instanceha_fencing_deferred_total metric is recorded up front; a single
+  │   cluster-level HostDownGrace event is emitted when admission reaches grace-event
+  │   handling (all-deferred short-circuit, or after Gates 5-7 pass in the mixed
+  │   case) -- not when an earlier gate ends the cycle first
+  │   Full-set first: the grace partition is computed before Gate 5 so that when
+  │   at least one host is eligible, Gates 5-7 still evaluate the complete
+  │   detected-down set (deferred hosts only removed just before Gate 8). When
+  │   EVERY down host is deferred (and there is no to_resume work), the admission
+  │   short-circuits right here -- before Gate 5's forced evacuable-cache refresh
+  │   and per-host server queries -- since nothing will be fenced this cycle
+  │   Rationale: let a host recover on its own (e.g. reconnect to RabbitMQ) before
+  │   evacuating its instances, without repeating Nova discovery every poll of a
+  │   long grace window
   │
   ├─ Gate 8: Per-cycle rate limit
   │   Question: "Are we fencing too many hosts at once?"
@@ -1231,7 +1273,8 @@ See [instanceha_guide.md -- Kubernetes Events](instanceha_guide.md#kubernetes-ev
 
 | Reason | Type | Host | When |
 |--------|------|------|------|
-| `HostDown` | Warning | compute host | Compute service detected as down or stale |
+| `HostDown` | Warning | compute host | Compute service detected as down or stale and not held by the fencing grace period (message includes the down-cycle count, e.g. `5/5`, when `FENCE_AFTER_DOWN_CYCLES` > 1) |
+| `HostDownGrace` | Warning | `cluster` | One or more hosts down but within the `FENCE_AFTER_DOWN_CYCLES` grace period -- fencing deferred to allow recovery (one aggregated event per cycle, unless an earlier gate such as `ThresholdExceeded`/`AllServicesStale` ends the cycle first) |
 | `FencingStarted` | Normal | compute host | Power-off fencing operation begins |
 | `FencingSucceeded` | Normal | compute host | Fencing completed successfully |
 | `FencingFailed` | Warning | compute host | Fencing operation failed |
@@ -2393,6 +2436,33 @@ config:
 ```
 
 **Notes**: Lower values provide faster failure detection but may cause false positives. Higher values reduce false positives but delay evacuation.
+
+---
+
+#### FENCE_AFTER_DOWN_CYCLES
+**Type**: Integer
+**Default**: `1`
+**Range**: `1-100` cycles
+
+**Description**: Number of *consecutive* poll cycles a host must be detected as down before it is fenced. The default of `1` preserves the original behaviour (fence on first detection). Higher values grant a grace period of roughly `(N-1) * POLL` seconds, giving a host time to recover on its own -- for example, nova-compute reconnecting to RabbitMQ -- before it is fenced and its instances evacuated.
+
+**Usage**:
+- Counters are updated by `InstanceHAService.record_down_cycles()` in the main poll loop, on the **full** detected-down set, before `_admit_stale_services()` runs. This keeps the counters accurate even on cycles where no host is ultimately fenced.
+- Maintains a per-host consecutive down-cycle counter (`self.host_down_cycles`, keyed by short hostname). The counter is reset as soon as a host stops being reported down (recovery).
+- The actual deferral happens **inside** `_admit_stale_services`, via `InstanceHAService.within_fence_grace_period()`. The grace partition is computed up front, but when at least one host is eligible the safety gates (all-services-stale, cluster and per-aggregate thresholds) still evaluate the complete detected-down set; deferred hosts are only removed from `compute_nodes` just before the per-cycle rate limit. This ordering is deliberate: those safety gates must see every down host, while only hosts that have reached the threshold are eligible for fencing. When **every** down host is still within the grace period (and there is no `to_resume` work), admission short-circuits before `_prepare_evacuation_resources` so the forced evacuable-cache refresh and per-host `servers.list` queries are not repeated every poll of a long grace window. Deferred hosts increment the `instanceha_fencing_deferred_total` metric per host (recorded up front) and emit a single cluster-level `HostDownGrace` K8s event per cycle (not one per host, to avoid blocking the poll loop on many synchronous API calls). The event is emitted when admission reaches grace-event handling -- the all-deferred short-circuit, or after the safety gates pass in the mixed case -- but not when an earlier gate (e.g. `ThresholdExceeded`, `AllServicesStale`) ends the cycle first.
+- Counter state is in-memory only (no lock needed -- mutated solely by the main loop thread). A pod restart resets all counters, so the grace period starts over. This errs toward waiting longer and never fences early.
+
+**Interaction with heartbeat verification**: This is a coarse, time-based delay independent of `CHECK_HEARTBEAT`. Heartbeat verification (when enabled) is the more precise signal for "host OS alive, only nova-compute down"; `FENCE_AFTER_DOWN_CYCLES` applies regardless and can be combined with it.
+
+**Testing**:
+- Unit tests in `test/instanceha/test_fence_grace_period.py` cover immediate fencing at the default, deferral until the threshold, counter reset on recovery, and independent per-host counters.
+
+**Example**:
+```yaml
+config:
+  POLL: 45
+  FENCE_AFTER_DOWN_CYCLES: 3  # tolerate ~90s (2 extra cycles) of downtime before fencing
+```
 
 ---
 

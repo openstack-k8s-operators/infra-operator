@@ -82,6 +82,7 @@ _CONFIG_DEFAULTS = {
     'DELTA': 30,
     'POLL': 45,
     'THRESHOLD': 50,
+    'FENCE_AFTER_DOWN_CYCLES': 1,
     'WORKERS': 4,
     'DELAY': 0,
     'LOGLEVEL': 'INFO',
