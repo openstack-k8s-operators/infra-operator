@@ -1,0 +1,26 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 180
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      POD=podremediator-lease-0
+      PV=podremediator-lease-pv
+      for attempt in $(seq 1 90); do
+        phase=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        new_uid=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        old_uid=$(oc get pv "$PV" -o go-template='{{ index .metadata.annotations "infra-operator.openstack.org/old-pvc-uid" }}' 2>/dev/null || true)
+        pvc_finalizers=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+        pod_uid=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        volume_claim=$(oc get pod "$POD" -n "$NAMESPACE" -o go-template='{{range .spec.volumes}}{{if .persistentVolumeClaim}}{{.persistentVolumeClaim.claimName}}{{end}}{{end}}' 2>/dev/null || true)
+        if [ "$phase" = "Bound" ] && [ -n "$new_uid" ] && [ -n "$old_uid" ] && [ "$new_uid" != "$old_uid" ] && [ -n "$pod_uid" ] && [ "$volume_claim" = "$CLAIM" ] && echo "$pvc_finalizers" | grep -q 'kubernetes.io/pvc-protection'; then
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "StatefulSet did not recreate a fresh, bound PVC and replacement Pod after the committed claim was deleted"
+      oc get statefulset podremediator-lease -n "$NAMESPACE" -o yaml || true
+      oc get pvc "$CLAIM" -n "$NAMESPACE" -o yaml || true
+      oc get pod "$POD" -n "$NAMESPACE" -o yaml || true
+      oc get pv "$PV" -o yaml || true
+      exit 1

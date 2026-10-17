@@ -1,0 +1,13 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      request=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.remediation\.openstack\.org/request-id}')
+      if [ -z "$request" ]; then
+        echo "PVC has no request ID to consent to"
+        exit 1
+      fi
+      oc annotate pvc "$CLAIM" -n "$NAMESPACE" \
+        remediation.openstack.org/safe-to-delete=true \
+        "remediation.openstack.org/consent-id=$request" --overwrite
