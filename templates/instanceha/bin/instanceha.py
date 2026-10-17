@@ -127,6 +127,11 @@ HOST_DOWN_TOTAL = Counter(
     'Total host-down detections',
     ['host'],
 )
+FENCING_DEFERRED_TOTAL = Counter(
+    'instanceha_fencing_deferred_total',
+    'Times fencing was deferred while waiting for a host to recover within the down-cycle grace period',
+    ['host'],
+)
 HOST_REACHABLE_TOTAL = Counter(
     'instanceha_host_reachable_total',
     'Hosts reported down by Nova but still reachable via heartbeat',
@@ -204,6 +209,7 @@ _HOST_LABELED_METRICS = [
     FENCING_TOTAL, EVACUATION_TOTAL, INSTANCE_EVACUATION_TOTAL,
     INSTANCE_EVACUATION_DURATION, HOST_DOWN_TOTAL, HOST_REACHABLE_TOTAL,
     HOST_REENABLED_TOTAL, RECOVERY_COMPLETED_TOTAL, PROCESSING_FAILED_TOTAL,
+    FENCING_DEFERRED_TOTAL,
 ]
 
 
@@ -619,7 +625,8 @@ class ConfigManager:
     def _validate_config(self) -> None:
         """Validate critical configuration values using the configuration map."""
         # Auto-validate all config values with constraints
-        validation_keys = ['DELTA', 'POLL', 'THRESHOLD', 'WORKERS', 'LOGLEVEL']
+        validation_keys = ['DELTA', 'POLL', 'THRESHOLD', 'WORKERS', 'LOGLEVEL',
+                           'FENCE_AFTER_DOWN_CYCLES']
         for key in validation_keys:
             try:
                 self.get_config_value(key)  # This will validate against _config_map constraints
@@ -694,6 +701,7 @@ class ConfigManager:
         'DELTA': ConfigItem('int', 30, 10, 300),
         'POLL': ConfigItem('int', 45, 15, 600),
         'THRESHOLD': ConfigItem('int', 50, 0, 100),
+        'FENCE_AFTER_DOWN_CYCLES': ConfigItem('int', 1, 1, 100),
         'WORKERS': ConfigItem('int', 4, 1, 100),
         'DELAY': ConfigItem('int', 0, 0, 300),
         'LOGLEVEL': ConfigItem('str', 'INFO'),
@@ -845,6 +853,10 @@ class InstanceHAService:
         self.heartbeat_consecutive_cliff_cycles = 0
         self.last_poll_time = time.monotonic()
 
+        # Per-host consecutive down-cycle tracking for the fencing grace period.
+        # Only mutated from the main poll loop thread, so it needs no lock.
+        self.host_down_cycles = defaultdict(int)
+
         self.heartbeat_hmac_keys = self._load_heartbeat_hmac_keys()
         if self.heartbeat_hmac_keys:
             logging.info("Heartbeat HMAC authentication enabled with %d key(s)", len(self.heartbeat_hmac_keys))
@@ -899,6 +911,60 @@ class InstanceHAService:
             self.current_hash = hashlib.sha256(str(current_timestamp).encode()).hexdigest()
             self.hash_update_successful = True
             self._last_hash_time = current_timestamp
+
+    def record_down_cycles(self, down_services: List[Any]) -> None:
+        """Track consecutive down-cycle counts for the fencing grace period.
+
+        ``FENCE_AFTER_DOWN_CYCLES`` is the number of consecutive poll cycles a
+        compute must be detected as down before it is fenced. The default of 1
+        preserves the original behaviour (fence on first detection); higher
+        values grant a grace period (roughly ``(N-1) * POLL`` seconds) so a
+        host can recover on its own -- e.g. nova-compute reconnecting to
+        RabbitMQ -- before it is fenced and its instances evacuated.
+
+        This increments the counter for every host currently detected as down
+        and resets the counter for any host that is no longer down (recovered).
+        It must be called once per poll cycle on the *complete* detected-down
+        set, before the fencing safety gates run, so the counters stay accurate
+        even on cycles where no host is ultimately fenced. The grace period only
+        decides which hosts are *eligible* to fence (see
+        :meth:`within_fence_grace_period`); the safety gates themselves always
+        evaluate the full detected-down set.
+
+        Counters are keyed by short hostname. Only called from the main poll
+        loop thread, so ``host_down_cycles`` needs no lock.
+        """
+        required = self.config.get_config_value('FENCE_AFTER_DOWN_CYCLES')
+        down_hostnames = {_extract_hostname(svc.host) for svc in down_services}
+
+        # Reset counters for hosts that are no longer reported down (recovered).
+        for hostname in list(self.host_down_cycles.keys()):
+            if hostname not in down_hostnames:
+                prev = self.host_down_cycles.pop(hostname)
+                if prev < required:
+                    logging.info(
+                        'Host %s recovered after %d down cycle(s), before reaching the '
+                        'fencing threshold (%d) -- resetting down counter',
+                        hostname, prev, required)
+
+        if required <= 1:
+            # No grace period configured -- fence on first detection.
+            return
+
+        for hostname in down_hostnames:
+            self.host_down_cycles[hostname] += 1
+            logging.debug('Host %s down for %d/%d consecutive poll cycle(s)',
+                          hostname, self.host_down_cycles[hostname], required)
+
+    def within_fence_grace_period(self, host: str) -> bool:
+        """Return True if the host has not yet been down long enough to fence.
+
+        Relies on counters maintained by :meth:`record_down_cycles`.
+        """
+        required = self.config.get_config_value('FENCE_AFTER_DOWN_CYCLES')
+        if required <= 1:
+            return False
+        return self.host_down_cycles.get(_extract_hostname(host), 0) < required
 
     def get_connection(self) -> Optional[OpenStackClient]:
         """Get cloud client connection, using injected client or creating a new one."""
@@ -3412,6 +3478,32 @@ def _filter_reachable_hosts(service, compute_nodes):
     return unreachable, skipped, False
 
 
+def _emit_grace_deferred_event(service, grace_deferred, required):
+    """Emit a single aggregated cluster-level HostDownGrace event.
+
+    One event per cycle (not per host) with at most 10 host details to stay
+    within K8s event message size limits and to avoid blocking the poll loop on
+    many synchronous API calls. Per-host accounting lives in the
+    instanceha_fencing_deferred_total metric.
+    """
+    deferred_entries = sorted(
+        f'{svc.host} ({service.host_down_cycles.get(_extract_hostname(svc.host), 0)}/{required})'
+        for svc in grace_deferred)
+    max_event_hosts = 10
+    displayed_entries = deferred_entries[:max_event_hosts]
+    remaining_entries = len(deferred_entries) - len(displayed_entries)
+    if remaining_entries:
+        displayed_entries.append(f'and {remaining_entries} more')
+    deferred_desc = ', '.join(displayed_entries)
+    logging.warning(
+        'Deferring fencing for %d host(s) still within the %d-cycle grace period: %s',
+        len(grace_deferred), required, deferred_desc)
+    _emit_k8s_event('cluster', 'HostDownGrace',
+                    f'Deferring fencing for {len(grace_deferred)} host(s) still within the '
+                    f'{required}-cycle grace period: {deferred_desc}',
+                    event_type='Warning')
+
+
 def _admit_stale_services(conn, service, services, compute_nodes, to_resume):
     """Evaluate safety gates and submit accepted hosts for background processing."""
     # Convert generators to lists - needed for multiple iterations and length checks
@@ -3469,12 +3561,57 @@ def _admit_stale_services(conn, service, services, compute_nodes, to_resume):
         if not (compute_nodes or to_resume):
             return
 
-        if compute_nodes:
-            logging.warning('The following computes are down: %s', [svc.host for svc in compute_nodes])
-            for svc in compute_nodes:
-                _emit_k8s_event(svc.host, 'HostDown',
-                                'Compute host detected as down', event_type='Warning')
-                HOST_DOWN_TOTAL.labels(host=svc.host).inc()
+        # Fencing grace period (FENCE_AFTER_DOWN_CYCLES): split the detected-down
+        # hosts into those that have been down long enough to fence and those
+        # still within the grace period. The all-services-stale gate above and the
+        # threshold gates below evaluate the full detected-down set; grace only
+        # narrows which hosts are actually fenced. Counters are maintained in the
+        # main loop by record_down_cycles().
+        required = service.config.get_config_value('FENCE_AFTER_DOWN_CYCLES')
+        grace_deferred = []
+        if compute_nodes and isinstance(required, int) and required > 1:
+            grace_deferred = [svc for svc in compute_nodes
+                              if service.within_fence_grace_period(svc.host)]
+        deferred_hostnames = {svc.host for svc in grace_deferred}
+        fence_candidates = [svc for svc in compute_nodes if svc.host not in deferred_hostnames]
+
+        # The deferral metric is cheap/non-blocking -- record every deferred host
+        # each cycle regardless of which gate ultimately decides this cycle.
+        for svc in grace_deferred:
+            FENCING_DEFERRED_TOTAL.labels(host=svc.host).inc()
+
+        grace_active = isinstance(required, int) and required > 1
+        if fence_candidates:
+            if grace_active:
+                # Annotate with the consecutive down-cycle count so operators can
+                # see the grace period was exhausted before fencing (e.g. "5/5").
+                down_desc = [
+                    f'{svc.host} ({service.host_down_cycles.get(_extract_hostname(svc.host), 0)}/{required})'
+                    for svc in fence_candidates
+                ]
+            else:
+                down_desc = [svc.host for svc in fence_candidates]
+            logging.warning('The following computes are down: %s', down_desc)
+            for svc in fence_candidates:
+                # Deferred hosts are omitted here and reported via the single
+                # cluster-level HostDownGrace event instead, to avoid a
+                # synchronous API request per deferred host on every poll.
+                message = 'Compute host detected as down'
+                if grace_active:
+                    cycles = service.host_down_cycles.get(_extract_hostname(svc.host), 0)
+                    message = f'{message} ({cycles}/{required} down cycles)'
+                _emit_k8s_event(svc.host, 'HostDown', message, event_type='Warning')
+        for svc in compute_nodes:
+            HOST_DOWN_TOTAL.labels(host=svc.host).inc()
+
+        # If every detected-down host is still within the grace period there is
+        # nothing to fence this cycle. Emit the aggregated grace notification and
+        # skip the expensive evacuation-resource discovery (forced evacuable-cache
+        # refresh + per-host server queries) and the threshold gates below, which
+        # only matter when a host may actually be fenced.
+        if grace_deferred and not fence_candidates and not to_resume:
+            _emit_grace_deferred_event(service, grace_deferred, required)
+            return
 
         # Fetch aggregates once per poll cycle to avoid redundant API calls
         aggregates = None
@@ -3519,6 +3656,18 @@ def _admit_stale_services(conn, service, services, compute_nodes, to_resume):
                                len(agg_blocked), [svc.host for svc in agg_blocked])
             if not compute_nodes and not to_resume:
                 logging.warning('All compute nodes blocked by per-aggregate thresholds')
+                return
+
+        # Grace filter: now that the safety gates (all-services-stale, cluster and
+        # per-aggregate thresholds) have evaluated the full detected-down set, fence
+        # only hosts past the grace threshold. The all-deferred case short-circuited
+        # above; here at least one host was eligible when we entered. The metric was
+        # already recorded above; emit the single aggregated event once.
+        if deferred_hostnames:
+            compute_nodes = [svc for svc in compute_nodes
+                             if svc.host not in deferred_hostnames]
+            _emit_grace_deferred_event(service, grace_deferred, required)
+            if not (compute_nodes or to_resume):
                 return
 
         # Per-cycle rate limit: cap how many hosts can be fenced in one poll cycle
@@ -3867,6 +4016,10 @@ def main():
 
             services = conn.services.list(binary="nova-compute")
             if not services:
+                # A successful empty response means no host is currently
+                # reported down. Clear grace counters so a host that reappears
+                # later starts a fresh consecutive-down sequence.
+                service.record_down_cycles([])
                 logging.info("Poll cycle completed: no compute services found, next poll in %ds", poll_interval)
                 service.shutdown_event.wait(poll_interval)
                 continue
@@ -3875,6 +4028,13 @@ def main():
             compute_nodes, to_resume, to_reenable = _categorize_services(services, target_date)
 
             compute_nodes_list = list(compute_nodes)
+
+            # Track consecutive down cycles for the fencing grace period
+            # (FENCE_AFTER_DOWN_CYCLES). Counters must be updated on the full
+            # detected-down set every cycle, before the safety gates run; the
+            # actual deferral happens inside _admit_stale_services so those gates
+            # still evaluate the complete set.
+            service.record_down_cycles(compute_nodes_list)
 
             _admit_stale_services(conn, service, services, compute_nodes_list, to_resume)
             _process_reenabling(conn, service, to_reenable)
