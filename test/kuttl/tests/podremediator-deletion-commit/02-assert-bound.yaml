@@ -1,0 +1,19 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 180
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      POD=podremediator-lease-0
+      for attempt in $(seq 1 90); do
+        phase=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        finalizers=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.finalizers}' 2>/dev/null || true)
+        pod_uid=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        if [ "$phase" = "Bound" ] && echo "$finalizers" | grep -q 'kubernetes.io/pvc-protection' && [ -n "$pod_uid" ]; then
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "StatefulSet claim did not bind with PVC protection while its Pod was present"
+      oc get pvc "$CLAIM" -n "$NAMESPACE" -o yaml || true
+      exit 1
