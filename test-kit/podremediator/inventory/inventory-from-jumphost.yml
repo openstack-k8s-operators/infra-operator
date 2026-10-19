@@ -1,0 +1,40 @@
+# Inventory to use when the playbook is run **from the jump host** (not on the controller).
+# Ansible runs on the jump host; it SSHs to the controller only to run tasks that need the cluster (oc, kubeconfig).
+#
+# Fill in the CHANGEME_* values for your environment before use.
+#
+# - "Run from jump host" = you execute ansible-playbook on the jump host (e.g. su - <user>, cd repo, then ansible-playbook).
+# - Steps that use oc/kubernetes run ON controller0 via SSH (hosts: controllers).
+# - Virsh checks run on the jump host (localhost) with become.
+#
+# On the jump host, from repo root:
+#   ansible-playbook -i test-kit/podremediator/inventory/inventory-from-jumphost.yml \
+#     test-kit/podremediator/playbooks/runbook-podremediator-poc.yml \
+#     -e "custom_operator_image=quay.io/...@sha256:..."
+#   If oc is not in PATH on the controller: -e "oc_cmd=/path/to/oc"
+#
+# Controller must have: oc (or oc_cmd), kubeconfig, and Python kubernetes library (for kubernetes.core).
+#
+# Also fill in inventory/group_vars/all/local.yml (copy from local.yml.example) with
+# controller_user_home and controller_pythonpath for your environment.
+
+all:
+  children:
+    controllers:
+      hosts:
+        controller0:
+          ansible_host: CHANGEME_CONTROLLER_HOST
+          ansible_user: CHANGEME_CONTROLLER_USER
+          ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+          # So Python finds the user's ~/.local (kubernetes + deps); module runs may not inherit login env.
+          # Override controller_user_home and controller_pythonpath in group_vars/all/local.yml.
+          ansible_env:
+            HOME: "{{ controller_user_home }}"
+            PYTHONPATH: "{{ controller_pythonpath }}"
+    # Only defined here: used to run virsh checks on the jump host (localhost when run from there).
+    virsh_hosts:
+      hosts:
+        localhost:
+      vars:
+        ansible_connection: local
+        ansible_become: true

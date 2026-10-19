@@ -1,0 +1,17 @@
+# Copy this file to local.yml (same directory) and fill in your values.
+# local.yml is gitignored — never commit it.
+#
+# These variables are used by all playbooks to locate kubeconfig and credentials
+# on the controller host, and to identify the remote Python environment.
+#
+# Usage:
+#   cp inventory/group_vars/all/local.yml.example inventory/group_vars/all/local.yml
+#   # Edit local.yml with your values
+#   ansible-playbook -i inventory/inventory-from-jumphost.yml playbooks/runbook-podremediator-poc.yml ...
+
+# Home directory of the user running oc/kubernetes on the controller host.
+controller_user_home: /home/CHANGEME_USER
+
+# Full PYTHONPATH for the controller user's Python environment (kubernetes library).
+# Adjust python version (e.g. python3.9, python3.11) to match the controller host.
+controller_pythonpath: /home/CHANGEME_USER/.local/lib/python3.X/site-packages
