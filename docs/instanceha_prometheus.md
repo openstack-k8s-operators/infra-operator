@@ -150,6 +150,7 @@ Counters increase monotonically and reset to zero on pod restart.
 | `instanceha_evacuation_total` | `host`, `result` | Host-level evacuation operations. `result`: `started`, `succeeded`, `failed` |
 | `instanceha_instance_evacuation_total` | `host`, `result` | Per-instance evacuation operations (smart/orchestrated mode). `result`: `started`, `succeeded`, `failed` |
 | `instanceha_host_down_total` | `host` | Host-down detections (each poll cycle where a host is seen as down) |
+| `instanceha_fencing_deferred_total` | `host` | Times fencing was deferred while waiting for a host to recover within the `FENCE_AFTER_DOWN_CYCLES` grace period |
 | `instanceha_host_reachable_total` | `host` | Hosts reported down by Nova but still reachable via heartbeat -- fencing skipped |
 | `instanceha_host_reenabled_total` | `host` | Hosts re-enabled after successful evacuation |
 | `instanceha_threshold_exceeded_total` | -- | Evacuations skipped because the percentage of failed hosts exceeded the global threshold |
