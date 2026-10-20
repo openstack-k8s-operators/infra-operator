@@ -120,9 +120,12 @@ spec:
                     minLength: 1
                     type: string
                   minTLSVersion:
-                    default: "1.2"
-                    description: MinTLSVersion - Minimum TLS version for the metrics
-                      endpoint
+                    default: "1.3"
+                    description: |-
+                      MinTLSVersion - Minimum TLS version for the metrics endpoint. Only TLS 1.3
+                      is accepted: TLS 1.2 does not support the hybrid post-quantum key exchange
+                      (X25519MLKEM768) and is rejected by the validating webhook. The enum retains
+                      "1.2" for CRD backward compatibility (enum values may not be removed).
                     enum:
                     - "1.2"
                     - "1.3"
