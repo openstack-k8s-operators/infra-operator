@@ -53,6 +53,8 @@ InstanceHA runs as a Kubernetes-managed workload alongside the OpenStack control
 
 1. **Detection**: The agent polls the Nova API every `POLL` seconds (default: 45). It queries all `nova-compute` services and checks each one's `updated_at` timestamp. A service is considered failed if it is reported as `down` or if its `updated_at` timestamp is older than `DELTA` seconds (default: 30). When heartbeat verification is enabled (`CHECK_HEARTBEAT`), both the Nova service-list poll and the UDP heartbeat channel must agree that a host is unreachable before it is marked as failed.
 
+   Optionally, `FENCE_AFTER_DOWN_CYCLES` (default: 1) requires a host to be detected down for that many *consecutive* poll cycles before it is fenced. The default of 1 fences on first detection; a higher value grants a grace period of roughly `(N-1) * POLL` seconds so a host can recover on its own -- for example, nova-compute reconnecting to RabbitMQ -- before its instances are evacuated. The per-host counter resets as soon as the host stops being reported down. The deferral is applied *after* the other safety checks (so the threshold and all-services-stale gates still see every down host). When those gates allow evaluation, hosts held in the grace period are summarized in one cluster-level `HostDownGrace` event per cycle. This state is in-memory only, so restarting the InstanceHA pod resets the counters and the grace period starts over (erring toward waiting longer, never fencing early).
+
 2. **Safety checks**: Before acting, the agent verifies that the total percentage of down and forced_down hosts does not exceed the `THRESHOLD` (default: 50%) -- calculated against all services (or all evacuable hosts when `TAGGED_AGGREGATES` is enabled). Previously-evacuated hosts that remain forced_down count toward this total, catching slow cascades. The agent also verifies that at least one `nova-scheduler` is running. These checks prevent cascading evacuations during infrastructure-wide outages. A `ThresholdExceeded` K8s event is emitted when the limit is hit.
 
 3. **Fencing**: The failed host is powered off via its baseboard management controller (BMC) using IPMI, Redfish, or the Metal3 Kubernetes API. Fencing ensures the host is truly offline before evacuation begins, preventing split-brain scenarios where the old and new copies of an instance run simultaneously. The server is locked in Nova (API microversion 2.73, reason `instanceha-evacuation`) to prevent concurrent operations.
@@ -104,7 +106,8 @@ InstanceHA emits Kubernetes events on the InstanceHa CR to provide observability
 
 | Event | Type | Description |
 |-------|------|-------------|
-| `HostDown` | Warning | Compute host detected as down |
+| `HostDown` | Warning | Compute host detected as down and not held by the fencing grace period (message includes the down-cycle count, e.g. `5/5`, when `FENCE_AFTER_DOWN_CYCLES` > 1) |
+| `HostDownGrace` | Warning | One or more hosts remain within the `FENCE_AFTER_DOWN_CYCLES` grace period; one aggregated cluster-level event per cycle, unless an earlier safety gate (e.g. `ThresholdExceeded`, `AllServicesStale`) ends the cycle first |
 | `FencingStarted` | Normal | Host fencing initiated |
 | `FencingSucceeded` | Normal | Host fenced successfully |
 | `FencingFailed` | Warning | Fencing operation failed |
@@ -951,6 +954,7 @@ All values are strings in the ConfigMap. The agent converts and validates them a
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `FENCE_AFTER_DOWN_CYCLES` | int | 1 (range: 1-100) | Consecutive poll cycles a host must be detected down before it is fenced. 1 = fence on first detection; higher values grant a `~(N-1) * POLL` second grace period for the host to recover (e.g. reconnect to RabbitMQ). Counter is in-memory and resets on recovery or pod restart |
 | `CHECK_KDUMP` | bool | false | Enable kdump detection via UDP listener |
 | `CHECK_HEARTBEAT` | bool | false | Enable heartbeat verification via UDP listener |
 | `HEARTBEAT_CLIFF_THRESHOLD` | int | 50 (range: 10-100) | Percentage drop in active heartbeat hosts that triggers cliff detection (skips fencing for that cycle) |
