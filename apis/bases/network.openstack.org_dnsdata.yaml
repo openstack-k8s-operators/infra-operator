@@ -62,9 +62,24 @@ spec:
                   description: DNSHost holds the mapping between IP and hostnames
                     that will be added to dnsmasq hosts file.
                   properties:
-                    hostnames:
-                      description: Hostnames for the IP address.
+                    cnames:
+                      description: |-
+                        CNAMEs are additional hostnames registered as DNS aliases (dnsmasq `cname=`
+                        records) of the first entry in Hostnames, instead of duplicate host-file
+                        entries. Aliases and the canonical name must be DNS-1123 subdomains, and
+                        exactly one entry in Hostnames is required.
                       items:
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    hostnames:
+                      description: Hostnames for the IP address. Names must be DNS-1123
+                        subdomains.
+                      items:
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       type: array
                     ip:

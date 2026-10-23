@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //revive:disable:dot-imports
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -90,6 +91,87 @@ var _ = Describe("Service controller", func() {
 		})
 	})
 
+	When("A Service is created with the cnames annotation", func() {
+		BeforeEach(func() {
+			instance := CreateDNSMasq(namespace, GetDefaultDNSMasqSpec())
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			serviceName = types.NamespacedName{
+				Name:      "some-service",
+				Namespace: namespace,
+			}
+			svcDNSData = types.NamespacedName{
+				Name:      fmt.Sprintf("%s-svc", dnsMasqName.Name),
+				Namespace: namespace,
+			}
+
+			svc := CreateLoadBalancerService(serviceName, true, "custom.example.com", "invalid alias")
+
+			DeferCleanup(th.DeleteInstance, svc)
+			DeferCleanup(th.DeleteInstance, instance)
+		})
+
+		It("should register valid CNAME aliases and ignore invalid aliases", func() {
+			svc := th.GetService(serviceName)
+			Expect(svc).To(Not(BeNil()))
+
+			Eventually(func(g Gomega) {
+				dnsdata := GetDNSData(svcDNSData)
+				g.Expect(dnsdata).To(Not(BeNil()))
+				g.Expect(dnsdata.Spec.Hosts).To(Not(BeNil()))
+				g.Expect(dnsdata.Spec.Hosts[0].IP).To(Equal("172.20.0.80"))
+				g.Expect(dnsdata.Spec.Hosts[0].Hostnames).To(ConsistOf(
+					fmt.Sprintf("some-service.%s.svc", namespace)))
+				g.Expect(dnsdata.Spec.Hosts[0].CNAMEs).To(ConsistOf("custom.example.com"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("Two Services share the same LoadBalancer IP and one sets the cnames annotation", func() {
+		var otherServiceName types.NamespacedName
+
+		BeforeEach(func() {
+			instance := CreateDNSMasq(namespace, GetDefaultDNSMasqSpec())
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			serviceName = types.NamespacedName{
+				Name:      "some-service",
+				Namespace: namespace,
+			}
+			otherServiceName = types.NamespacedName{
+				Name:      "other-service",
+				Namespace: namespace,
+			}
+			svcDNSData = types.NamespacedName{
+				Name:      fmt.Sprintf("%s-svc", dnsMasqName.Name),
+				Namespace: namespace,
+			}
+
+			svc := CreateLoadBalancerService(serviceName, true, "custom.example.com")
+			otherSvc := CreateLoadBalancerService(otherServiceName, true)
+
+			DeferCleanup(th.DeleteInstance, svc)
+			DeferCleanup(th.DeleteInstance, otherSvc)
+			DeferCleanup(th.DeleteInstance, instance)
+		})
+
+		It("drops the CNAMEs instead of producing an entry with more than one canonical hostname", func() {
+			Eventually(func(g Gomega) {
+				dnsdata := GetDNSData(svcDNSData)
+				g.Expect(dnsdata).To(Not(BeNil()))
+				g.Expect(dnsdata.Spec.Hosts).To(HaveLen(1))
+				g.Expect(dnsdata.Spec.Hosts[0].Hostnames).To(ConsistOf(
+					fmt.Sprintf("some-service.%s.svc", namespace),
+					fmt.Sprintf("other-service.%s.svc", namespace)))
+				g.Expect(dnsdata.Spec.Hosts[0].CNAMEs).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("A Service is created without dnsmasq annotation", func() {
 		BeforeEach(func() {
 			instance := CreateDNSMasq(namespace, GetDefaultDNSMasqSpec())
@@ -120,6 +202,52 @@ var _ = Describe("Service controller", func() {
 				g.Expect(dnsdata).To(Not(BeNil()))
 				g.Expect(dnsdata.Spec.DNSDataLabelSelectorValue).To(Equal("dnsdata"))
 				g.Expect(dnsdata.Spec.Hosts).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("A Service has an invalid hostname annotation", func() {
+		var validServiceName types.NamespacedName
+
+		BeforeEach(func() {
+			instance := CreateDNSMasq(namespace, GetDefaultDNSMasqSpec())
+			dnsMasqName = types.NamespacedName{
+				Name:      instance.GetName(),
+				Namespace: namespace,
+			}
+			serviceName = types.NamespacedName{
+				Name:      "invalid-service",
+				Namespace: namespace,
+			}
+			validServiceName = types.NamespacedName{
+				Name:      "valid-service",
+				Namespace: namespace,
+			}
+			svcDNSData = types.NamespacedName{
+				Name:      fmt.Sprintf("%s-svc", dnsMasqName.Name),
+				Namespace: namespace,
+			}
+
+			invalidService := CreateLoadBalancerService(serviceName, false)
+			invalidService.Annotations = map[string]string{
+				service.AnnotationHostnameKey: "invalid hostname",
+			}
+			Expect(k8sClient.Update(ctx, invalidService)).To(Succeed())
+			validService := CreateLoadBalancerService(validServiceName, true)
+
+			DeferCleanup(th.DeleteInstance, invalidService)
+			DeferCleanup(th.DeleteInstance, validService)
+			DeferCleanup(th.DeleteInstance, instance)
+		})
+
+		It("skips the invalid Service without blocking valid DNSData", func() {
+			Eventually(func(g Gomega) {
+				dnsdata := GetDNSData(svcDNSData)
+				g.Expect(dnsdata).To(Not(BeNil()))
+				g.Expect(dnsdata.Spec.Hosts).To(HaveLen(1))
+				g.Expect(dnsdata.Spec.Hosts[0].IP).To(Equal("172.20.0.80"))
+				g.Expect(dnsdata.Spec.Hosts[0].Hostnames).To(ConsistOf(
+					fmt.Sprintf("valid-service.%s.svc", namespace)))
 			}, timeout, interval).Should(Succeed())
 		})
 	})

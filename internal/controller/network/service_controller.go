@@ -21,13 +21,16 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 
 	"github.com/go-logr/logr"
 	networkv1 "github.com/openstack-k8s-operators/infra-operator/apis/network/v1beta1"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -122,9 +125,22 @@ func (r *ServiceReconciler) getServiceDNSData(
 
 	for _, svc := range svcList.Items {
 		if svc.Annotations != nil {
-			// if the service has our networkv1.AnnotationHostnameKey get
-			// the ips from its status if it is a LoadBalancer type
-			if hostname, ok := svc.Annotations[networkv1.AnnotationHostnameKey]; ok && svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+			// if the service has our service.AnnotationHostnameKey get
+			// the ips from its status if it is a LoadBalancer type.
+			// service.AnnotationCNAMEsKey may additionally carry a comma
+			// separated list of extra hostnames (e.g. a custom public
+			// hostname) registered as DNS aliases (CNAMEs) of hostname.
+			if hostname, ok := svc.Annotations[service.AnnotationHostnameKey]; ok &&
+				svc.Spec.Type == corev1.ServiceTypeLoadBalancer && len(validation.IsDNS1123Subdomain(hostname)) == 0 {
+				var cnames []string
+				if cnameAnno, ok := svc.Annotations[service.AnnotationCNAMEsKey]; ok {
+					for _, cname := range strings.Split(cnameAnno, ",") {
+						if cname = strings.TrimSpace(cname); cname != "" && len(validation.IsDNS1123Subdomain(cname)) == 0 {
+							cnames = append(cnames, cname)
+						}
+					}
+				}
+
 				if len(svc.Status.LoadBalancer.Ingress) > 0 {
 					for _, ingr := range svc.Status.LoadBalancer.Ingress {
 						addr := net.ParseIP(ingr.IP)
@@ -136,10 +152,17 @@ func (r *ServiceReconciler) getServiceDNSData(
 							svcDNSHosts[addr.String()] = networkv1.DNSHost{
 								IP:        addr.String(),
 								Hostnames: []string{hostname},
+								CNAMEs:    cnames,
 							}
 						} else {
+							// Multiple Services share this IP (e.g. a shared
+							// VIP): CNAMEs require exactly one canonical
+							// Hostname, so once a second hostname joins this
+							// entry any CNAMEs become ambiguous and are
+							// dropped rather than forwarded to DNSData.
 							host.Hostnames = append(host.Hostnames, hostname)
 							sort.Strings(host.Hostnames)
+							host.CNAMEs = nil
 
 							svcDNSHosts[addr.String()] = host
 						}

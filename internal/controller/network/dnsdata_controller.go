@@ -18,12 +18,14 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +45,17 @@ import (
 	dnsmasq "github.com/openstack-k8s-operators/infra-operator/internal/dnsmasq"
 	corev1 "k8s.io/api/core/v1"
 )
+
+// ErrInvalidDNSData indicates invalid DNS names or CNAME configuration in the
+// DNSData spec. These are permanent errors that need a spec change to fix.
+var ErrInvalidDNSData = errors.New("invalid DNSData spec")
+
+func validateDNSName(fieldPath, name string) error {
+	if problems := validation.IsDNS1123Subdomain(name); len(problems) > 0 {
+		return fmt.Errorf("%w: %s %q: %s", ErrInvalidDNSData, fieldPath, name, strings.Join(problems, ", "))
+	}
+	return nil
+}
 
 // DNSDataReconciler reconciles a DNSData object
 type DNSDataReconciler struct {
@@ -108,17 +121,24 @@ func (r *DNSDataReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// Always patch the instance status when exiting this function so we can
 	// persist any changes.
 	defer func() {
-		// Don't update the status, if reconciler Panics
+		// Don't update the status, if Reconciler Panics
 		if r := recover(); r != nil {
-			Log.Info(fmt.Sprintf("panic during reconcile %v\n", r))
+			Log.Info(fmt.Sprintf("Panic during reconcile %v\n", r))
 			panic(r)
 		}
-		condition.RestoreLastTransitionTimes(
-			&instance.Status.Conditions, savedConditions)
-		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
+		// update the Ready condition based on the sub conditions
+		if instance.Status.Conditions.AllSubConditionIsTrue() {
+			instance.Status.Conditions.MarkTrue(
+				condition.ReadyCondition, condition.ReadyMessage)
+		} else {
+			// something is not ready so reset the Ready condition
+			instance.Status.Conditions.MarkUnknown(
+				condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage)
+			// and recalculate it based on the state of the rest of the conditions
 			instance.Status.Conditions.Set(
 				instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
+		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
 		err := helper.PatchInstance(ctx, instance)
 		if err != nil {
 			_err = err
@@ -187,6 +207,12 @@ func (r *DNSDataReconciler) reconcileNormal(ctx context.Context, instance *netwo
 			condition.SeverityWarning,
 			condition.ServiceConfigReadyErrorMessage,
 			err.Error()))
+		if errors.Is(err, ErrInvalidDNSData) {
+			// Permanent error from an invalid CR spec: requeuing via a
+			// returned error (exponential backoff) won't help until the
+			// spec changes, which already triggers its own reconcile.
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -223,16 +249,90 @@ func (r *DNSDataReconciler) generateServiceConfigMaps(
 	configMapData := map[string]string{}
 
 	var configData string
-	for _, host := range instance.Spec.Hosts {
-		configData += host.IP
-		hosts := host.Hostnames
-		sort.Strings(hosts)
-		hostsStr := strings.Join(hosts, " ")
-		configData += " " + hostsStr
-		configData += "\n"
+	var cnameData string
+	var validationErr error
+	cnameTargets := map[string]string{}
+	invalidCNAMEs := map[string]struct{}{}
+	recordValidationError := func(err error) {
+		if validationErr == nil {
+			validationErr = err
+		}
+	}
+	for hostIndex, host := range instance.Spec.Hosts {
+		hostnames := make([]string, 0, len(host.Hostnames))
+		for hostnameIndex, hostname := range host.Hostnames {
+			fieldPath := fmt.Sprintf("spec.hosts[%d].hostnames[%d]", hostIndex, hostnameIndex)
+			if err := validateDNSName(fieldPath, hostname); err != nil {
+				recordValidationError(err)
+				continue
+			}
+			hostnames = append(hostnames, hostname)
+		}
+		if len(host.Hostnames) > 0 && len(hostnames) == 0 {
+			continue
+		}
+
+		sort.Strings(hostnames)
+		configData += host.IP + " " + strings.Join(hostnames, " ") + "\n"
+
+		if len(host.CNAMEs) > 0 {
+			if len(host.Hostnames) != 1 {
+				// Ambiguous which hostname is canonical: surface the error via
+				// the ServiceConfigReadyCondition below but keep generating
+				// config for the other, valid hosts instead of aborting the
+				// whole ConfigMap.
+				recordValidationError(fmt.Errorf(
+					"%w: spec.hosts[%d].cnames requires exactly one hostname as its canonical name", ErrInvalidDNSData, hostIndex))
+				continue
+			}
+			if len(hostnames) != 1 {
+				continue
+			}
+			for cnameIndex, cname := range host.CNAMEs {
+				fieldPath := fmt.Sprintf("spec.hosts[%d].cnames[%d]", hostIndex, cnameIndex)
+				if err := validateDNSName(fieldPath, cname); err != nil {
+					recordValidationError(err)
+					continue
+				}
+				canonical := hostnames[0]
+				if cname == canonical {
+					delete(cnameTargets, cname)
+					invalidCNAMEs[cname] = struct{}{}
+					recordValidationError(fmt.Errorf(
+						"%w: %s alias %q cannot target itself", ErrInvalidDNSData, fieldPath, cname))
+					continue
+				}
+				if _, invalid := invalidCNAMEs[cname]; invalid {
+					continue
+				}
+				if existingCanonical, exists := cnameTargets[cname]; exists {
+					if existingCanonical != canonical {
+						delete(cnameTargets, cname)
+						invalidCNAMEs[cname] = struct{}{}
+						recordValidationError(fmt.Errorf(
+							"%w: CNAME alias %q has conflicting canonical names %q and %q",
+							ErrInvalidDNSData, cname, existingCanonical, canonical))
+					}
+					continue
+				}
+				cnameTargets[cname] = canonical
+			}
+		}
+	}
+
+	cnameNames := make([]string, 0, len(cnameTargets))
+	for cname := range cnameTargets {
+		cnameNames = append(cnameNames, cname)
+	}
+	sort.Strings(cnameNames)
+	for _, cname := range cnameNames {
+		cnameData += fmt.Sprintf("cname=%s,%s\n", cname, cnameTargets[cname])
 	}
 
 	configMapData[instance.Name] = configData
+	if cnameData != "" {
+		configMapData[instance.Name+"-cnames"] = cnameData
+	}
 
 	cms := []util.Template{
 		{
@@ -245,5 +345,9 @@ func (r *DNSDataReconciler) generateServiceConfigMaps(
 		},
 	}
 
-	return configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
+	if err := configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars); err != nil {
+		return err
+	}
+
+	return validationErr
 }
