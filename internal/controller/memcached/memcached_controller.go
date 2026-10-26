@@ -52,6 +52,7 @@ import (
 	"github.com/go-logr/logr"
 	memcachedv1 "github.com/openstack-k8s-operators/infra-operator/apis/memcached/v1beta1"
 	memcached "github.com/openstack-k8s-operators/infra-operator/internal/memcached"
+	"github.com/openstack-k8s-operators/infra-operator/internal/tlsprofile"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -500,6 +501,20 @@ func (r *Reconciler) generateConfigMaps(
 			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_verify_mode=2"
 		}
 
+		// Apply the cluster-wide TLS profile, if the openstack-operator
+		// published one. Without it memcached keeps the OpenSSL defaults.
+		profile, err := tlsprofile.Get(ctx, h, instance.Namespace)
+		if err != nil {
+			Log.Error(err, "Unable to read the cluster TLS profile")
+			return err
+		}
+		if minVersion := profile.MemcachedMinVersion(); minVersion != "" {
+			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_min_version=" + minVersion
+		}
+		if ciphers := profile.MemcachedCiphers(); ciphers != "" {
+			memcachedTLSOptions = memcachedTLSOptions + " -o ssl_ciphers=" + ciphers
+		}
+
 		memcachedPort = fmt.Sprint(memcached.MemcachedTLSPort)
 		instance.Status.TLSSupport = true
 	} else {
@@ -597,6 +612,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&topologyv1.Topology{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findObjectsForTLSProfile),
+			builder.WithPredicates(tlsprofile.Predicate()),
+		).
 		Complete(r)
 }
 
@@ -630,6 +650,37 @@ func (r *Reconciler) findObjectsForSrc(ctx context.Context, src client.Object) [
 				},
 			)
 		}
+	}
+
+	return requests
+}
+
+// findObjectsForTLSProfile - returns a reconcile request for every Memcached CR
+// in the namespace of the cluster TLS profile ConfigMap. Unlike the other
+// watched inputs the profile is not referenced from the spec, so there is no
+// field index to select on: every CR in the namespace renders its config from
+// it.
+func (r *Reconciler) findObjectsForTLSProfile(ctx context.Context, src client.Object) []reconcile.Request {
+	Log := r.GetLogger(ctx)
+
+	crList := &memcachedv1.MemcachedList{}
+	if err := r.List(ctx, crList, &client.ListOptions{Namespace: src.GetNamespace()}); err != nil {
+		Log.Error(err, fmt.Sprintf("listing %s in %s", crList.GroupVersionKind().Kind, src.GetNamespace()))
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(crList.Items))
+	for _, item := range crList.Items {
+		Log.Info(fmt.Sprintf("TLS profile %s changed, reconcile: %s - %s", src.GetName(), item.GetName(), item.GetNamespace()))
+
+		requests = append(requests,
+			reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      item.GetName(),
+					Namespace: item.GetNamespace(),
+				},
+			},
+		)
 	}
 
 	return requests
