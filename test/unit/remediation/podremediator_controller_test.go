@@ -153,6 +153,109 @@ func TestDisabledRecoveryInvalidatesConsent(t *testing.T) {
 	}
 }
 
+func TestRemediationPausedRetainsRequestAndConsentUntilResumed(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	pr.Spec.RemediationPaused = true
+
+	pvcKey := client.ObjectKey{Namespace: "test", Name: "claim"}
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, pvcKey, pvc); err != nil {
+		t.Fatal(err)
+	}
+	pvc.Annotations = nil
+	if err := r.Update(ctx, pvc); err != nil {
+		t.Fatal(err)
+	}
+	pod := podUsingClaim("pod", "worker-0", "pod-uid", nil)
+	if err := r.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := reconcileRemediation(ctx, r, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != remediationctrl.DefaultConsentPollInterval {
+		t.Fatalf("paused request requeues after %s", result.RequeueAfter)
+	}
+	if err := r.Get(ctx, pvcKey, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] != "worker-0" || pvc.Annotations[remediationv1.RequestIDAnnotation] == "" {
+		t.Fatalf("paused remediation did not retain the fault-scoped request: %v", pvc.Annotations)
+	}
+	if remediationv1.HasRemediationConsent(pvc.Annotations) {
+		t.Fatal("fresh paused request unexpectedly has application consent")
+	}
+	if !pvc.DeletionTimestamp.IsZero() {
+		t.Fatal("PVC was deleted while remediation was paused")
+	}
+	assertObjectAbsent(t, r.Client, pod, false)
+	ready := pr.Status.Conditions.Get(condition.ReadyCondition)
+	if ready == nil || !strings.Contains(ready.Message, "remediation is paused") {
+		t.Fatalf("pause was not reported in Ready condition: %v", ready)
+	}
+
+	// Consent may be granted while the operational hold is active. It must remain
+	// on the PVC until the hold is lifted.
+	pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+	pvc.Annotations[remediationv1.ConsentIDAnnotation] = pvc.Annotations[remediationv1.RequestIDAnnotation]
+	if err := r.Update(ctx, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, pvcKey, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if !remediationv1.HasRemediationConsent(pvc.Annotations) {
+		t.Fatal("pause cleared valid application consent")
+	}
+	if !pvc.DeletionTimestamp.IsZero() {
+		t.Fatal("PVC was deleted while remediation was paused with consent")
+	}
+	assertObjectAbsent(t, r.Client, pod, false)
+
+	// A new SNR incarnation must invalidate the old consent while paused.
+	snr, err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Get(ctx, "worker-0-snr", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snr.SetUID(types.UID("new-snr-uid"))
+	if _, err := r.DynamicClient.Resource(gvrSelfNodeRemediation).Namespace("test").Update(ctx, snr, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Get(ctx, pvcKey, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if pvc.Annotations[remediationv1.RequestIDAnnotation] != "pr-uid:pvc-uid:new-snr-uid" {
+		t.Fatalf("request was not refreshed for the new SNR: %v", pvc.Annotations)
+	}
+	if remediationv1.HasRemediationConsent(pvc.Annotations) {
+		t.Fatal("consent for the previous SNR was retained")
+	}
+	pvc.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+	pvc.Annotations[remediationv1.ConsentIDAnnotation] = pvc.Annotations[remediationv1.RequestIDAnnotation]
+	if err := r.Update(ctx, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+
+	pr.Spec.RemediationPaused = false
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+	assertObjectAbsent(t, r.Client, pvc, true)
+	assertObjectAbsent(t, r.Client, pod, true)
+}
+
 func TestPodRemediatorOnlyScansOwnNamespace(t *testing.T) {
 	ctx := context.Background()
 	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))

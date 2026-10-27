@@ -29,6 +29,13 @@ type PodRemediatorSpec struct {
 	// Default false: applying the CR enables PVC remediation when NHC/SNR are present; set disabled to true to turn it off.
 	Disabled bool `json:"disabled,omitempty"`
 
+	// RemediationPaused keeps detecting and tagging stuck PVCs but prevents new PVC and Pod deletion transactions.
+	// Pending requests and consent are retained and revalidated when remediation resumes.
+	// Deletions already in progress or past the durable commit boundary continue to completion.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	RemediationPaused bool `json:"remediationPaused,omitempty"`
+
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:items:MinLength=1
 	// +listType=set

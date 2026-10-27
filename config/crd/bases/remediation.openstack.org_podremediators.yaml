@@ -94,6 +94,13 @@ spec:
                 x-kubernetes-validations:
                 - message: must be a valid duration of at least 1s
                   rule: duration(self) >= duration('1s')
+              remediationPaused:
+                default: false
+                description: |-
+                  RemediationPaused keeps detecting and tagging stuck PVCs but prevents new PVC and Pod deletion transactions.
+                  Pending requests and consent are retained and revalidated when remediation resumes.
+                  Deletions already in progress or past the durable commit boundary continue to completion.
+                type: boolean
             type: object
           status:
             description: PodRemediatorStatus defines the observed state of PodRemediator

@@ -47,6 +47,7 @@ const deletionCommitTokenAnnotation = "remediation.openstack.org/pvc-deletion-co
 const deletionCommitFinalizedAnnotation = "remediation.openstack.org/pvc-deletion-commit-finalized"
 
 var errPreparedCommitRejected = errors.New("prepared PVC deletion commit rejected")
+var errPVCRemediationPaused = errors.New("PVC remediation is paused")
 
 const (
 	deletionCommitPhasePrepared  = "prepared"
@@ -156,6 +157,13 @@ func (r *PodRemediatorReconciler) deletePVCAndPods(ctx context.Context, instance
 	requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
 	if !pvcDeletionConsentMatches(pvc, string(instance.UID), node, requestID) {
 		return false, "", fmt.Errorf("cannot commit PVC %s deletion without matching owner-bound consent", pvc.Name)
+	}
+	paused, err := r.isRemediationPaused(ctx, instance)
+	if err != nil {
+		return false, "", fmt.Errorf("check PodRemediator pause before deleting PVC %s: %w", pvc.Name, err)
+	}
+	if paused {
+		return false, "", errPVCRemediationPaused
 	}
 	if pvc.Annotations[remediationv1.PVCDeletionCommittedAnnotation] != "" ||
 		pvc.Annotations[deletionCommitTokenAnnotation] != "" || pvc.Annotations[deletionCommitFinalizedAnnotation] != "" {

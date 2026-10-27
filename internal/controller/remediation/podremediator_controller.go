@@ -19,6 +19,7 @@ package remediation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -451,6 +452,14 @@ func effectiveInterval(specVal *metav1.Duration, reconcilerVal time.Duration, de
 	return defaultVal
 }
 
+func (r *PodRemediatorReconciler) isRemediationPaused(ctx context.Context, instance *remediationv1.PodRemediator) (bool, error) {
+	current := &remediationv1.PodRemediator{}
+	if err := r.safetyReader().Get(ctx, client.ObjectKeyFromObject(instance), current); err != nil {
+		return false, err
+	}
+	return current.Spec.RemediationPaused, nil
+}
+
 // reconcileNormal scans configured PVC namespaces and advances their fencing consent handshakes.
 func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance *remediationv1.PodRemediator) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
@@ -578,6 +587,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	blockedByReplacementPod := resumeResult.BlockedByReplacementPod
 	waitingForConsent := 0
 	waitingForFencing := 0
+	pausedRequests := 0
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
 		if err := r.safetyReader().List(ctx, pvcList, client.InNamespace(ns)); err != nil {
@@ -659,6 +669,11 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					waitingForFencing++
 					continue
 				}
+				if instance.Spec.RemediationPaused {
+					pausedRequests++
+					Log.Info("PVC remediation is paused; retaining the stuck PVC request and any consent", "pvc", pvcKey, "node", stuckOnNode, "consentGranted", remediationv1.HasRemediationConsent(pvc.Annotations))
+					continue
+				}
 				if remediationv1.HasRemediationConsent(pvc.Annotations) {
 					// Re-validate provenance on the DELETING path: the safe-to-delete
 					// annotation alone is not trusted. The PVC's bound PV must still be
@@ -697,8 +712,13 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 					}
 					pending, blocked, err := r.deletePVCAndPods(ctx, instance, pvc, stuckOnNode, Log)
 					if err != nil {
-						Log.Error(err, "delete consented PVC and observed pods", "pvc", pvcKey)
-						hadError = true
+						if errors.Is(err, errPVCRemediationPaused) {
+							pausedRequests++
+							Log.Info("PVC remediation became paused before deletion started; retaining request and consent", "pvc", pvcKey, "node", stuckOnNode)
+						} else {
+							Log.Error(err, "delete consented PVC and observed pods", "pvc", pvcKey)
+							hadError = true
+						}
 					} else if pending {
 						pendingCommittedDeletion = true
 						if blocked != "" {
@@ -761,6 +781,9 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 				continue
 			}
 			Log.Info("Local PVC on unhealthy node; requested fault-scoped consent", "pvc", pvcKey, "node", nodeName)
+			if instance.Spec.RemediationPaused {
+				pausedRequests++
+			}
 
 		}
 	}
@@ -792,6 +815,20 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 			condition.ReadyCondition, InvalidPVCDeletionCommitReason, condition.SeverityWarning,
 			"%s", resumeResult.BlockedByInvalidCommit))
 		return ctrl.Result{RequeueAfter: DefaultConsentPollInterval}, nil
+	}
+
+	if instance.Spec.RemediationPaused {
+		if pausedRequests > 0 {
+			instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
+				"PVC remediation is paused; %d request(s) retained", pausedRequests)
+		} else {
+			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "PVC remediation is paused")
+		}
+		requeueAfter := periodicPoll
+		if pausedRequests > 0 || waitingForConsent > 0 || waitingForFencing > 0 {
+			requeueAfter = consentPoll
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	if waitingForFencing > 0 {

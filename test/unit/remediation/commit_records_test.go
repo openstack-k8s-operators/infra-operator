@@ -133,6 +133,21 @@ func TestMalformedDeletionRecordsFailClosed(t *testing.T) {
 	}
 }
 
+func TestPausedRemediationCompletesFinalizedDeletion(t *testing.T) {
+	ctx := context.Background()
+	r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+	pod := podUsingClaim("pod", "worker-0", "pod-uid", nil)
+	mustCreate(t, r.Client, pod)
+	seedDeletionRecord(t, r.Client, deletionCommitPhaseCommitted, true)
+	pr.Spec.RemediationPaused = true
+
+	if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+		t.Fatal(err)
+	}
+	assertObjectAbsent(t, r.Client, pod, true)
+	assertObjectAbsent(t, r.Client, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "claim"}}, true)
+}
+
 func TestPersistedDeletionAPIFailuresRetry(t *testing.T) {
 	for _, scenario := range []struct {
 		phase, op string
