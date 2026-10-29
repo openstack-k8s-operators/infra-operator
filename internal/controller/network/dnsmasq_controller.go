@@ -18,6 +18,7 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
@@ -151,12 +153,19 @@ func (r *DNSMasqReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Log.Info(fmt.Sprintf("panic during reconcile %v\n", r))
 			panic(r)
 		}
-		condition.RestoreLastTransitionTimes(
-			&instance.Status.Conditions, savedConditions)
-		if instance.Status.Conditions.IsUnknown(condition.ReadyCondition) {
+		// update the Ready condition based on the sub conditions
+		if instance.Status.Conditions.AllSubConditionIsTrue() {
+			instance.Status.Conditions.MarkTrue(
+				condition.ReadyCondition, condition.ReadyMessage)
+		} else {
+			// something is not ready so reset the Ready condition
+			instance.Status.Conditions.MarkUnknown(
+				condition.ReadyCondition, condition.InitReason, condition.ReadyInitMessage)
+			// and recalculate it based on the state of the rest of the conditions
 			instance.Status.Conditions.Set(
 				instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
+		condition.RestoreLastTransitionTimes(&instance.Status.Conditions, savedConditions)
 		err := helper.PatchInstance(ctx, instance)
 		if err != nil {
 			_err = err
@@ -396,25 +405,13 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	serviceAnnotations := map[string]string{}
 	configMapVars := make(map[string]env.Setter)
 
-	// create Configmap for dnsmasq input
-	err := r.generateServiceConfigMaps(ctx, helper, instance, &configMapVars)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ServiceConfigReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.ServiceConfigReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
-	}
-
 	labelSelectorMap := map[string]string{networkv1.DNSDataLabelSelectorKey: strings.ToLower(instance.Spec.DNSDataLabelSelectorValue)}
 	configMaps := &corev1.ConfigMapList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(instance.GetNamespace()),
 		client.MatchingLabels(labelSelectorMap),
 	}
-	err = r.List(ctx, configMaps, listOpts...)
+	err := r.List(ctx, configMaps, listOpts...)
 	if err != nil {
 		err = fmt.Errorf("error listing configmaps for labels: %v - %w", labelSelectorMap, err)
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -430,10 +427,105 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	sort.Slice(configMaps.Items, func(i, j int) bool {
 		return configMaps.Items[i].Name < configMaps.Items[j].Name
 	})
+	// Keep the options ConfigMap independent of the aggregated CNAME data.
+	err = r.generateServiceConfigMaps(ctx, helper, instance, &configMapVars)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
 
+	// Source shards have no DNSData selector label until their names are
+	// published through the host ConfigMap's pointer key.
+	aggregateInputs := &corev1.ConfigMapList{Items: append([]corev1.ConfigMap(nil), configMaps.Items...)}
+	sourceShards, err := r.publishedCNAMESourceShards(ctx, instance.Namespace, configMaps.Items)
+	if k8s_errors.IsNotFound(err) {
+		// DNSData replaced the generation after our list; the next list sees the new pointer.
+		Log.Info("Published CNAME source shard disappeared, retrying", "Reason", err.Error())
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+	aggregateInputs.Items = append(aggregateInputs.Items, sourceShards...)
+	cnameData, cnameWarnings, cnameErr := dnsmasq.AggregateCNAMEConfigMaps(aggregateInputs)
+	for _, warning := range cnameWarnings {
+		Log.Info("Ignoring CNAME alias that conflicts with a host record", "Reason", warning)
+	}
+
+	cnameShards := dnsmasq.SplitCNAMEConfig(cnameData)
+	cnameGeneration, err := util.ObjectHash(cnameData)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("hashing aggregate CNAME generation: %w", err)
+	}
+	cnameShardNames := make([]string, 0, len(cnameShards))
+	selectedNames := make(map[string]struct{}, len(configMaps.Items))
+	for _, cm := range configMaps.Items {
+		selectedNames[cm.Name] = struct{}{}
+	}
+	for shard, data := range cnameShards {
+		name := dnsmasq.CNAMEShardConfigMapName(instance.Name, cnameGeneration, shard)
+		cnameShardNames = append(cnameShardNames, name)
+		if _, selected := selectedNames[name]; selected {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ServiceConfigReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.ServiceConfigReadyErrorMessage,
+				fmt.Sprintf("selected DNSData ConfigMap %q conflicts with the reserved CNAME ConfigMap name", name)))
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		template := util.Template{
+			Name:                 name,
+			Namespace:            instance.Namespace,
+			Type:                 util.TemplateTypeNone,
+			InstanceType:         instance.Kind,
+			CustomData:           map[string]string{dnsmasq.CNAMEShardKey(shard): data},
+			Labels:               labels.GetLabels(instance, labels.GetGroupLabel(dnsmasq.ServiceName), map[string]string{dnsmasq.CNAMEShardLabel: instance.Name}),
+			RequireExistingOwner: true,
+		}
+		err = configmap.EnsureConfigMaps(ctx, helper, instance, []util.Template{template}, &configMapVars)
+		if err != nil {
+			break
+		}
+	}
+	if errors.Is(err, configmap.ErrExistingConfigMapNotOwned) {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+	hostConfigMaps := &corev1.ConfigMapList{}
 	cmNames := []string{}
 	for _, cm := range configMaps.Items {
-		hash, err := configmap.Hash(&cm)
+		if cm.Data[cm.Name] == "" {
+			continue
+		}
+		hostConfigMaps.Items = append(hostConfigMaps.Items, cm)
+		// CNAMEs are hashed through the applied aggregate, not the source ConfigMaps.
+		hash, err := hostConfigMapHash(&cm)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.InputReadyCondition,
@@ -462,7 +554,16 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, err
 	}
 	instance.Status.Hash[common.InputHashName] = inputHash
-	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+	if cnameErr != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			cnameErr.Error()))
+	} else {
+		instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+	}
 
 	// expose the service
 	svcOverride := instance.Spec.Override.Service
@@ -574,7 +675,7 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	}
 
 	// Define a new Deployment object
-	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, configMaps, topology)
+	deplDef := dnsmasq.Deployment(instance, instance.Status.Hash[common.InputHashName], serviceLabels, serviceAnnotations, hostConfigMaps, cnameShardNames, topology)
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,
@@ -611,6 +712,15 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 	// by comparing it with the ObservedGeneration.
 	if deployment.IsReady(deploy) {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+		if err := r.cleanupStaleCNAMEShards(ctx, instance, cnameShardNames); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ServiceConfigReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.ServiceConfigReadyErrorMessage,
+				err.Error()))
+			return ctrl.Result{}, err
+		}
 	} else {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
@@ -621,15 +731,74 @@ func (r *DNSMasqReconciler) reconcileNormal(ctx context.Context, instance *netwo
 		return ctrl.Result{}, nil
 	}
 	// create Deployment - end
-
-	// We reached the end of the Reconcile, update the Ready condition based on
-	// the sub conditions
-	if instance.Status.Conditions.AllSubConditionIsTrue() {
-		instance.Status.Conditions.MarkTrue(
-			condition.ReadyCondition, condition.ReadyMessage)
-	}
 	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
+}
+
+// hostConfigMapHash hashes a DNSData ConfigMap without its CNAME inputs; those
+// are hashed through the applied aggregate shards instead.
+func hostConfigMapHash(cm *corev1.ConfigMap) (string, error) {
+	hostCM := cm.DeepCopy()
+	delete(hostCM.Data, dnsmasq.CNAMEConfigMapKey)
+	delete(hostCM.Data, dnsmasq.CNAMEShardPointerKey)
+	return configmap.Hash(hostCM)
+}
+
+// publishedCNAMESourceShards returns the DNSData CNAME source shards named by
+// the pointer key of each host ConfigMap, verifying ownership and content.
+// A missing shard is returned as a NotFound error.
+func (r *DNSMasqReconciler) publishedCNAMESourceShards(ctx context.Context, namespace string, hostCMs []corev1.ConfigMap) ([]corev1.ConfigMap, error) {
+	var shards []corev1.ConfigMap
+	for _, cm := range hostCMs {
+		pointer := cm.Data[dnsmasq.CNAMEShardPointerKey]
+		if pointer == "" {
+			continue
+		}
+		owner := metav1.GetControllerOf(&cm)
+		for _, name := range strings.Split(pointer, ",") {
+			if name == "" {
+				return nil, fmt.Errorf("DNSData ConfigMap %q has an empty CNAME source shard name", cm.Name)
+			}
+			shard := &corev1.ConfigMap{}
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, shard); err != nil {
+				return nil, fmt.Errorf("published CNAME source shard %q is unavailable: %w", name, err)
+			}
+			shardOwner := metav1.GetControllerOf(shard)
+			if owner == nil || shardOwner == nil || shardOwner.UID != owner.UID || shard.Labels[dnsmasq.DNSDataCNAMEShardLabel] != string(owner.UID) {
+				return nil, fmt.Errorf("CNAME source shard %q does not belong to DNSData ConfigMap %q", name, cm.Name)
+			}
+			if shard.Data[dnsmasq.CNAMEConfigMapKey] == "" {
+				return nil, fmt.Errorf("CNAME source shard %q has no CNAME data", name)
+			}
+			shards = append(shards, *shard)
+		}
+	}
+	return shards, nil
+}
+
+// cleanupStaleCNAMEShards runs after the new Deployment is ready, so old pods
+// no longer need surplus shards.
+// ponytail: while a rollout is stuck every CNAME change leaves another shard
+// generation behind (bounded by etcd, freed once the Deployment is Ready).
+func (r *DNSMasqReconciler) cleanupStaleCNAMEShards(ctx context.Context, instance *networkv1.DNSMasq, shardNames []string) error {
+	shards := &corev1.ConfigMapList{}
+	if err := r.List(ctx, shards, client.InNamespace(instance.Namespace), client.MatchingLabels{dnsmasq.CNAMEShardLabel: instance.Name}); err != nil {
+		return fmt.Errorf("listing CNAME shards: %w", err)
+	}
+	desired := make(map[string]struct{}, len(shardNames))
+	for _, name := range shardNames {
+		desired[name] = struct{}{}
+	}
+	for i := range shards.Items {
+		cm := &shards.Items[i]
+		if _, keep := desired[cm.Name]; keep || !metav1.IsControlledBy(cm, instance) {
+			continue
+		}
+		if err := r.Delete(ctx, cm, client.Preconditions{ResourceVersion: &cm.ResourceVersion}); err != nil && !k8s_errors.IsNotFound(err) {
+			return fmt.Errorf("deleting stale CNAME shard %q: %w", cm.Name, err)
+		}
+	}
+	return nil
 }
 
 // generateServiceConfigMaps - create configmaps which hold service configuration
