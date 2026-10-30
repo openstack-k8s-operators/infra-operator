@@ -1586,6 +1586,96 @@ spec:
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object
+              queuePolicies:
+                description: |-
+                  QueuePolicies - optional opt-in queue policies the controller manages as
+                  RabbitMQPolicy resources on this cluster. Each sub-policy, when set,
+                  results in one managed RabbitMQPolicy; when unset its policy is removed.
+                  See the individual fields for the RabbitMQ argument each one maps to.
+                properties:
+                  messageTTL:
+                    description: |-
+                      MessageTTL - manage a "message-ttl" policy that expires messages older
+                      than the configured age (in milliseconds) on queues matching Pattern.
+                      Applies to any queue type.
+                    properties:
+                      pattern:
+                        description: |-
+                          Pattern - regex selecting the queues this policy applies to. It must be
+                          non-empty: RabbitMQ treats an empty pattern as matching every queue, which
+                          would apply the TTL cluster-wide.
+                        maxLength: 512
+                        minLength: 1
+                        type: string
+                      ttl:
+                        description: |-
+                          TTL - the "message-ttl" value in milliseconds. Messages older than this
+                          are dropped (or dead-lettered) from the matching queues.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                    required:
+                    - pattern
+                    - ttl
+                    type: object
+                  queueExpiry:
+                    description: |-
+                      QueueExpiry - manage an "expires" policy that auto-deletes queues matching
+                      Pattern after they have been unused for the configured time (in
+                      milliseconds). Applies to any queue type.
+                    properties:
+                      expiry:
+                        description: |-
+                          Expiry - the "expires" value in milliseconds. A queue matching Pattern is
+                          auto-deleted after it has been unused for this long.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      pattern:
+                        description: |-
+                          Pattern - regex selecting the queues this policy applies to. It must be
+                          non-empty: RabbitMQ treats an empty pattern as matching every queue, which
+                          would auto-delete queues cluster-wide.
+                        maxLength: 512
+                        minLength: 1
+                        type: string
+                    required:
+                    - expiry
+                    - pattern
+                    type: object
+                  transientQueueExpiry:
+                    description: |-
+                      TransientQueueExpiry - manage an "expires" (x-expires) policy targeting
+                      transient quorum queues so the broker auto-deletes orphaned ones. Only
+                      applied when the cluster QueueType is Quorum: quorum queues are durable
+                      and, unlike classic transient queues, are never auto-deleted when their
+                      consumer disconnects, so without this they accumulate without bound. When
+                      the cluster is not Quorum this sub-policy is ignored and any previously
+                      managed policy is removed.
+                    properties:
+                      expiry:
+                        description: |-
+                          Expiry - the "expires" (x-expires) value in milliseconds. The minimum
+                          accepted value is 60000 (60s): the expiry must stay well above normal
+                          consumer reconnect windows so that a queue briefly left without a consumer
+                          is not reaped during routine reconnects (for reference, oslo.messaging's
+                          own rabbit_transient_queues_ttl defaults to 1800000 ms).
+                        format: int64
+                        minimum: 60000
+                        type: integer
+                      pattern:
+                        description: |-
+                          Pattern - regex selecting the queues this policy applies to. When empty it
+                          defaults to DefaultTransientQueueExpiryPattern, which targets oslo.messaging
+                          transient queues and the per-process RPC server-target queues while
+                          excluding durable notification queues so buffered notifications are never
+                          reaped.
+                        maxLength: 512
+                        type: string
+                    required:
+                    - expiry
+                    type: object
+                type: object
               queueType:
                 description: |-
                   QueueType - the default queue type for the cluster.

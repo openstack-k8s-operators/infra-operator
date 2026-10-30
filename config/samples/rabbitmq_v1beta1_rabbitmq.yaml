@@ -7,3 +7,23 @@ spec:
   secret: osp-secret
   persistence:
     storageClassName: local-storage
+  # queueType: Quorum
+  # Opt-in queue policies the operator manages as RabbitMQPolicy resources.
+  # See docs/rabbitmq-queue-policies.md for details.
+  # queuePolicies:
+  #   # Only applied on Quorum clusters, whose transient queues are durable and
+  #   # are never auto-deleted when their consumer disconnects, so orphaned
+  #   # per-process queues would otherwise accumulate without bound. Lets the
+  #   # broker reap them via an "expires" (x-expires) argument in milliseconds.
+  #   transientQueueExpiry:
+  #     expiry: 3600000
+  #     # pattern overrides the default transient queue-name regex if needed.
+  #     # pattern: "^(reply_.*|.*_fanout_.*)$"
+  #   # Drop messages older than ttl (ms) on queues matching pattern.
+  #   messageTTL:
+  #     ttl: 60000
+  #     pattern: "^clear-.*"
+  #   # Auto-delete queues matching pattern after they are unused for expiry (ms).
+  #   queueExpiry:
+  #     expiry: 1800000
+  #     pattern: "^clear-.*"

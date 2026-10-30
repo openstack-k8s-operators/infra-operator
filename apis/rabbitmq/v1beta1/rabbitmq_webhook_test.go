@@ -16,7 +16,66 @@ limitations under the License.
 
 package v1beta1
 
-import "testing"
+import (
+	"testing"
+
+	"k8s.io/apimachinery/pkg/util/validation/field"
+)
+
+func TestValidateQueuePolicies(t *testing.T) {
+	basePath := field.NewPath("spec")
+
+	tests := []struct {
+		name     string
+		policies *QueuePolicies
+		wantErr  bool
+	}{
+		{name: "nil queuePolicies is allowed", policies: nil, wantErr: false},
+		{
+			name:     "empty transient pattern is allowed (defaults)",
+			policies: &QueuePolicies{TransientQueueExpiry: &TransientQueueExpiryPolicy{Expiry: 60000}},
+			wantErr:  false,
+		},
+		{
+			name:     "default transient pattern is valid",
+			policies: &QueuePolicies{TransientQueueExpiry: &TransientQueueExpiryPolicy{Expiry: 60000, Pattern: DefaultTransientQueueExpiryPattern}},
+			wantErr:  false,
+		},
+		{
+			name:     "invalid transient regex is rejected",
+			policies: &QueuePolicies{TransientQueueExpiry: &TransientQueueExpiryPolicy{Expiry: 60000, Pattern: "^(reply_.*"}},
+			wantErr:  true,
+		},
+		{
+			name:     "valid messageTTL pattern is accepted",
+			policies: &QueuePolicies{MessageTTL: &MessageTTLPolicy{TTL: 60000, Pattern: "^clear-.*"}},
+			wantErr:  false,
+		},
+		{
+			name:     "invalid messageTTL regex is rejected",
+			policies: &QueuePolicies{MessageTTL: &MessageTTLPolicy{TTL: 60000, Pattern: "^(clear-.*"}},
+			wantErr:  true,
+		},
+		{
+			name:     "invalid queueExpiry regex is rejected",
+			policies: &QueuePolicies{QueueExpiry: &QueueExpiryPolicy{Expiry: 1800000, Pattern: "^(clear-.*"}},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := RabbitMqSpecCore{QueuePolicies: tt.policies}
+			errs := spec.ValidateQueuePolicies(basePath)
+			if tt.wantErr && len(errs) == 0 {
+				t.Errorf("expected a validation error, got none")
+			}
+			if !tt.wantErr && len(errs) != 0 {
+				t.Errorf("expected no validation error, got %v", errs)
+			}
+		})
+	}
+}
 
 func TestSpecCoreDefault_MigratesOldGracePeriod(t *testing.T) {
 	oldDefault := int64(604800)
