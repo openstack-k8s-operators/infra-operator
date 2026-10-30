@@ -264,6 +264,8 @@ func main() {
 		setupLog.Error(err, "")
 		os.Exit(1)
 	}
+	// PodRemediator uses the dynamic client for NHC/SNR APIs, which are not
+	// registered in this operator's typed scheme.
 	dynamicClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create dynamic client")

@@ -19,7 +19,6 @@ package remediation
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -375,7 +374,9 @@ func (r *PodRemediatorReconciler) cleanupAnnotations(ctx context.Context, namesp
 	return nil
 }
 
-// checkNHCAndSNR returns true if at least one NodeHealthCheck and one SelfNodeRemediationTemplate exist
+// checkNHCAndSNR reports whether at least one NodeHealthCheck and one
+// SelfNodeRemediationTemplate exist. reconcileNormal calls it before scanning
+// PVCs to gate new remediation work on these required dependencies.
 func (r *PodRemediatorReconciler) checkNHCAndSNR(ctx context.Context) (bool, error) {
 	nhcList, err := r.DynamicClient.Resource(gvrNodeHealthCheck).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -440,8 +441,9 @@ func (r *PodRemediatorReconciler) getNodesWithFencedSNR(ctx context.Context, Log
 	return fenced, nil
 }
 
-// effectiveInterval returns the CR-spec value if set, otherwise the reconciler
-// field (from env var), otherwise the hardcoded default.
+// effectiveInterval resolves a PodRemediator polling interval. reconcileNormal
+// uses it for consent/fencing retries and the idle safety-net poll, preferring
+// the CR field, then the environment-backed reconciler value, then the default.
 func effectiveInterval(specVal *metav1.Duration, reconcilerVal time.Duration, defaultVal time.Duration) time.Duration {
 	if specVal != nil {
 		return specVal.Duration
@@ -514,7 +516,7 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrl.Result{}, nil
 	}
 
-	// 1) Dependency check: NHC and SNR must be present
+	// Dependency check: NHC and SNR must be present.
 	nhcSNROk, err := r.checkNHCAndSNR(ctx)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -545,8 +547,9 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 		return ctrl.Result{RequeueAfter: periodicPoll}, nil
 	}
 
-	// A missing node is not recovered, but its pending handshake must still run
-	// when all remaining nodes are healthy.
+	// A missing Node does not prove that its fault recovered. Continue scanning
+	// existing handshakes even when all remaining nodes are healthy; deletion
+	// still requires current SNR fencing evidence, matching consent, and PV checks.
 	nodeList := &corev1.NodeList{}
 	if err := r.safetyReader().List(ctx, nodeList); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list nodes: %w", err)
@@ -579,232 +582,75 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	for name := range rawUnhealthyNodes {
 		unhealthyNames = append(unhealthyNames, name)
 	}
-	Log.V(1).Info("Scanning PVCs", "unhealthyNodes", unhealthyNames, "fencedNodes", len(snrNodes))
+	Log.Info("Scanning PVCs", "unhealthyNodes", unhealthyNames, "fencedNodes", len(snrNodes))
 
-	// Always scan existing handshakes, including PVCs whose Node was removed.
-	hadError := false
-	pendingCommittedDeletion := resumeResult.Pending
-	blockedByReplacementPod := resumeResult.BlockedByReplacementPod
-	waitingForConsent := 0
-	waitingForFencing := 0
-	pausedRequests := 0
+	// Scan PVCs to advance existing requests and start handshakes for newly
+	// eligible PVCs.
+	scan := &pvcRemediationScan{
+		instance:                 instance,
+		nodeList:                 nodeList,
+		rawUnhealthyNodes:        rawUnhealthyNodes,
+		allNodeNames:             allNodeNames,
+		nodeUIDByName:            nodeUIDByName,
+		snrNodes:                 snrNodes,
+		log:                      Log,
+		pendingCommittedDeletion: resumeResult.Pending,
+		blockedByReplacementPod:  resumeResult.BlockedByReplacementPod,
+	}
 	for _, ns := range namespaces {
 		pvcList := &corev1.PersistentVolumeClaimList{}
 		if err := r.safetyReader().List(ctx, pvcList, client.InNamespace(ns)); err != nil {
 			Log.Error(err, "list PVCs", "namespace", ns)
-			hadError = true
+			scan.hadError = true
 			continue
 		}
 		Log.Info("Scanning PVCs for remediation", "namespace", ns, "pvcCount", len(pvcList.Items))
 		for i := range pvcList.Items {
 			pvc := &pvcList.Items[i]
-			pvcKey := client.ObjectKeyFromObject(pvc)
 			if _, pending := resumeResult.PendingPVCUIDs[string(pvc.UID)]; pending {
 				// Resume already handled this PVC using its durable decision.
 				// Continue scanning other PVCs while this cleanup is pending.
 				continue
 			}
 			if _, aborted := resumeResult.AbortedPVCUIDs[string(pvc.UID)]; aborted {
-				Log.Info("Skipping PVC after aborting its committed deletion", "pvc", pvcKey)
+				Log.Info("Skipping PVC after aborting its committed deletion", "pvc", client.ObjectKeyFromObject(pvc))
 				continue
 			}
 			if _, blocked := resumeResult.BlockedPVCUIDs[string(pvc.UID)]; blocked {
-				Log.Info("Skipping PVC with an invalid deletion commit record", "pvc", pvcKey)
+				Log.Info("Skipping PVC with an invalid deletion commit record", "pvc", client.ObjectKeyFromObject(pvc))
 				continue
 			}
 			if owner := pvc.Annotations[remediationv1.RemediatorUIDAnnotation]; owner != "" && owner != string(instance.UID) {
-				Log.V(1).Info("Skipping PVC owned by another PodRemediator", "pvc", pvcKey, "owner", owner)
+				Log.Info("Skipping PVC owned by another PodRemediator", "pvc", client.ObjectKeyFromObject(pvc), "owner", owner)
 				continue
 			}
 
-			stuckOnNode := ""
-			if pvc.Annotations != nil {
-				stuckOnNode = pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation]
-			}
-
+			stuckOnNode := pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation]
 			if stuckOnNode != "" {
-				// Path A: the node has truly recovered (exists AND back to Ready). Remove both
-				// annotations so the app operator must re-consent on the next independent fault.
-				// A node absent from the cluster (deleted/scaled-out) is NOT treated as recovery:
-				// silently stripping the annotations would abort an in-flight handshake and leave
-				// the PVC pinned to a node that will never return. Instead fall through to Path
-				// B/C so the handshake can still complete (delete on consent, else keep waiting).
-				if !rawUnhealthyNodes[stuckOnNode] && allNodeNames[stuckOnNode] {
-					oldPVC := pvc.DeepCopy()
-					clearRemediationAnnotations(pvc)
-					if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil && !k8s_errors.IsNotFound(err) {
-						Log.Error(err, "remove remediation annotations (node recovered)", "pvc", pvcKey, "node", stuckOnNode)
-						hadError = true
-					} else {
-						Log.Info("Node recovered; removed remediation annotations", "pvc", pvcKey, "node", stuckOnNode)
-					}
-					continue
-				}
-				if !rawUnhealthyNodes[stuckOnNode] && !allNodeNames[stuckOnNode] {
-					Log.Info("Stuck node no longer exists; keeping annotations instead of treating as recovery", "pvc", pvcKey, "node", stuckOnNode)
-				}
-
-				// Annotations identify the consent request, but never replace live SNR
-				// fencing evidence. This remains true after SNR garbage collection.
-				var requestID string
-				if snrNodes[stuckOnNode] != nil {
-					requestID = remediationRequestID(instance, pvc, snrNodes[stuckOnNode])
-					if requestID == "" {
-						hadError = true
-						continue
-					}
-					if pvc.Annotations[remediationv1.RequestIDAnnotation] != requestID ||
-						pvc.Annotations[remediationv1.RemediatorUIDAnnotation] != string(instance.UID) {
-						if err := r.startRequest(ctx, instance, pvc, stuckOnNode, nodeUIDByName[stuckOnNode], requestID); err != nil {
-							hadError = true
-						}
-						waitingForConsent++
-						continue
-					}
-				} else {
-					waitingForFencing++
-					continue
-				}
-				if requestID == "" {
-					waitingForFencing++
-					continue
-				}
-				if instance.Spec.RemediationPaused {
-					pausedRequests++
-					Log.Info("PVC remediation is paused; retaining the stuck PVC request and any consent", "pvc", pvcKey, "node", stuckOnNode, "consentGranted", remediationv1.HasRemediationConsent(pvc.Annotations))
-					continue
-				}
-				if remediationv1.HasRemediationConsent(pvc.Annotations) {
-					// Re-validate provenance on the DELETING path: the safe-to-delete
-					// annotation alone is not trusted. The PVC's bound PV must still be
-					// node-local AND pinned to the node named in pvc-stuck-on-node.
-					// This rejects a forged pvc-stuck-on-node + safe-to-delete pair on an
-					// unrelated or network-attached PVC, which would otherwise be deleted
-					// (Path D validates locality only on the annotation-WRITING path).
-					if pvc.Spec.VolumeName == "" {
-						Log.Info("Refusing to delete PVC: safe-to-delete set but PVC has no bound PV", "pvc", pvcKey, "node", stuckOnNode)
-						continue
-					}
-					pv := &corev1.PersistentVolume{}
-					if err := r.safetyReader().Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
-						if k8s_errors.IsNotFound(err) {
-							continue
-						}
-						Log.Error(err, "get PV for delete-path validation", "pv", pvc.Spec.VolumeName, "pvc", pvcKey)
-						hadError = true
-						continue
-					}
-					pvNode := resolveLocalPVNodeName(pv, nodeList.Items, Log)
-					// An existing, owner-bound handshake can survive removal of its
-					// Node object only when the PV explicitly names the Node. A hostname
-					// label cannot be resolved after the Node is gone.
-					if pvNode == "" && !allNodeNames[stuckOnNode] &&
-						pvc.Annotations[remediationv1.RemediatorUIDAnnotation] == string(instance.UID) &&
-						pvc.Annotations[remediationv1.RequestIDAnnotation] == requestID &&
-						pvc.Annotations[remediationv1.FencingNodeUIDAnnotation] != "" &&
-						getDirectLocalPVNodeName(pv) == stuckOnNode {
-						pvNode = stuckOnNode
-					}
-					if pvNode != stuckOnNode {
-						Log.Info("Refusing to delete PVC: PV is not node-local or not pinned to the stuck node (possible forged annotation)",
-							"pvc", pvcKey, "node", stuckOnNode, "pvNode", pvNode)
-						continue
-					}
-					pending, blocked, err := r.deletePVCAndPods(ctx, instance, pvc, stuckOnNode, Log)
-					if err != nil {
-						if errors.Is(err, errPVCRemediationPaused) {
-							pausedRequests++
-							Log.Info("PVC remediation became paused before deletion started; retaining request and consent", "pvc", pvcKey, "node", stuckOnNode)
-						} else {
-							Log.Error(err, "delete consented PVC and observed pods", "pvc", pvcKey)
-							hadError = true
-						}
-					} else if pending {
-						pendingCommittedDeletion = true
-						if blocked != "" {
-							blockedByReplacementPod = blocked
-						}
-					}
-					continue
-				}
-
-				// Path C: node still unhealthy, no consent yet — wait for app operator.
-				// The PVC watch (AnnotationChangedPredicate) triggers when safe-to-delete is set.
-				// The periodic requeue below provides liveness if the event is missed.
-				Log.V(1).Info("PVC stuck on unhealthy node; waiting for app-operator safe-to-delete consent", "pvc", pvcKey, "node", stuckOnNode)
-				waitingForConsent++
+				r.processExistingPVCHandshake(ctx, scan, pvc, stuckOnNode)
 				continue
 			}
-
-			if len(rawUnhealthyNodes) == 0 && pvc.Annotations[remediationv1.SafeToDeleteAnnotation] != "" {
-				oldPVC := pvc.DeepCopy()
-				delete(pvc.Annotations, remediationv1.SafeToDeleteAnnotation)
-				delete(pvc.Annotations, remediationv1.ConsentIDAnnotation)
-				if err := r.Patch(ctx, pvc, client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})); err != nil && !k8s_errors.IsNotFound(err) {
-					hadError = true
-					Log.Error(err, "remove orphaned consent", "pvc", pvcKey)
-				}
-			}
-
-			// Path D: start a new handshake only after SNR confirms fencing.
-			if pvc.Spec.VolumeName == "" {
-				continue
-			}
-			pv := &corev1.PersistentVolume{}
-			if err := r.safetyReader().Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
-				if k8s_errors.IsNotFound(err) {
-					continue
-				}
-				Log.Error(err, "get PV", "pv", pvc.Spec.VolumeName)
-				hadError = true
-				continue
-			}
-			nodeName := resolveLocalPVNodeName(pv, nodeList.Items, Log)
-			if nodeName == "" {
-				continue
-			}
-			if !rawUnhealthyNodes[nodeName] {
-				continue
-			}
-			if snrNodes[nodeName] == nil {
-				waitingForFencing++
-				continue
-			}
-			requestID := remediationRequestID(instance, pvc, snrNodes[nodeName])
-			if requestID == "" {
-				hadError = true
-				continue
-			}
-			if err := r.startRequest(ctx, instance, pvc, nodeName, nodeUIDByName[nodeName], requestID); err != nil {
-				Log.Error(err, "start PVC remediation request", "pvc", pvcKey)
-				hadError = true
-				continue
-			}
-			Log.Info("Local PVC on unhealthy node; requested fault-scoped consent", "pvc", pvcKey, "node", nodeName)
-			if instance.Spec.RemediationPaused {
-				pausedRequests++
-			}
-
+			r.processNewPVCHandshake(ctx, scan, pvc)
 		}
 	}
 
-	if hadError {
+	if scan.hadError {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.ReadyCondition, condition.ErrorReason, condition.SeverityWarning,
 			"Partial scan: errors listing PVCs or fetching PVs; will retry"))
 		return ctrl.Result{}, fmt.Errorf("partial scan errors during PVC remediation; requeueing")
 	}
 
-	if pendingCommittedDeletion {
-		if blockedByReplacementPod != "" {
+	if scan.pendingCommittedDeletion {
+		if scan.blockedByReplacementPod != "" {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.ReadyCondition, ReplacementPodBlocksPVCDeletionReason, condition.SeverityWarning,
-				"%s", blockedByReplacementPod))
+				"%s", scan.blockedByReplacementPod))
 		} else {
 			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "Completing a previously committed PVC deletion")
 		}
 		requeueAfter := DefaultConsentPollInterval
-		if waitingForConsent > 0 || waitingForFencing > 0 {
+		if scan.waitingForConsent > 0 || scan.waitingForFencing > 0 {
 			requeueAfter = min(requeueAfter, consentPoll)
 		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -818,29 +664,29 @@ func (r *PodRemediatorReconciler) reconcileNormal(ctx context.Context, instance 
 	}
 
 	if instance.Spec.RemediationPaused {
-		if pausedRequests > 0 {
+		if scan.pausedRequests > 0 {
 			instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
-				"PVC remediation is paused; %d request(s) retained", pausedRequests)
+				"PVC remediation is paused; %d request(s) retained", scan.pausedRequests)
 		} else {
 			instance.Status.Conditions.MarkTrue(condition.ReadyCondition, "PVC remediation is paused")
 		}
 		requeueAfter := periodicPoll
-		if pausedRequests > 0 || waitingForConsent > 0 || waitingForFencing > 0 {
+		if scan.pausedRequests > 0 || scan.waitingForConsent > 0 || scan.waitingForFencing > 0 {
 			requeueAfter = consentPoll
 		}
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
-	if waitingForFencing > 0 {
+	if scan.waitingForFencing > 0 {
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
-			"%d PVC(s) waiting for SNR fencing confirmation; %d waiting for consent", waitingForFencing, waitingForConsent)
+			"%d PVC(s) waiting for SNR fencing confirmation; %d waiting for consent", scan.waitingForFencing, scan.waitingForConsent)
 		return ctrl.Result{RequeueAfter: consentPoll}, nil
 	}
 
-	if waitingForConsent > 0 {
+	if scan.waitingForConsent > 0 {
 		instance.Status.Conditions.MarkTrue(condition.ReadyCondition,
-			"%d PVC(s) waiting for app-operator safe-to-delete consent", waitingForConsent)
-		// Requeue periodically so Path C is re-evaluated even if annotation events are missed.
+			"%d PVC(s) waiting for app-operator safe-to-delete consent", scan.waitingForConsent)
+		// Requeue so consent-waiting requests are re-evaluated if annotation events are missed.
 		return ctrl.Result{RequeueAfter: consentPoll}, nil
 	}
 
@@ -896,13 +742,13 @@ func resolveLocalPVNodeName(pv *corev1.PersistentVolume, nodes []corev1.Node, Lo
 			}
 			nodeName := resolvePVTopologyRequirement(expression.Key, expression.Values[0], nodes)
 			if nodeName == "" || (termNodeName != "" && termNodeName != nodeName) {
-				Log.V(1).Info("PV topology requirement does not resolve to one consistent Node", "pv", pv.Name, "key", expression.Key, "value", expression.Values[0])
+				Log.Info("PV topology requirement does not resolve to one consistent Node", "pv", pv.Name, "key", expression.Key, "value", expression.Values[0])
 				return ""
 			}
 			termNodeName = nodeName
 		}
 		if requirementCount == 0 || termNodeName == "" || (resolvedNodeName != "" && resolvedNodeName != termNodeName) {
-			Log.V(1).Info("PV is not exclusively pinned to one actual Node; skipping", "pv", pv.Name)
+			Log.Info("PV is not exclusively pinned to one actual Node; skipping", "pv", pv.Name)
 			return ""
 		}
 		resolvedNodeName = termNodeName

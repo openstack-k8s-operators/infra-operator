@@ -13,8 +13,6 @@ SNR fencing confirmation and consent from the application operator that owns the
 workload. It unblocks recovery work; it does not guarantee that the application
 will recover.
 
-<!-- Damien #4103610797, #4103775536, #4103816578: distinguish controller from CR and explain namespace scope early. -->
-
 PodRemediator bridges the gap between the existing OpenShift remediation stack
 (NHC + SNR) and the application operators that own the workloads.
 
@@ -56,8 +54,6 @@ flowchart TD
 ```
 
 ### Consent handshake
-
-<!-- Damien #4093532485, #4093540086, #4093550661, #4093556723, #4093560665, #4093685462: clarify the request/consent actors, keep safety policy workload-specific, and include both consent annotations. -->
 
 PodRemediator never deletes a PVC on its own. Every deletion requires explicit
 consent from the application operator:
@@ -108,16 +104,12 @@ Zone-affinity CSI volumes (e.g. Cinder: `topology.cinder.csi.openstack.org/zone`
 are **excluded** because a zone does not identify one failed node. Such volumes
 can be attached on another node and do not need this node-local PVC deletion flow.
 
-<!-- Damien #4104998796 and #4105028000: clarify SNR's role and why zone-locality does not qualify as node-local storage. -->
-
 ### Workload-specific integration
 
 PodRemediator does not implement Galera or RabbitMQ safety policy. Each workload
 operator decides whether its own recovery policy permits deletion. See the
 [Galera integration notes](podremediator_galera.md); RabbitMQ-specific behavior
 belongs with its workload operator.
-
-<!-- Damien #4103760894: keep Galera implementation details out of the generic workflow. -->
 
 ---
 
@@ -161,8 +153,6 @@ oc get selfnoderemediationtemplate -A
 The operator that owns the workload must watch for PodRemediator's PVC request
 and write both consent annotations described below. A `safe-to-delete` annotation
 alone is not accepted.
-
-<!-- Damien #4103768390, #4103781194: remove the branch/image check and temporary Galera implementation instructions. -->
 
 ---
 
@@ -241,8 +231,6 @@ echo "=== SNR template ===" && \
 Confirm the deployment is available, the CR is Ready, and NHC/SNR prerequisites
 exist. This check does not run or validate a real node-failure scenario.
 
-<!-- Damien #4103788239: retain this as a prerequisite smoke check, but remove the unexplained E2E reference. -->
-
 ### Troubleshooting
 
 Use `oc describe podremediator` to inspect the current conditions and their
@@ -263,8 +251,6 @@ reason and message. The message text can change between releases.
   replacement Pod is using a PVC whose deletion has already been requested.
   The workload operator must release that Pod safely; do not remove finalizers
   to bypass the wait.
-
-<!-- Damien #4103802020: replace the copied Ready-message table with cause-based troubleshooting. -->
 
 ---
 
@@ -356,10 +342,8 @@ own namespace. A single CR can watch multiple workload namespaces.
 The operator that owns the PVC evaluates its workload-specific recovery policy.
 When deletion is safe, it writes `safe-to-delete=true` and the current
 `request-id` as `consent-id` in the same optimistic-locking update. See the
-[consent contract](podremediator_architecture.md#23-pvc-annotations-shared-contract)
+[consent contract](podremediator_architecture.md#pvc-annotations-shared-contract)
 for the complete request and commit behavior.
-
-<!-- Damien #4104689872: keep the detailed contract in the architecture reference; retain only the operator action here. -->
 
 ### Consent annotation strings (shared contract)
 
@@ -387,5 +371,3 @@ recovers or the CR is deleted.
 The test guide describes the in-repository unit, functional, and KUTTL tests,
 and the separate requirements for real-cluster validation:
 [PodRemediator testing](podremediator_testing.md).
-
-<!-- Damien #4104796972: move lab test instructions out of the operator guide and document the environment in the dedicated test guide. -->

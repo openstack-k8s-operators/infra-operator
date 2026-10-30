@@ -39,8 +39,10 @@ type PodRemediatorSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:items:MinLength=1
 	// +listType=set
-	// Namespaces is the list of namespaces whose PVCs this PodRemediator watches.
-	// If empty, the controller watches only the namespace containing this CR.
+	// Namespaces lists the namespaces where this PodRemediator scans eligible
+	// PVCs and may remediate those PVCs and their associated Pods. If empty, it
+	// uses the namespace containing this CR. Node health and SNR fencing events
+	// remain cluster-wide; this setting only scopes PVC processing.
 	// The effective namespace scope is immutable after CR creation. Delete and
 	// recreate the CR to change its scope; deletion cleanup clears pending
 	// handshakes in the configured namespaces.

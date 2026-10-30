@@ -7,18 +7,16 @@ For operator/user documentation see [podremediator_guide.md](podremediator_guide
 For integration and test details, see the [Galera notes](podremediator_galera.md),
 [RabbitMQ notes](podremediator_rabbitmq.md), and [testing guide](podremediator_testing.md).
 
-<!-- Damien #4104808774: remove the generated-feeling contents summary and state the document's purpose directly. -->
+## Design context
 
-## 1. Design context
-
-### 1.1 Problem
+### Problem
 
 Stateful workloads that use **local persistent storage** face a recurring issue
 during node failures: the pod may be rescheduled but the PVC remains bound to the
 dead node. Local storage cannot be reattached elsewhere; recovery requires manual
 PVC deletion until a dedicated mechanism exists.
 
-### 1.2 Design principles
+### Design principles
 
 1. **Workload-owner authorization** — only the operator that owns the workload
    decides whether its recovery policy permits PVC deletion.
@@ -28,16 +26,14 @@ PVC deletion until a dedicated mechanism exists.
    fencing confirmation; the workload operator grants request-scoped consent.
 4. **NHC/SNR coordination** — a NotReady node alone does not authorize a PVC request.
 
-<!-- Damien #4104875625: replace “Agreed” with a descriptive design heading. -->
-
-### 1.3 Workload-specific policy
+### Workload-specific policy
 
 PodRemediator does not decide whether an application's data is safe to discard.
 The workload operator evaluates its own health and recovery policy and is the
 only participant that grants or withholds consent. A PVC request is a signal to
 evaluate, not an instruction to approve deletion.
 
-### 1.4 Workload integrations
+### Workload integrations
 
 Integration details can change independently of the generic controller. The
 [Galera notes](podremediator_galera.md) describe the current Galera adapter; the
@@ -45,10 +41,7 @@ Integration details can change independently of the generic controller. The
 contract. Neither application's safety checks are requirements imposed on other
 workload operators.
 
-<!-- Damien #4104877769, #4104881379, #4104889665: remove the unclear BGP reference and keep Galera implementation details separate from this generic architecture. -->
-<!-- Damien #4105140424, #4105153082, #4105170063: keep RabbitMQ-specific behavior, mapping details, and workload comparisons in the integration documentation. -->
-
-## 2. API and Custom Resource
+## API and Custom Resource
 
 **API group**: `remediation.openstack.org/v1beta1`
 **Kind**: `PodRemediator` (Namespaced)
@@ -58,7 +51,7 @@ workload operators.
 - `apis/remediation/v1beta1/annotations.go`
 - `config/crd/bases/remediation.openstack.org_podremediators.yaml` (`make manifests`)
 
-### 2.1 Spec
+### Spec
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -66,7 +59,7 @@ workload operators.
 | `consentPollInterval` | `*metav1.Duration` | `"2m"` | Fallback requeue interval while waiting for fencing or consent. Overrides `PODREMEDIATOR_CONSENT_POLL_INTERVAL`. |
 | `periodicPollInterval` | `*metav1.Duration` | `"5m"` | Safety-net requeue for idle states (catches restart-recovery case). Overrides `PODREMEDIATOR_PERIODIC_POLL_INTERVAL`. |
 
-### 2.2 Status Conditions
+### Status Conditions
 
 | Condition | Meaning |
 |-----------|---------|
@@ -75,7 +68,7 @@ workload operators.
 | `Ready=True` | Monitoring or active remediation |
 | `InputReady=False` | NHC/SNR dependency not satisfied |
 
-### 2.3 PVC Annotations (shared contract)
+### PVC Annotations (shared contract)
 
 Defined in `apis/remediation/v1beta1/annotations.go`. Application operators must
 use these exact strings (import the package or copy with a cross-reference comment).
@@ -101,15 +94,13 @@ continues even if the consent annotations are removed. A newly observed,
 unselected Pod can still abort cleanup before the PVC deletion request; after
 Kubernetes accepts that request, it cannot be cancelled.
 
-<!-- Damien #4104934389: explain why request-id/consent-id form a request-scoped transaction and what the application operator must write. -->
-
 ---
 
-## 3. Controller Internals
+## Controller Internals
 
 **Location**: `internal/controller/remediation/podremediator_controller.go`
 
-### 3.1 Reconcile Entry
+### Reconcile Entry
 
 1. Fetch the `PodRemediator` instance; return if not found.
 2. Initialise status conditions; defer: restore timestamps, mirror Ready, patch status.
@@ -117,13 +108,13 @@ Kubernetes accepts that request, it cannot be cancelled.
 4. If `DeletionTimestamp` is set → `reconcileDelete`.
 5. Otherwise → `reconcileNormal`.
 
-### 3.2 reconcileDelete
+### reconcileDelete
 
 Resumes any previously committed PVC deletion, then clears uncommitted handshake
 annotations from PVCs in the configured namespaces. The finalizer remains
 until committed cleanup completes and annotation cleanup succeeds.
 
-### 3.3 reconcileNormal — Paths A/B/C/D
+### reconcileNormal — Paths A/B/C/D
 
 ```mermaid
 flowchart TD
@@ -155,8 +146,6 @@ and consent in the configured namespaces. This also cancels pending handshakes i
 become unavailable. Cleanup failures are retried. Re-enabling starts fresh
 handshakes and requires new workload consent.
 
-<!-- Damien #4104949707: explain that disablement only clears pending handshakes and resumes already committed cleanup. -->
-
 The controller lists Nodes and active (non-deleting) `SelfNodeRemediation`
 objects. Only `status.phase: Reboot-Completed` or `Fencing-Completed` passes the
 fencing gate. SNR performs the node-remediation action configured by the cluster;
@@ -177,8 +166,6 @@ healthy. A missing Node does not imply recovery: a Node object can disappear
 before its PVC has been cleaned up. The controller retains the request and
 proceeds only when the current SNR evidence and the PV's pinning to the affected
 node can still be established.
-
-<!-- Damien #4104998796, #4105011695: explain what annotation means, when it is written relative to SNR fencing, and why a missing Node does not mean recovery. -->
 
 - **Path A — node recovered:** when the annotated node exists and is healthy,
   remove the handshake annotations so the next fault requires fresh consent.
@@ -201,7 +188,65 @@ otherwise PVCs waiting for fencing (including those not yet annotated) or consen
 use `consentPollInterval`; idle scans use `periodicPollInterval`. Polling remains
 a fallback if an SNR or PVC event is missed.
 
-### 3.4 Poll Interval Resolution
+### Durable PVC deletion transaction
+
+Path B prepares and commits PVC cleanup through a durable transaction. The
+ConfigMap stores the PVC identity and the selected Pod names and UIDs; it is
+controller-owned state, not a workload-operator input. PVC writers must not
+have write access to these ConfigMaps.
+
+```mermaid
+flowchart TD
+    A["Path B: accepted SNR fencing, node-local PV, matching consent"] --> B["Prepare ConfigMap with PVC and selected Pod identities"]
+    B --> C["Write provisional PVC marker"]
+    C --> D["Recheck consent and live fencing; write finalized token with optimistic lock"]
+    D --> E["Promote ConfigMap to committed"]
+    E --> F["Delete only the selected Pods; wait for them to release the PVC"]
+    F --> G["Request PVC deletion"]
+    G --> H["PVC is gone; remove the commit ConfigMap"]
+    C -->|"consent revoked or write conflicts"| X["Discard prepared record and clear handshake"]
+    D -->|"consent or fencing no longer valid"| X
+```
+
+Until the finalized token is written to the PVC, consent withdrawal or lost
+fencing rejects the prepared record and cleanup does not start. The finalized
+token write is the transaction's commit boundary: after it, reconciliation
+resumes the recorded cleanup even if consent is removed, fencing evidence
+changes, or the PodRemediator is disabled or deleted. If the process stops
+between that write and ConfigMap promotion, the matching token lets the next
+reconcile promote the prepared record and continue. After the selected Pods are
+gone, the controller requests PVC deletion. Kubernetes accepting that delete
+request is itself irreversible; if a replacement Pod then uses the terminating
+PVC, the controller preserves the commit and waits for the workload operator to
+release the Pod.
+
+The implementation separates transaction state and validation in
+`deletion_commit.go`, preparation and finalization in
+`deletion_commit_prepare.go`, and restart recovery and cleanup in
+`deletion_commit_resume.go`.
+
+### Poll Interval Resolution
+
+The controller is event-driven, but it also polls so a missed watch event or a
+change in external state cannot leave a request waiting indefinitely. It resolves
+two intervals independently for each PodRemediator CR. The consent interval
+retries handshakes waiting for SNR fencing or workload-operator consent; the
+periodic interval rechecks otherwise idle monitoring, including after an
+operator restart when a Node was already unhealthy and no new Node transition
+will arrive. The committed-deletion path uses a separate retry schedule based
+on the two-minute default, shortened by `consentPollInterval` when it is also
+waiting for fencing or consent, so cleanup continues after the commit boundary.
+
+For `consentPollInterval` and `periodicPollInterval`, the per-CR spec field
+takes precedence, followed by `PODREMEDIATOR_CONSENT_POLL_INTERVAL` or
+`PODREMEDIATOR_PERIODIC_POLL_INTERVAL`, respectively, then the built-in
+default. This lets one CR tune its retry behavior without changing other CRs;
+the environment setting supplies a common value when the CR omits the field.
+The defaults are two minutes for consent/fencing retries and five minutes for
+idle polling. A resolved interval below one second is rejected to prevent a
+tight requeue loop; CRD validation covers spec values, and the runtime check
+also protects environment-provided values. These polls complement the event
+watches described in [Watches](#watches).
 
 ```
 effectiveInterval(spec.X, r.X, DefaultX):
@@ -210,7 +255,7 @@ effectiveInterval(spec.X, r.X, DefaultX):
   otherwise      → use DefaultX (hardcoded: consent=2m, periodic=5m)
 ```
 
-### 3.5 Local PV Detection
+### Local PV Detection
 
 **`isLocalPV(pv)`** accepts local, CSI, and HostPath volumes only when their
 required node affinity exclusively identifies one node. Every OR selector term
@@ -234,29 +279,50 @@ may be attachable on another node; deleting its PVC is therefore not the generic
 recovery mechanism. CSI volumes are treated as local only when their affinity
 proves an exclusive node pin.
 
-<!-- Damien #4105028000: explain why zone-affinity volumes are excluded. -->
-
 If exclusive node pinning cannot be established, `getLocalPVNodeName` returns `""`
 and remediation is skipped. Add supported keys to `localPVNodeTopologyKeys` when
 integrating another local CSI driver.
 
-### 3.6 Watches
+### Watches
 
-The controller reconciles from PodRemediator, Node, PVC, and SNR changes. Node
-and SNR events enqueue the relevant PodRemediator resources; PVC events enqueue
-CRs whose configured namespace list contains that PVC's namespace. SNR events and periodic polling provide
-liveness when a watch event is missed. These triggers do not authorize cleanup:
-the controller rechecks current fencing evidence and workload consent on every
-reconcile.
+Each namespaced PodRemediator CR reconciles its own configuration. Its
+`spec.namespaces` list selects the PVC namespaces it manages, defaulting to the
+CR's namespace when empty. The controller also watches cluster-wide Node health
+and SNR fencing state. On reconcile it reads the Nodes and active SNR instances
+cluster-wide, then scans PVCs only in that CR's configured namespaces. These
+scopes serve different purposes: a Node failure can affect a local PV in any
+configured PVC namespace, so Node events and relevant SNR events enqueue every
+PodRemediator CR. By contrast, a PVC event enqueues only CRs whose namespace
+selection includes that PVC's namespace. This keeps unrelated PVC annotation
+updates from reconciling every CR, while ensuring shared node and fencing
+changes are seen wherever affected PVCs may live.
 
-<!-- Damien #4105038753: remove the low-value watch mapping table and summarize the behavior. -->
+The watches filter noisy updates before they enqueue reconciles. Node additions
+and deletions enqueue every CR; Node updates do so only when the Node crosses
+between healthy and unhealthy as determined by its Ready condition. Kubelet
+heartbeat updates that leave Ready health unchanged are ignored. PVC creation
+and deletion, spec-generation changes, and annotation changes trigger the
+namespace-aware mapping above. The SNR informer observes
+`SelfNodeRemediation` instances across namespaces: additions and deletions
+enqueue all CRs, while updates do so only when the phase, deletion timestamp,
+or node-name label or annotation changes. Unrelated SNR status and metadata
+updates are ignored. Periodic polling provides a fallback if a watch event is
+missed.
+
+NHC detects unhealthy Nodes and creates per-node SNR instances. SNR performs the
+node-remediation action configured for the cluster and reports its progress;
+PodRemediator does not reboot or fence Nodes itself. It observes these SNR
+instances across namespaces and accepts only a non-deleting instance in
+`Reboot-Completed` or `Fencing-Completed` as fencing evidence. It then proceeds
+with its PVC handshake in the configured namespaces. A watch event or poll only
+schedules a reconcile: every reconcile rechecks current Node/SNR state, PVC
+locality, and workload consent before taking action. Each reconcile also checks
+that at least one `NodeHealthCheck` and one `SelfNodeRemediationTemplate` exist;
+these dependency checks are not watch sources.
 
 ---
 
-<!-- Damien #4105049072: remove the standalone RBAC walkthrough from this architecture reference. -->
-<!-- Damien #4105064335: remove the implementation/revision log and issue-tracking history from the user-facing architecture. -->
-
-## 4. Current limitations
+## Current limitations
 
 - PodRemediator authorizes PVC cleanup; it does not guarantee application
   recovery. Workload-specific rejoin, bootstrap, and data-recovery procedures
@@ -274,10 +340,5 @@ reconcile.
   does not provide a structured per-PVC remediation list and the controller does
   not emit Kubernetes Events for each handshake step.
 
-<!-- Damien #4105081117, #4105092847, #4105096901: describe current limitations plainly instead of labeling them design risks or tracking fixes. -->
-<!-- Damien #4105111786, #4105115350, #4105120131, #4105133282: state the recovery boundary and remove lab-specific failures, roadmap tracking, and undefined Phase 1 terminology. -->
-
 For test responsibilities and what each test layer validates, see the
 [PodRemediator testing guide](podremediator_testing.md).
-
-<!-- Damien #4105180193: keep test-layer coverage in a dedicated testing document. -->

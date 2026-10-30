@@ -30,17 +30,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// snrSource is deliberately not a SyncingSource: SNR is optional and its CRD may
-// be installed after the manager starts. A separate dynamic informer retries
-// list/watch without blocking the manager cache or controller workers. Events
-// only request a scan; reconciliation still reads live SNR fencing evidence.
+// snrSource adapts a dynamic SNR informer to controller-runtime's Source. It
+// uses the reconciler's cluster-wide request mapping to enqueue scans, keeping
+// informer startup and retry separate from reconciliation. SNR is required
+// for remediation, but its CRD may be installed after manager startup, so the
+// informer runs independently without blocking startup. Reconciliation still
+// reads live SNR fencing evidence before acting.
 type snrSource struct {
 	reconciler *PodRemediatorReconciler
 }
 
 var _ source.Source = &snrSource{}
 
-// Start installs the optional SNR informer and maps relevant events to scans.
+// Start launches the informer and maps relevant SNR events to PodRemediator scans.
 func (s *snrSource) Start(ctx context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 	r := s.reconciler
 	if r.DynamicClient == nil {
@@ -72,7 +74,7 @@ func (s *snrSource) Start(ctx context.Context, queue workqueue.TypedRateLimiting
 			return
 		}
 		if apierrors.IsNotFound(err) {
-			logger.V(1).Info("SNR API is not installed; retrying optional watch")
+			logger.Info("SNR API is not installed; retrying watch")
 			return
 		}
 		logger.Error(err, "SNR watch interrupted; retrying with polling as fallback")

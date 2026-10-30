@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,25 +21,25 @@ const (
 	// is bound to a local PV on an unhealthy node after SNR confirms fencing.
 	// Value is the node name. This signals the application operator to evaluate
 	// whether it is safe to delete the PVC.
-	//
-	// Contract: consent also requires ConsentIDAnnotation to match RequestIDAnnotation.
-	// Accepted consent authorizes force-deletion only of the observed pods on the
-	// fenced node (or still Pending), guarded by UID/resourceVersion preconditions.
 	PVCStuckOnNodeAnnotation = "remediation.openstack.org/pvc-stuck-on-node"
 
 	// SafeToDeleteAnnotation is set by the application operator (e.g. mariadb-operator)
 	// on a PVC to authorize PodRemediator to delete it. Consent is per fault-event:
 	// PodRemediator removes this annotation on node recovery or disable so the app operator must
 	// re-evaluate for each new fault. Deletion also requires current SNR fencing confirmation.
+	// The app operator must set ConsentIDAnnotation to the current
+	// RequestIDAnnotation value in the same optimistic-lock patch.
+	// Matching consent authorizes deleting this PVC and force-deleting only Pods
+	// observed using it on the fenced node (or still Pending). Both deletions use
+	// UID/resourceVersion preconditions.
 	SafeToDeleteAnnotation = "remediation.openstack.org/safe-to-delete"
 
 	// RequestIDAnnotation binds a handshake to the PodRemediator, PVC and SNR UIDs.
 	// Participants must never grant consent to an empty request ID.
 	RequestIDAnnotation = "remediation.openstack.org/request-id"
 	// ConsentIDAnnotation is the exact request ID evaluated by the participant.
-	// It must be patched together with safe-to-delete using optimistic locking.
 	ConsentIDAnnotation = "remediation.openstack.org/consent-id"
-	// RemediatorUIDAnnotation identifies the CR that owns a PVC handshake.
+	// RemediatorUIDAnnotation identifies the PodRemediator CR that owns a PVC handshake.
 	RemediatorUIDAnnotation = "remediation.openstack.org/remediator-uid"
 	// FencingNodeUIDAnnotation binds the handshake to the fenced node incarnation.
 	FencingNodeUIDAnnotation = "remediation.openstack.org/fencing-node-uid"
