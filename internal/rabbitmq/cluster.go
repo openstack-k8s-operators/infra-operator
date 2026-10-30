@@ -42,6 +42,13 @@ var Is3xTo4xUpgrade = rabbitmqv1.Is3xTo4xUpgrade
 // IsVersion4OrLater delegates to the canonical implementation in the apis package.
 var IsVersion4OrLater = rabbitmqv1.IsVersion4OrLater
 
+// IsVersion4_1OrLater reports whether the RabbitMQ version includes the
+// Kubernetes seed-node behavior that can leave a replacement server-0 standalone.
+func IsVersion4_1OrLater(version string) bool {
+	v, err := ParseRabbitMQVersion(version)
+	return err == nil && (v.Major > 4 || (v.Major == 4 && v.Minor >= 1))
+}
+
 // TLSVersionsForRabbitMQ returns the TLS versions string based on the RabbitMQ version and FIPS mode.
 // RabbitMQ 4.x+ enables TLS 1.2+1.3; 3.x with FIPS also enables both; 3.x without FIPS uses 1.2 only
 // (workaround for OSPRH-20331 partitioning issue).

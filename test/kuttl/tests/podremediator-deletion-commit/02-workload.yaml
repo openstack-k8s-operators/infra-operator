@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Node
+metadata:
+  name: podremediator-lease-node
+  labels:
+    infra-operator.openstack.org/podremediator-kuttl: "true"
+    topology.topolvm.io/node: podremediator-lease-node
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: podremediator-lease-pv
+  labels:
+    app: podremediator-lease
+spec:
+  # A static local PV and claim selector make this fixture independent of a
+  # cluster-specific dynamic StorageClass.
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  local:
+    path: /var/lib/podremediator-lease-test
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology.topolvm.io/node
+              operator: In
+              values:
+                - podremediator-lease-node
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: podremediator-lease
+spec:
+  serviceName: podremediator-lease
+  replicas: 1
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: OnDelete
+  selector:
+    matchLabels:
+      app: podremediator-lease
+  template:
+    metadata:
+      labels:
+        app: podremediator-lease
+      finalizers:
+        - test.kuttl.dev/hold-committed-pod
+    spec:
+      nodeName: podremediator-lease-node
+      terminationGracePeriodSeconds: 0
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 3600
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 3600
+      containers:
+        - name: placeholder
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - sleep 3600
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: ""
+        selector:
+          matchLabels:
+            app: podremediator-lease
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: remediation.openstack.org/v1beta1
+kind: PodRemediator
+metadata:
+  name: podremediator-deletion-commit
+spec:
+  consentPollInterval: 5s
+  periodicPollInterval: 5s

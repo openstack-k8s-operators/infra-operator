@@ -24,6 +24,8 @@ rules:
   resources:
   - endpoints
   - namespaces
+  - nodes
+  - persistentvolumes
   verbs:
   - get
   - list
@@ -38,31 +40,29 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - nodes
-  verbs:
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
   - persistentvolumeclaims
-  verbs:
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - pods
   verbs:
   - delete
+  - get
   - list
   - patch
   - update
   - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - pods/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - apps
   resources:
@@ -323,6 +323,41 @@ rules:
   - patch
   - update
 - apiGroups:
+  - remediation.medik8s.io
+  resources:
+  - nodehealthchecks
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - remediation.openstack.org
+  resources:
+  - podremediators
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - remediation.openstack.org
+  resources:
+  - podremediators/finalizers
+  verbs:
+  - patch
+  - update
+- apiGroups:
+  - remediation.openstack.org
+  resources:
+  - podremediators/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
   - security.openshift.io
   resourceNames:
   - nonroot-v2
@@ -330,6 +365,15 @@ rules:
   - securitycontextconstraints
   verbs:
   - use
+- apiGroups:
+  - self-node-remediation.medik8s.io
+  resources:
+  - selfnoderemediations
+  - selfnoderemediationtemplates
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - topology.openstack.org
   resources:

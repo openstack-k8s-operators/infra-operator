@@ -1,0 +1,24 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestAssert
+timeout: 240
+commands:
+  - script: |
+      CLAIM=data-podremediator-lease-0
+      POD=podremediator-lease-0
+      for attempt in $(seq 1 120); do
+        pod_uid=$(oc get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        pvc_uid=$(oc get pvc "$CLAIM" -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        lease_names=$(oc get configmaps -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep '^podremediator-deletion-' || true)
+        remediator_uid=$(oc get podremediator podremediator-deletion-commit -n "$NAMESPACE" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+        if [ -z "$pod_uid" ] && [ -z "$pvc_uid" ] && [ -z "$lease_names" ] && [ -z "$remediator_uid" ]; then
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "Committed cleanup did not converge through PVC protection and PodRemediator finalization"
+      oc get statefulset podremediator-lease -n "$NAMESPACE" -o yaml || true
+      oc get pvc "$CLAIM" -n "$NAMESPACE" -o yaml || true
+      oc get pod "$POD" -n "$NAMESPACE" -o yaml || true
+      oc get configmaps -n "$NAMESPACE" -o yaml || true
+      oc get podremediator podremediator-deletion-commit -n "$NAMESPACE" -o yaml || true
+      exit 1
