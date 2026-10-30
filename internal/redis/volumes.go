@@ -6,6 +6,7 @@ import (
 	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -95,6 +96,21 @@ func getVolumes(r *redisv1.Redis) []corev1.Volume {
 				},
 			},
 		},
+		{
+			// Operator-maintained cluster state (e.g. bootstrap authorization).
+			// Kept separate from config-data so updates do not change the pod
+			// template hash and therefore never trigger a StatefulSet rollout.
+			// Optional so pods can still start before the operator creates it.
+			Name: "redis-state",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: fmt.Sprintf("%s-redis-state", r.Name),
+					},
+					Optional: ptr.To(true),
+				},
+			},
+		},
 	}
 
 	if r.Spec.TLS.Enabled() {
@@ -149,6 +165,10 @@ func getRedisVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 	}, {
 		MountPath: "/var/lib/redis",
 		Name:      "redis-data",
+	}, {
+		MountPath: "/var/lib/redis-state",
+		ReadOnly:  true,
+		Name:      "redis-state",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
@@ -169,6 +189,10 @@ func getSentinelVolumeMounts(r *redisv1.Redis) []corev1.VolumeMount {
 	}, {
 		MountPath: "/var/lib/redis",
 		Name:      "redis-data",
+	}, {
+		MountPath: "/var/lib/redis-state",
+		ReadOnly:  true,
+		Name:      "redis-state",
 	}}
 	vm = append(vm, getTLSVolumeMounts(r)...)
 	return vm
