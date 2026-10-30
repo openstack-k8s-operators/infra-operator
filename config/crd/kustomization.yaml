@@ -13,6 +13,7 @@ resources:
 - bases/network.openstack.org_ipsets.yaml
 - bases/topology.openstack.org_topologies.yaml
 - bases/network.openstack.org_bgpconfigurations.yaml
+- bases/remediation.openstack.org_podremediators.yaml
 - bases/rabbitmq.openstack.org_rabbitmqs.yaml
 - bases/rabbitmq.openstack.org_rabbitmqvhosts.yaml
 - bases/rabbitmq.openstack.org_rabbitmqusers.yaml
