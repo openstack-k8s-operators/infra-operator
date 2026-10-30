@@ -1,0 +1,311 @@
+---
+# Lab-only: before victim pick, put peers in wsrep_desync, run INSERT churn. (Optional: wsrep_reject_queries — off by default.)
+# Misalignment signals (any can satisfy the lab):
+#   - max(wsrep_last_committed) - min >= min_delta
+#   - max(wsrep_last_written) - min >= min_delta (per-node apply lag; often differs when desync peers stall)
+#   - wsrep_local_state_comment != Synced on desync ordinals (e.g. Donor/Desynced)
+#   - sum(wsrep_local_recv_queue) on desync ordinals >= 1
+# Optional wsrep_reject_queries=ALL on desync peers is separate from wsrep_desync: peers still replicate but reject queries.
+# Cleanup: e2e-galera-wsrep-spread-cleanup.yml after victim pick; this file runs cleanup then fails if shell rc != 0.
+#
+# Required: oc_bin, e2e_workload_ns, e2e_sts_name, e2e_galera_mysql_container optional.
+# Extra vars:
+#   e2e_galera_wsrep_spread_desync_ordinals   (default "1,2")
+#   e2e_galera_wsrep_spread_churn_ordinal     (default 0)
+#   e2e_galera_wsrep_spread_churn_inserts     (default 8000)
+#   e2e_galera_wsrep_spread_insert_batch_size (default 400) — rows per INSERT; keep below max_allowed_packet
+#   e2e_galera_wsrep_spread_min_delta         (default 1) — gap threshold for last_committed / last_written
+#   e2e_galera_wsrep_spread_poll_seconds      (default 180)
+#   e2e_galera_wsrep_spread_reject_queries    (default false) — SET GLOBAL wsrep_reject_queries=ALL on desync ordinals (extra knob)
+
+- name: Lab – desync peers + churn (shell)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    OC="{{ oc_bin }}"
+    NS="{{ e2e_workload_ns }}"
+    STS="{{ e2e_sts_name | default('openstack-galera') }}"
+    CTR="{{ e2e_galera_mysql_container | default('galera') }}"
+    DESYNC_ORDS="{{ e2e_galera_wsrep_spread_desync_ordinals | default('1,2') | trim }}"
+    CHURN_ORD="{{ e2e_galera_wsrep_spread_churn_ordinal | default(0) | int }}"
+    CHURN_N="{{ e2e_galera_wsrep_spread_churn_inserts | default(8000) | int }}"
+    BATCH_ROWS="{{ e2e_galera_wsrep_spread_insert_batch_size | default(400) | int }}"
+    MIN_DELTA="{{ e2e_galera_wsrep_spread_min_delta | default(1) | int }}"
+    POLL_MAX="{{ e2e_galera_wsrep_spread_poll_seconds | default(180) | int }}"
+    RJ="{{ e2e_galera_wsrep_spread_reject_queries | default(false) | bool | ternary('1','0') }}"
+
+    if [[ "$CHURN_N" -lt 1 ]]; then echo "e2e_galera_wsrep_spread_churn_inserts must be >= 1" >&2; exit 2; fi
+    if [[ "$BATCH_ROWS" -lt 1 ]]; then echo "e2e_galera_wsrep_spread_insert_batch_size must be >= 1" >&2; exit 2; fi
+    if [[ "$MIN_DELTA" -lt 1 ]]; then echo "e2e_galera_wsrep_spread_min_delta must be >= 1" >&2; exit 2; fi
+
+    lc_from_pod() {
+      local pod="$1"
+      local raw seq
+      raw="$($OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -N -e \
+        "SHOW GLOBAL STATUS LIKE 'wsrep_last_committed';" 2>/dev/null | head -1 || true)"
+      seq="$(printf '%s' "$raw" | head -1 | tr -d '\r' | cut -sf2)"
+      if [[ "$seq" =~ ^[0-9]+$ ]]; then echo "$seq"; else echo "-1"; fi
+    }
+
+    rq_from_pod() {
+      local pod="$1"
+      local raw rq
+      raw="$($OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -N -e \
+        "SHOW GLOBAL STATUS LIKE 'wsrep_local_recv_queue';" 2>/dev/null | head -1 || true)"
+      rq="$(printf '%s' "$raw" | head -1 | tr -d '\r' | cut -sf2)"
+      if [[ "$rq" =~ ^[0-9]+$ ]]; then echo "$rq"; else echo "0"; fi
+    }
+
+    # Local seqno of last written trx — can diverge per member under lag while last_committed stays cluster-uniform.
+    lw_from_pod() {
+      local pod="$1"
+      local raw lw
+      raw="$($OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -N -e \
+        "SHOW GLOBAL STATUS LIKE 'wsrep_last_written';" 2>/dev/null | head -1 || true)"
+      lw="$(printf '%s' "$raw" | head -1 | tr -d '\r' | cut -sf2)"
+      if [[ "$lw" =~ ^[0-9]+$ ]]; then echo "$lw"; else echo "-1"; fi
+    }
+
+    # MariaDB/Galera often reports the same wsrep_last_committed on every member (cluster seqno).
+    # Desync peers then still show Donor/Desynced vs Synced — use as misalignment signal when gap stays 0.
+    state_from_pod() {
+      local pod="$1"
+      local raw st
+      raw="$($OC exec -n "$NS" "$pod" -c "$CTR" -- mysql -uroot -N -e \
+        "SHOW GLOBAL STATUS LIKE 'wsrep_local_state_comment';" 2>/dev/null | head -1 || true)"
+      st="$(printf '%s' "$raw" | head -1 | tr -d '\r' | cut -sf2)"
+      st="$(printf '%s' "$st" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      echo "$st"
+    }
+
+    echo "=== Galera lab: wsrep spread (wsrep_desync + churn; optional reject_queries) $(date -Iseconds) ==="
+    echo "STS=$STS NS=$NS desync_ordinals=$DESYNC_ORDS churn_ordinal=$CHURN_ORD inserts=$CHURN_N batch_rows=$BATCH_ROWS min_delta=$MIN_DELTA poll=${POLL_MAX}s reject_queries=$RJ"
+
+    for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+      o="$(echo "$tok" | tr -d '[:space:]')"
+      [[ -n "$o" ]] || continue
+      if [[ "$o" -eq "$CHURN_ORD" ]]; then
+        echo "Invalid config: churn ordinal $CHURN_ORD cannot appear in desync list ($DESYNC_ORDS)" >&2
+        exit 3
+      fi
+    done
+
+    for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+      o="$(echo "$tok" | tr -d '[:space:]')"
+      [[ -n "$o" ]] || continue
+      POD="${STS}-${o}"
+      ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      if [[ "$ph" != "Running" ]]; then
+        echo "Pod $POD not Running (phase=${ph:-missing}); cannot desync" >&2
+        exit 4
+      fi
+      if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+        echo "Pod $POD mysql not reachable" >&2
+        exit 4
+      fi
+      echo "Desync pod $POD (wsrep_desync=ON)"
+      if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SET GLOBAL wsrep_desync = ON" 2>/dev/null; then
+        echo "SET GLOBAL wsrep_desync=ON failed on $POD (Galera/MariaDB build may not support it in this image)" >&2
+        exit 5
+      fi
+    done
+
+    if [[ "$RJ" == "1" ]]; then
+      for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+        o="$(echo "$tok" | tr -d '[:space:]')"
+        [[ -n "$o" ]] || continue
+        POD="${STS}-${o}"
+        ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        [[ "$ph" == "Running" ]] || continue
+        echo "Reject client queries on $POD (wsrep_reject_queries=ALL, distinct from wsrep_desync)"
+        if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SET GLOBAL wsrep_reject_queries = ALL" 2>/dev/null; then
+          echo "WARN: wsrep_reject_queries=ALL failed on $POD (unsupported build?) — continuing with desync + churn only" >&2
+        fi
+      done
+    fi
+
+    CHURN_POD="${STS}-${CHURN_ORD}"
+    phc="$($OC get pod -n "$NS" "$CHURN_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    if [[ "$phc" != "Running" ]]; then
+      echo "Churn pod $CHURN_POD not Running" >&2
+      exit 6
+    fi
+    echo "Churn writes on $CHURN_POD (batched stream: $CHURN_N rows, batch size $BATCH_ROWS — single mysql stdin; avoids per-row oc exec so desync peers can lag)"
+    # Per-row oc exec + INSERT takes minutes; replication catches up during the loop → gap stays 0.
+    # Stream batched INSERTs into one mysql session so apply backlog can appear on wsrep_desync peers.
+    export E2E_CHURN_N="$CHURN_N"
+    export E2E_BATCH_ROWS="$BATCH_ROWS"
+    if ! python3 <<'PY' | $OC exec -i -n "$NS" "$CHURN_POD" -c "$CTR" -- mysql -uroot
+    import os
+    n = int(os.environ["E2E_CHURN_N"])
+    batch = int(os.environ["E2E_BATCH_ROWS"])
+    print("CREATE DATABASE IF NOT EXISTS e2e_wsrep_churn;", flush=True)
+    print("USE e2e_wsrep_churn;", flush=True)
+    print("CREATE TABLE IF NOT EXISTS t (i INT PRIMARY KEY AUTO_INCREMENT);", flush=True)
+    for start in range(0, n, batch):
+        k = min(batch, n - start)
+        vals = ",".join(["()"] * k)
+        print(f"INSERT INTO t () VALUES {vals};", flush=True)
+    PY
+    then
+      echo "Batched churn failed (python3, oc exec -i, or mysql — check max_allowed_packet if batch too large)" >&2
+      exit 9
+    fi
+
+    REPL="$($OC get sts "$STS" -n "$NS" -o json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("spec",{}).get("replicas",""))' || true)"
+    if ! [[ "$REPL" =~ ^[1-9][0-9]*$ ]]; then
+      echo "Cannot read STS replicas" >&2
+      exit 7
+    fi
+
+    t0=$(date +%s)
+    spread_ok=0
+    spread_reason=""
+    while true; do
+      declare -a vals=()
+      declare -a lw_vals=()
+      for j in $(seq 0 $((REPL - 1))); do
+        POD="${STS}-${j}"
+        ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        if [[ "$ph" != "Running" ]]; then
+          vals+=("-1")
+          lw_vals+=("-1")
+          continue
+        fi
+        if ! $OC exec -n "$NS" "$POD" -c "$CTR" -- mysql -uroot -e "SELECT 1" &>/dev/null; then
+          vals+=("-1")
+          lw_vals+=("-1")
+          continue
+        fi
+        vals+=("$(lc_from_pod "$POD")")
+        lw_vals+=("$(lw_from_pod "$POD")")
+      done
+      vmin=999999999999
+      vmax=-1
+      for v in "${vals[@]}"; do
+        [[ "$v" =~ ^[0-9]+$ ]] || continue
+        [[ "$v" -lt "$vmin" ]] && vmin=$v
+        [[ "$v" -gt "$vmax" ]] && vmax=$v
+      done
+      gap=$((vmax - vmin))
+      echo "wsrep_last_committed per ordinal 0..$((REPL - 1)): ${vals[*]} (max=$vmax min=$vmin gap=$gap)"
+      if [[ "$vmax" -ge 0 && "$vmin" -ge 0 && "$gap" -ge "$MIN_DELTA" ]]; then
+        echo "OK: wsrep_last_committed gap >= $MIN_DELTA"
+        spread_ok=1
+        spread_reason="wsrep_last_committed_gap"
+        break
+      fi
+      lwmin=999999999999
+      lwmax=-1
+      for w in "${lw_vals[@]}"; do
+        [[ "$w" =~ ^[0-9]+$ && "$w" -ge 0 ]] || continue
+        [[ "$w" -lt "$lwmin" ]] && lwmin=$w
+        [[ "$w" -gt "$lwmax" ]] && lwmax=$w
+      done
+      if [[ "$lwmax" -ge 0 ]]; then
+        lwgap=$((lwmax - lwmin))
+        echo "wsrep_last_written per ordinal 0..$((REPL - 1)): ${lw_vals[*]} (max=$lwmax min=$lwmin gap=$lwgap)"
+        if [[ "$lwgap" -ge "$MIN_DELTA" ]]; then
+          echo "OK: wsrep_last_written gap >= $MIN_DELTA (per-node apply lag; not cluster-uniform seqno)"
+          spread_ok=1
+          spread_reason="wsrep_last_written_gap"
+          break
+        fi
+      else
+        echo "wsrep_last_written: not in SHOW GLOBAL STATUS for this build — skipped (desync/churn/state fallbacks still apply)"
+      fi
+      desync_not_synced=0
+      for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+        o="$(echo "$tok" | tr -d '[:space:]')"
+        [[ -n "$o" ]] || continue
+        POD="${STS}-${o}"
+        ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        [[ "$ph" == "Running" ]] || continue
+        st="$(state_from_pod "$POD")"
+        if [[ -n "$st" && "$st" != "Synced" ]]; then
+          echo "  $POD wsrep_local_state_comment=$st (desync peer not Synced)"
+          desync_not_synced=1
+        fi
+      done
+      if [[ "$desync_not_synced" -eq 1 ]]; then
+        echo "OK (fallback): wsrep_local_state_comment shows peer(s) not Synced (seqno may still match cluster-wide)."
+        spread_ok=1
+        spread_reason="wsrep_local_state_comment"
+        break
+      fi
+      now=$(date +%s)
+      if [[ $((now - t0)) -ge "$POLL_MAX" ]]; then
+        break
+      fi
+      sleep 2
+    done
+
+    if [[ "$spread_ok" -ne 1 ]]; then
+      echo "No wsrep_last_committed gap >= $MIN_DELTA; checking wsrep_local_recv_queue on desync ordinals..."
+      qsum=0
+      for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+        o="$(echo "$tok" | tr -d '[:space:]')"
+        [[ -n "$o" ]] || continue
+        POD="${STS}-${o}"
+        ph="$($OC get pod -n "$NS" "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+        if [[ "$ph" != "Running" ]]; then
+          echo "  skip $POD (not Running)"
+          continue
+        fi
+        rq="$(rq_from_pod "$POD")"
+        echo "  $POD wsrep_local_recv_queue=$rq"
+        qsum=$((qsum + rq))
+      done
+      if [[ "$qsum" -ge 1 ]]; then
+        echo "OK (fallback): recv_queue sum=$qsum on desync ordinals (apply backlog)."
+        spread_ok=1
+        spread_reason="wsrep_local_recv_queue"
+      fi
+    fi
+
+    if [[ "$spread_ok" -ne 1 ]]; then
+      echo "No gap/recv_queue; final wsrep_local_state_comment on desync ordinals:"
+      for tok in $(echo "$DESYNC_ORDS" | tr ',' ' '); do
+        o="$(echo "$tok" | tr -d '[:space:]')"
+        [[ -n "$o" ]] || continue
+        POD="${STS}-${o}"
+        st="$(state_from_pod "$POD")"
+        echo "  $POD wsrep_local_state_comment=${st:-<empty>}"
+        if [[ -n "$st" && "$st" != "Synced" ]]; then
+          echo "OK (fallback): $POD not Synced after poll window."
+          spread_ok=1
+          spread_reason="wsrep_local_state_comment_final"
+        fi
+      done
+    fi
+
+    if [[ "$spread_ok" -eq 1 ]]; then
+      echo "=== Spread lab passed (criterion: ${spread_reason:-unknown}) ==="
+    fi
+
+    if [[ "$spread_ok" -ne 1 ]]; then
+      echo "Lab spread failed: no last_committed/last_written gap, no recv_queue backlog, and desync peers still Synced (or unreachable). Try longer poll / more churn; verify SET GLOBAL wsrep_desync=ON; optional: -e e2e_galera_wsrep_spread_reject_queries=true." >&2
+      exit 8
+    fi
+  args:
+    executable: /bin/bash
+  register: galera_wsrep_spread_result
+  changed_when: galera_wsrep_spread_result.rc == 0
+  failed_when: false
+
+- name: Show wsrep spread lab output
+  ansible.builtin.debug:
+    msg: "{{ galera_wsrep_spread_result.stdout_lines | default([]) }}"
+
+- name: Lab – spread cleanup after spread shell failure
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../tasks/e2e-galera-wsrep-spread-cleanup.yml"
+  when: galera_wsrep_spread_result.rc | int != 0
+
+- name: Fail when Galera wsrep spread lab did not succeed
+  ansible.builtin.fail:
+    msg: >-
+      wsrep spread lab exited rc={{ galera_wsrep_spread_result.rc }}.
+      See task output above. Hints: raise -e e2e_galera_wsrep_spread_churn_inserts / poll_seconds;
+      lower -e e2e_galera_wsrep_spread_insert_batch_size if mysql hits max_allowed_packet (rc=9);
+      verify SET GLOBAL wsrep_desync=ON. Optional extra knob: -e e2e_galera_wsrep_spread_reject_queries=true.
+      Some builds keep wsrep_last_committed identical on all nodes — last_written or state_comment can still show spread.
+  when: galera_wsrep_spread_result.rc | int != 0

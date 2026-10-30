@@ -1,0 +1,24 @@
+# Test PV bound to a single node (local PV). Replace NODE_NAME with an actual node name.
+# Apply: NODE_NAME=$(oc get nodes -o jsonpath='{.items[0].metadata.name}'); sed "s/NODE_NAME/${NODE_NAME}/g" pv-local.yaml | oc apply -f -
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: test-local-pv-podremediator
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /tmp/podremediator-test-local
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - NODE_NAME
