@@ -61,6 +61,110 @@ const (
 	QueueTypeQuorum QueueType = "Quorum"
 )
 
+// DefaultTransientQueueExpiryPattern is the default regex used by the
+// transient-queue expiry policy. It targets oslo.messaging transient queues
+// (reply_* and *_fanout_*) and the per-process RPC server-target queues whose
+// name ends in a UUID (e.g. heat's heat-engine-listener.<engine_id> and
+// engine_worker.<engine_id>), while deliberately excluding durable notification
+// queues and stable host-named service queues so those are never reaped.
+const DefaultTransientQueueExpiryPattern = `^(reply_.*|.*_fanout_.*|.*\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`
+
+// QueuePolicies groups the opt-in queue policies that the controller manages as
+// RabbitMQPolicy resources on a RabbitMq cluster. Each field, when set, is
+// translated into exactly one managed RabbitMQPolicy (named after the cluster
+// with a per-policy suffix); clearing a field removes its managed policy. The
+// patterns are admin-trusted and are ultimately evaluated by RabbitMQ's
+// (backtracking) regex engine against queue names, so keep them simple and
+// anchored; the webhook only validates that they are well-formed regular
+// expressions.
+type QueuePolicies struct {
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// TransientQueueExpiry - manage an "expires" (x-expires) policy targeting
+	// transient quorum queues so the broker auto-deletes orphaned ones. Only
+	// applied when the cluster QueueType is Quorum: quorum queues are durable
+	// and, unlike classic transient queues, are never auto-deleted when their
+	// consumer disconnects, so without this they accumulate without bound. When
+	// the cluster is not Quorum this sub-policy is ignored and any previously
+	// managed policy is removed.
+	TransientQueueExpiry *TransientQueueExpiryPolicy `json:"transientQueueExpiry,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// MessageTTL - manage a "message-ttl" policy that expires messages older
+	// than the configured age (in milliseconds) on queues matching Pattern.
+	// Applies to any queue type.
+	MessageTTL *MessageTTLPolicy `json:"messageTTL,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// QueueExpiry - manage an "expires" policy that auto-deletes queues matching
+	// Pattern after they have been unused for the configured time (in
+	// milliseconds). Applies to any queue type.
+	QueueExpiry *QueueExpiryPolicy `json:"queueExpiry,omitempty"`
+}
+
+// TransientQueueExpiryPolicy configures the transient-queue "expires" policy.
+type TransientQueueExpiryPolicy struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum:=60000
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Expiry - the "expires" (x-expires) value in milliseconds. The minimum
+	// accepted value is 60000 (60s): the expiry must stay well above normal
+	// consumer reconnect windows so that a queue briefly left without a consumer
+	// is not reaped during routine reconnects (for reference, oslo.messaging's
+	// own rabbit_transient_queues_ttl defaults to 1800000 ms).
+	Expiry int64 `json:"expiry"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength:=512
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Pattern - regex selecting the queues this policy applies to. When empty it
+	// defaults to DefaultTransientQueueExpiryPattern, which targets oslo.messaging
+	// transient queues and the per-process RPC server-target queues while
+	// excluding durable notification queues so buffered notifications are never
+	// reaped.
+	Pattern string `json:"pattern,omitempty"`
+}
+
+// MessageTTLPolicy configures a "message-ttl" policy.
+type MessageTTLPolicy struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum:=1
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// TTL - the "message-ttl" value in milliseconds. Messages older than this
+	// are dropped (or dead-lettered) from the matching queues.
+	TTL int64 `json:"ttl"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength:=1
+	// +kubebuilder:validation:MaxLength:=512
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Pattern - regex selecting the queues this policy applies to. It must be
+	// non-empty: RabbitMQ treats an empty pattern as matching every queue, which
+	// would apply the TTL cluster-wide.
+	Pattern string `json:"pattern"`
+}
+
+// QueueExpiryPolicy configures an "expires" policy on arbitrary queues.
+type QueueExpiryPolicy struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum:=1
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Expiry - the "expires" value in milliseconds. A queue matching Pattern is
+	// auto-deleted after it has been unused for this long.
+	Expiry int64 `json:"expiry"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength:=1
+	// +kubebuilder:validation:MaxLength:=512
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// Pattern - regex selecting the queues this policy applies to. It must be
+	// non-empty: RabbitMQ treats an empty pattern as matching every queue, which
+	// would auto-delete queues cluster-wide.
+	Pattern string `json:"pattern"`
+}
+
 // UpgradePhase tracks the current phase of a version upgrade or queue migration.
 type UpgradePhase string
 
@@ -206,6 +310,14 @@ type RabbitMqSpecCore struct {
 	// Allowed values: Mirrored, Quorum. New clusters default to Quorum.
 	// Existing clusters without a value default to Mirrored.
 	QueueType *QueueType `json:"queueType,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	// QueuePolicies - optional opt-in queue policies the controller manages as
+	// RabbitMQPolicy resources on this cluster. Each sub-policy, when set,
+	// results in one managed RabbitMQPolicy; when unset its policy is removed.
+	// See the individual fields for the RabbitMQ argument each one maps to.
+	QueuePolicies *QueuePolicies `json:"queuePolicies,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
