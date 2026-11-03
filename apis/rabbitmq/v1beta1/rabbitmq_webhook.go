@@ -19,6 +19,7 @@ package v1beta1
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	common_webhook "github.com/openstack-k8s-operators/lib-common/modules/common/webhook"
@@ -323,6 +324,7 @@ func (spec *RabbitMqSpecCore) ValidateCreate(basePath *field.Path, namespace str
 	allWarn = append(allWarn, warn...)
 	allErrs = append(allErrs, errs...)
 	allErrs = append(allErrs, spec.ValidateQueueType(basePath)...)
+	allErrs = append(allErrs, spec.ValidateQueuePolicies(basePath)...)
 
 	return allWarn, allErrs
 }
@@ -337,6 +339,7 @@ func (spec *RabbitMqSpecCore) ValidateUpdate(old RabbitMqSpecCore, basePath *fie
 	allWarn = append(allWarn, warn...)
 	allErrs = append(allErrs, errs...)
 	allErrs = append(allErrs, spec.ValidateQueueType(basePath)...)
+	allErrs = append(allErrs, spec.ValidateQueuePolicies(basePath)...)
 
 	// Reject scale-down: RabbitMQ does not support automatic node removal.
 	allErrs = append(allErrs, spec.validateScaleDown(old, basePath)...)
@@ -436,6 +439,47 @@ func (spec *RabbitMqSpecCore) ValidateQueueType(basePath *field.Path) field.Erro
 				fmt.Sprintf("Mirrored queues are not supported with RabbitMQ %s; use Quorum", *spec.TargetVersion),
 			))
 		}
+	}
+	return allErrs
+}
+
+// ValidateQueuePolicies rejects a queue-policy pattern that is not a valid
+// regular expression, so a bad pattern fails fast at admission instead of
+// surfacing later as a reconcile error when the controller creates the managed
+// RabbitMQPolicy. The patterns are admin-trusted and are ultimately evaluated by
+// RabbitMQ's (backtracking) regex engine, so they are validated here only for
+// well-formedness; length is bounded by each field's MaxLength.
+func (spec *RabbitMqSpecCore) ValidateQueuePolicies(basePath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	if spec.QueuePolicies == nil {
+		return allErrs
+	}
+	policiesPath := basePath.Child("queuePolicies")
+
+	// The transient-queue pattern may be empty (it defaults); the others are
+	// required by the schema and so are always non-empty here.
+	if p := spec.QueuePolicies.TransientQueueExpiry; p != nil && p.Pattern != "" {
+		allErrs = append(allErrs, validateQueuePolicyPattern(
+			policiesPath.Child("transientQueueExpiry", "pattern"), p.Pattern)...)
+	}
+	if p := spec.QueuePolicies.MessageTTL; p != nil {
+		allErrs = append(allErrs, validateQueuePolicyPattern(
+			policiesPath.Child("messageTTL", "pattern"), p.Pattern)...)
+	}
+	if p := spec.QueuePolicies.QueueExpiry; p != nil {
+		allErrs = append(allErrs, validateQueuePolicyPattern(
+			policiesPath.Child("queueExpiry", "pattern"), p.Pattern)...)
+	}
+	return allErrs
+}
+
+// validateQueuePolicyPattern checks that a single queue-policy pattern is a
+// well-formed regular expression.
+func validateQueuePolicyPattern(path *field.Path, pattern string) field.ErrorList {
+	var allErrs field.ErrorList
+	if _, err := regexp.Compile(pattern); err != nil {
+		allErrs = append(allErrs, field.Invalid(
+			path, pattern, fmt.Sprintf("invalid regex pattern: %v", err)))
 	}
 	return allErrs
 }

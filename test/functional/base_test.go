@@ -480,6 +480,27 @@ func SimulateRabbitMQClusterReady(name types.NamespacedName) {
 	th.Logger.Info("Simulated RabbitMQ cluster ready", "on", name)
 }
 
+// activeManagedQueuePolicies returns the non-terminating RabbitMQPolicy objects
+// the RabbitMq controller manages from spec.queuePolicies for the given cluster
+// (selected by the managed-queue-policy label). Pruned policies linger in a
+// terminating state in EnvTest because their finalizer never completes, so they
+// are excluded.
+func activeManagedQueuePolicies(g Gomega, name types.NamespacedName) []rabbitmqv1.RabbitMQPolicy {
+	list := &rabbitmqv1.RabbitMQPolicyList{}
+	g.Expect(k8sClient.List(ctx, list,
+		client.InNamespace(name.Namespace),
+		client.MatchingLabels{"rabbitmq.openstack.org/queue-policy": name.Name},
+	)).To(Succeed())
+
+	active := make([]rabbitmqv1.RabbitMQPolicy, 0, len(list.Items))
+	for i := range list.Items {
+		if list.Items[i].GetDeletionTimestamp().IsZero() {
+			active = append(active, list.Items[i])
+		}
+	}
+	return active
+}
+
 // SimulateRabbitMQVhostReady function updates the RabbitMQVhost object
 // status to mark it as Ready.
 //

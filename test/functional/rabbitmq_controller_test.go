@@ -1883,6 +1883,218 @@ var _ = Describe("RabbitMQ Controller", func() {
 		})
 	})
 
+	When("a Quorum RabbitMQ sets queuePolicies.transientQueueExpiry", func() {
+		It("creates a transient-queue expiry policy using the default pattern", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Quorum"
+			spec["queuePolicies"] = map[string]interface{}{
+				"transientQueueExpiry": map[string]interface{}{"expiry": 3600000},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				policy := policies[0]
+				g.Expect(policy.Spec.RabbitmqClusterName).To(Equal(rabbitmqName.Name))
+				g.Expect(policy.Spec.ApplyTo).To(Equal("queues"))
+				g.Expect(policy.Spec.Pattern).To(Equal(rabbitmqv1.DefaultTransientQueueExpiryPattern))
+				g.Expect(string(policy.Spec.Definition.Raw)).To(ContainSubstring(`"expires":3600000`))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("honors a custom transient-queue pattern", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Quorum"
+			spec["queuePolicies"] = map[string]interface{}{
+				"transientQueueExpiry": map[string]interface{}{"expiry": 60000, "pattern": "^reply_.*"},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				g.Expect(policies[0].Spec.Pattern).To(Equal("^reply_.*"))
+				g.Expect(string(policies[0].Spec.Definition.Raw)).To(ContainSubstring(`"expires":60000`))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("does not create the policy when transientQueueExpiry is unset", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Quorum"
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Consistently(func(g Gomega) {
+				g.Expect(activeManagedQueuePolicies(g, rabbitmqName)).To(BeEmpty())
+			}, "2s", interval).Should(Succeed())
+		})
+
+		It("does not create the policy on a non-Quorum cluster", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
+			spec["queuePolicies"] = map[string]interface{}{
+				"transientQueueExpiry": map[string]interface{}{"expiry": 3600000},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Consistently(func(g Gomega) {
+				g.Expect(activeManagedQueuePolicies(g, rabbitmqName)).To(BeEmpty())
+			}, "2s", interval).Should(Succeed())
+		})
+
+		It("updates the policy on change and removes it when disabled", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Quorum"
+			spec["queuePolicies"] = map[string]interface{}{
+				"transientQueueExpiry": map[string]interface{}{"expiry": 3600000},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			// Initial policy created.
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				g.Expect(string(policies[0].Spec.Definition.Raw)).To(ContainSubstring(`"expires":3600000`))
+			}, timeout, interval).Should(Succeed())
+
+			// Change expiry and pattern. The pattern change moves the policy to a
+			// new (hashed) name, so the old one is pruned and exactly one active
+			// policy with the new pattern and value remains.
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Spec.QueuePolicies = &rabbitmqv1.QueuePolicies{
+					TransientQueueExpiry: &rabbitmqv1.TransientQueueExpiryPolicy{
+						Expiry:  120000,
+						Pattern: "^reply_.*",
+					},
+				}
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				g.Expect(policies[0].Spec.Pattern).To(Equal("^reply_.*"))
+				g.Expect(string(policies[0].Spec.Definition.Raw)).To(ContainSubstring(`"expires":120000`))
+			}, timeout, interval).Should(Succeed())
+
+			// Remove the sub-policy -> controller prunes the managed policy. In
+			// EnvTest the RabbitMQPolicy finalizer keeps pruned objects around in a
+			// terminating state, so "no active managed policy" proves pruning ran.
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Spec.QueuePolicies = nil
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(activeManagedQueuePolicies(g, rabbitmqName)).To(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("a RabbitMQ sets queuePolicies.messageTTL and queuePolicies.queueExpiry", func() {
+		It("merges sub-policies that share a pattern into a single policy", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queueType"] = "Mirrored"
+			spec["queuePolicies"] = map[string]interface{}{
+				"messageTTL":  map[string]interface{}{"ttl": 60000, "pattern": "^clear-.*"},
+				"queueExpiry": map[string]interface{}{"expiry": 1800000, "pattern": "^clear-.*"},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				policy := policies[0]
+				g.Expect(policy.Spec.Pattern).To(Equal("^clear-.*"))
+				g.Expect(policy.Spec.ApplyTo).To(Equal("queues"))
+				g.Expect(string(policy.Spec.Definition.Raw)).To(ContainSubstring(`"message-ttl":60000`))
+				g.Expect(string(policy.Spec.Definition.Raw)).To(ContainSubstring(`"expires":1800000`))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("rejects an empty pattern (would match every queue)", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queuePolicies"] = map[string]interface{}{
+				"messageTTL": map[string]interface{}{"ttl": 60000, "pattern": "^clear-.*"},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Spec.QueuePolicies.MessageTTL.Pattern = ""
+				err := k8sClient.Update(ctx, instance)
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(ContainSubstring("pattern"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("creates separate policies for distinct patterns", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queuePolicies"] = map[string]interface{}{
+				"messageTTL":  map[string]interface{}{"ttl": 60000, "pattern": "^clear-.*"},
+				"queueExpiry": map[string]interface{}{"expiry": 1800000, "pattern": "^tmp-.*"},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(2))
+				byPattern := map[string]rabbitmqv1.RabbitMQPolicy{}
+				for _, p := range policies {
+					byPattern[p.Spec.Pattern] = p
+				}
+				g.Expect(byPattern).To(HaveKey("^clear-.*"))
+				g.Expect(byPattern).To(HaveKey("^tmp-.*"))
+				g.Expect(string(byPattern["^clear-.*"].Spec.Definition.Raw)).To(ContainSubstring(`"message-ttl":60000`))
+				g.Expect(string(byPattern["^tmp-.*"].Spec.Definition.Raw)).To(ContainSubstring(`"expires":1800000`))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("prunes a policy when its sub-policy is cleared", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["queuePolicies"] = map[string]interface{}{
+				"messageTTL":  map[string]interface{}{"ttl": 60000, "pattern": "^clear-.*"},
+				"queueExpiry": map[string]interface{}{"expiry": 1800000, "pattern": "^tmp-.*"},
+			}
+			DeferCleanup(th.DeleteInstance, CreateRabbitMQ(rabbitmqName, spec))
+			SimulateRabbitMQClusterReady(rabbitmqName)
+
+			Eventually(func(g Gomega) {
+				g.Expect(activeManagedQueuePolicies(g, rabbitmqName)).To(HaveLen(2))
+			}, timeout, interval).Should(Succeed())
+
+			// Drop messageTTL only; the queueExpiry policy must remain.
+			Eventually(func(g Gomega) {
+				instance := &rabbitmqv1.RabbitMq{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, instance)).Should(Succeed())
+				instance.Spec.QueuePolicies = &rabbitmqv1.QueuePolicies{
+					QueueExpiry: &rabbitmqv1.QueueExpiryPolicy{Expiry: 1800000, Pattern: "^tmp-.*"},
+				}
+				g.Expect(k8sClient.Update(ctx, instance)).Should(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				policies := activeManagedQueuePolicies(g, rabbitmqName)
+				g.Expect(policies).To(HaveLen(1))
+				g.Expect(policies[0].Spec.Pattern).To(Equal("^tmp-.*"))
+				g.Expect(string(policies[0].Spec.Definition.Raw)).To(ContainSubstring(`"expires":1800000`))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("a 3.x to 4.x upgrade includes proxy sidecar in StatefulSet", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()

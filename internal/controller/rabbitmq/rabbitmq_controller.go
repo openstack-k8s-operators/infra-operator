@@ -19,6 +19,8 @@ package rabbitmq
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -992,6 +994,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				Log.Info("Setting queue type status to Quorum")
 				instance.Status.QueueType = rabbitmqv1beta1.QueueTypeQuorum
 			}
+
+		}
+
+		// Reconcile the opt-in queue policies (message-ttl, queue expiry, and the
+		// Quorum-only transient-queue expiry). These are type-agnostic (the helper
+		// treats a nil queue type as non-Quorum), so reconcile them even when
+		// Spec.QueueType is unset, e.g. for legacy objects stored without it.
+		if err := reconcileQueuePolicies(ctx, helper, instance); err != nil {
+			Log.Error(err, "Could not reconcile queue policies")
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.DeploymentReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.DeploymentReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -1210,6 +1227,138 @@ func deleteMirroredPolicy(ctx context.Context, helper *helper.Helper, instance *
 		return err
 	}
 	return helper.GetClient().Delete(ctx, policy)
+}
+
+// managedQueuePolicyLabel marks the RabbitMQPolicy objects the controller
+// derives from spec.queuePolicies. Its value is the owning cluster name, so
+// stale managed policies can be listed and pruned without touching other
+// operator-managed policies (e.g. the ha-all mirroring policy).
+const managedQueuePolicyLabel = "rabbitmq.openstack.org/queue-policy"
+
+// reconcileQueuePolicies ensures the opt-in queue policies declared under
+// spec.queuePolicies exist as managed RabbitMQPolicy resources, and prunes any
+// previously managed policy that is no longer desired.
+//
+// RabbitMQ applies at most one regular policy per queue (the highest priority;
+// ties are nondeterministic), so sub-policies that resolve to the same pattern
+// MUST be combined into a single policy or one of their definitions would be
+// silently dropped. This groups the active sub-policies by their resolved
+// pattern and emits exactly one RabbitMQPolicy per unique pattern, merging the
+// definition keys.
+//
+// The transient-queue expiry policy is only meaningful for Quorum clusters,
+// whose transient queues are durable and are never auto-deleted when their
+// consumer disconnects, so it is skipped on non-Quorum clusters.
+func reconcileQueuePolicies(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq) error {
+	policies := instance.Spec.QueuePolicies
+	if policies == nil {
+		policies = &rabbitmqv1beta1.QueuePolicies{}
+	}
+	isQuorum := instance.Spec.QueueType != nil && *instance.Spec.QueueType == rabbitmqv1beta1.QueueTypeQuorum
+
+	// Build the desired definition for each unique resolved pattern. queueExpiry
+	// is merged after transientQueueExpiry so that, in the unlikely case both set
+	// "expires" on the same pattern, the user's explicit queueExpiry value wins.
+	definitions := map[string]map[string]interface{}{}
+	addDefinition := func(pattern, key string, value int64) {
+		def := definitions[pattern]
+		if def == nil {
+			def = map[string]interface{}{}
+			definitions[pattern] = def
+		}
+		def[key] = value
+	}
+
+	if p := policies.TransientQueueExpiry; p != nil && isQuorum {
+		pattern := p.Pattern
+		if pattern == "" {
+			pattern = rabbitmqv1beta1.DefaultTransientQueueExpiryPattern
+		}
+		addDefinition(pattern, "expires", p.Expiry)
+	}
+	if p := policies.MessageTTL; p != nil {
+		addDefinition(p.Pattern, "message-ttl", p.TTL)
+	}
+	if p := policies.QueueExpiry; p != nil {
+		addDefinition(p.Pattern, "expires", p.Expiry)
+	}
+
+	// Ensure one managed policy per unique pattern and record the desired names
+	// so everything else labeled as a managed queue policy can be pruned.
+	desired := map[string]bool{}
+	for pattern, definition := range definitions {
+		name := queuePolicyName(instance.Name, pattern)
+		desired[name] = true
+		if err := ensureQueuePolicy(ctx, helper, instance, name, pattern, definition); err != nil {
+			return err
+		}
+	}
+
+	return pruneQueuePolicies(ctx, helper, instance, desired)
+}
+
+// queuePolicyName returns a deterministic, DNS-safe object name for the managed
+// RabbitMQPolicy covering a given pattern. The pattern is hashed because it may
+// contain regex characters that are not valid in a Kubernetes object name.
+func queuePolicyName(cluster, pattern string) string {
+	sum := sha256.Sum256([]byte(pattern))
+	return fmt.Sprintf("%s-qp-%s", cluster, hex.EncodeToString(sum[:])[:10])
+}
+
+// ensureQueuePolicy creates or updates a managed RabbitMQPolicy with the given
+// pattern and merged definition. It is idempotent and tracks changes to the
+// definition. The managed policy always applies to queues at priority 0.
+func ensureQueuePolicy(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, name, pattern string, definition map[string]interface{}) error {
+	definitionJSON, err := json.Marshal(definition)
+	if err != nil {
+		return err
+	}
+
+	policy := &rabbitmqv1beta1.RabbitMQPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: instance.Namespace,
+		},
+	}
+
+	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), policy, func() error {
+		if policy.Labels == nil {
+			policy.Labels = map[string]string{}
+		}
+		policy.Labels[managedQueuePolicyLabel] = instance.Name
+		policy.Spec.RabbitmqClusterName = instance.Name
+		policy.Spec.Name = strings.TrimPrefix(name, instance.Name+"-")
+		policy.Spec.Pattern = pattern
+		policy.Spec.Definition = apiextensionsv1.JSON{Raw: definitionJSON}
+		policy.Spec.Priority = 0
+		policy.Spec.ApplyTo = "queues"
+		return controllerutil.SetControllerReference(instance, policy, helper.GetScheme())
+	})
+	return err
+}
+
+// pruneQueuePolicies deletes every managed queue policy owned by this cluster
+// whose name is not in the desired set (e.g. a sub-policy was cleared or its
+// pattern changed). It is a no-op for policies already being deleted.
+func pruneQueuePolicies(ctx context.Context, helper *helper.Helper, instance *rabbitmqv1beta1.RabbitMq, desired map[string]bool) error {
+	list := &rabbitmqv1beta1.RabbitMQPolicyList{}
+	if err := helper.GetClient().List(ctx, list,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{managedQueuePolicyLabel: instance.Name},
+	); err != nil {
+		return err
+	}
+
+	for i := range list.Items {
+		policy := &list.Items[i]
+		if desired[policy.Name] || !policy.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+		if err := helper.GetClient().Delete(ctx, policy); err != nil && !k8s_errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper) (ctrl.Result, error) {
