@@ -1,0 +1,23 @@
+apiVersion: kuttl.dev/v1beta1
+kind: TestStep
+commands:
+  - script: |
+      PV=podremediator-lease-pv
+      old_uid=$(oc get pv "$PV" -o jsonpath='{.spec.claimRef.uid}')
+      if [ -z "$old_uid" ]; then
+        echo "Retained local PV no longer records the deleted claim UID"
+        exit 1
+      fi
+      oc annotate pv "$PV" "infra-operator.openstack.org/old-pvc-uid=$old_uid" --overwrite
+      oc patch pv "$PV" --type=merge --patch '{"spec":{"claimRef":null}}'
+      for attempt in $(seq 1 60); do
+        phase=$(oc get pv "$PV" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        if [ "$phase" = "Available" ]; then
+          oc scale statefulset podremediator-lease -n "$NAMESPACE" --replicas=1
+          exit 0
+        fi
+        sleep 2
+      done
+      echo "Retained local PV did not return to Available after its old claim was removed"
+      oc get pv "$PV" -o yaml || true
+      exit 1
