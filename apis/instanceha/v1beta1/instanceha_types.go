@@ -63,8 +63,11 @@ type InstanceHaMetricsTLS struct {
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Enum="1.2";"1.3"
-	// +kubebuilder:default="1.2"
-	// MinTLSVersion - Minimum TLS version for the metrics endpoint
+	// +kubebuilder:default="1.3"
+	// MinTLSVersion - Minimum TLS version for the metrics endpoint. Only TLS 1.3
+	// is accepted: TLS 1.2 does not support the hybrid post-quantum key exchange
+	// (X25519MLKEM768) and is rejected by the validating webhook. The enum retains
+	// "1.2" for CRD backward compatibility (enum values may not be removed).
 	MinTLSVersion string `json:"minTLSVersion"`
 
 	// +kubebuilder:validation:Optional
