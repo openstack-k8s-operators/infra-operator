@@ -169,6 +169,7 @@ func StatefulSet(
 					ServiceAccountName:            r.RbacResourceName(),
 					AutomountServiceAccountToken:  ptr.To(false),
 					TerminationGracePeriodSeconds: r.Spec.TerminationGracePeriodSeconds,
+					ReadinessGates:                rejoinReadinessGates(r, targetVersion),
 					InitContainers:                initContainers,
 					Containers:                    containers,
 					Volumes:                       append(volumes, serviceaccount.KubeAPIAccessVolume()),
@@ -234,6 +235,17 @@ func StatefulSet(
 	}
 
 	return sts
+}
+
+// rejoinReadinessGates keeps a replacement seed pod out of client service
+// endpoints until the controller has verified that it rejoined its cluster.
+func rejoinReadinessGates(r *rabbitmqv1.RabbitMq, version string) []corev1.PodReadinessGate {
+	if getReplicaCount(r) <= 1 || !IsVersion4_1OrLater(version) {
+		return nil
+	}
+	return []corev1.PodReadinessGate{{
+		ConditionType: corev1.PodConditionType(rabbitmqv1.RabbitMQRejoinReadyCondition),
+	}}
 }
 
 // buildContainerEnv builds the environment variables for the RabbitMQ container
