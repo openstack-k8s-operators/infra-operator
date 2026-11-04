@@ -104,3 +104,26 @@ func TestStatefulSetSecurityContext(t *testing.T) {
 	}
 	g.Expect(sentinelKubeAPIMountFound).To(BeTrue(), "sentinel container should mount kube-api-access")
 }
+
+func TestDiscoveryStartupFailureThreshold(t *testing.T) {
+	g := NewWithT(t)
+
+	// The window must cover the worst-case wait_for_master() duration, which
+	// grows with the number of peers. A 3-replica cluster needs ~150s and a
+	// 5-replica cluster ~270s; with a 3s period and 30s margin the threshold
+	// must be large enough that FailureThreshold*period exceeds that time.
+	const period = int32(3)
+
+	// 1 replica: no peers, clamped to the minimum window.
+	g.Expect(discoveryStartupFailureThreshold(1, period)).To(Equal(int32(60)))
+
+	// 3 replicas: 2 peers, discovery ~150s -> window must exceed it.
+	threshold3 := discoveryStartupFailureThreshold(3, period)
+	g.Expect(int(threshold3) * int(period)).To(BeNumerically(">=", 150+30))
+
+	// 5 replicas: 4 peers, discovery ~270s -> window must exceed it, and must
+	// be strictly larger than the 3-replica window.
+	threshold5 := discoveryStartupFailureThreshold(5, period)
+	g.Expect(int(threshold5) * int(period)).To(BeNumerically(">=", 270+30))
+	g.Expect(threshold5).To(BeNumerically(">", threshold3))
+}
