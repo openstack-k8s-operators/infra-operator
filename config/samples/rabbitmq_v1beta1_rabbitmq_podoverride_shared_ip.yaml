@@ -1,0 +1,54 @@
+apiVersion: rabbitmq.openstack.org/v1beta1
+kind: RabbitMq
+metadata:
+  name: rabbitmq
+spec:
+  replicas: 3
+  secret: osp-secret
+  persistence:
+    storageClassName: local-storage
+  # podOverride creates one LoadBalancer Service per pod (rabbitmq-server-0/1/2).
+  # Here all three share a single LoadBalancer IP via metallb allow-shared-ip,
+  # so both amqp and amqps ports must be distinct across the Services. Only the
+  # Service ports are overridden; targetPorts stay at 5672 and 5671, so traffic
+  # still reaches the RabbitMQ listeners.
+  # The generated transport URL will use the per-pod ports, e.g.:
+  #   rabbit://user:pass@172.17.0.87:5672,user:pass@172.17.0.87:5673,...
+  podOverride:
+    services:
+    - metadata:
+        annotations:
+          metallb.universe.tf/address-pool: internalapi
+          metallb.universe.tf/allow-shared-ip: internalapi
+          metallb.universe.tf/loadBalancerIPs: 172.17.0.87
+      spec:
+        type: LoadBalancer
+        ports:
+        - name: amqp
+          port: 5672
+        - name: amqps
+          port: 5671
+    - metadata:
+        annotations:
+          metallb.universe.tf/address-pool: internalapi
+          metallb.universe.tf/allow-shared-ip: internalapi
+          metallb.universe.tf/loadBalancerIPs: 172.17.0.87
+      spec:
+        type: LoadBalancer
+        ports:
+        - name: amqp
+          port: 5673
+        - name: amqps
+          port: 5675
+    - metadata:
+        annotations:
+          metallb.universe.tf/address-pool: internalapi
+          metallb.universe.tf/allow-shared-ip: internalapi
+          metallb.universe.tf/loadBalancerIPs: 172.17.0.87
+      spec:
+        type: LoadBalancer
+        ports:
+        - name: amqp
+          port: 5674
+        - name: amqps
+          port: 5676
