@@ -56,14 +56,6 @@ rules:
   verbs:
   - create
 - apiGroups:
-  - ""
-  resources:
-  - pods/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
   - apps
   resources:
   - deployments

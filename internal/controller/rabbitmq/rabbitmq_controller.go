@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -154,9 +155,9 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=config.openshift.io,resources=networks,verbs=get;list;watch;
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 
-// Required to label and delete pods during CR deletion
+// Required to label and delete pods during CR deletion, and to set the
+// serving label that holds a replacement out of client traffic during rejoin
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 
 // Required to run rabbitmqctl (forget_cluster_node/join_cluster) when
 // repairing cluster membership of a pod recreated with a blank data directory
@@ -682,6 +683,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Log.Info(fmt.Sprintf("Headless Service %s - %s", headlessSvc.Name, hsop))
 	}
 
+	// Before applying the client Service (whose selector requires serving=true),
+	// backfill the serving label on any pre-existing pod that lacks it. New pods
+	// get the label from the StatefulSet template; this only matters on operator
+	// upgrade, where an unlabeled running pod would otherwise be dropped from the
+	// Service until the StatefulSet finished rolling.
+	if err := r.ensurePodsServingLabeled(ctx, instance); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Create client service
 	clientSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -862,7 +872,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			sts.Spec.Template.Spec.Tolerations = desired.Spec.Template.Spec.Tolerations
 			sts.Spec.Template.Spec.TopologySpreadConstraints = desired.Spec.Template.Spec.TopologySpreadConstraints
 			sts.Spec.Template.Spec.AutomountServiceAccountToken = desired.Spec.Template.Spec.AutomountServiceAccountToken
-			sts.Spec.Template.Spec.ReadinessGates = desired.Spec.Template.Spec.ReadinessGates
 			if desired.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 				sts.Spec.Template.Spec.TerminationGracePeriodSeconds = desired.Spec.Template.Spec.TerminationGracePeriodSeconds
 			}
@@ -1728,17 +1737,65 @@ func (r *Reconciler) cleanupOldRabbitmqClusterCR(ctx context.Context, instance *
 }
 
 // IsRabbitmqPVC returns true when the object is a PVC belonging to a RabbitMq
-// StatefulSet, identified by the app.kubernetes.io/name label and the
-// "persistence-" name prefix used by the RabbitMQ StatefulSet volume claim template.
+// StatefulSet. StatefulSet propagates only its selector label
+// (app.kubernetes.io/name) to volumeClaimTemplate PVCs, so component/part-of are
+// not available here; we additionally require the PVC name to match the
+// "persistence-<sts>-server-<ordinal>" shape the RabbitMQ volume claim template
+// produces, so unrelated PVCs that merely carry the name label are excluded.
 func IsRabbitmqPVC(obj client.Object) bool {
-	_, ok := obj.GetLabels()["app.kubernetes.io/name"]
-	return ok && strings.HasPrefix(obj.GetName(), "persistence-")
+	if obj.GetLabels()[labels.K8sAppName] == "" {
+		return false
+	}
+	name := obj.GetName()
+	if !strings.HasPrefix(name, "persistence-") || !strings.Contains(name, "-server-") {
+		return false
+	}
+	_, ok := rmqPVCOrdinal(name)
+	return ok
 }
 
-// IsRabbitmqPod returns true for pods managed by a RabbitMq StatefulSet.
+// IsRabbitmqPod returns true for pods managed by a RabbitMq StatefulSet. Pods
+// carry the full common label set, so we match on the component label rather than
+// the generic name label alone to avoid reacting to unrelated pods.
 func IsRabbitmqPod(obj client.Object) bool {
-	_, ok := obj.GetLabels()["app.kubernetes.io/name"]
-	return ok && strings.Contains(obj.GetName(), "-server-")
+	l := obj.GetLabels()
+	return l[labels.K8sAppComponent] == "rabbitmq" &&
+		l[labels.K8sAppName] != "" &&
+		strings.Contains(obj.GetName(), "-server-")
+}
+
+// rmqPodReadyStatus returns the pod's PodReady condition status, or Unknown if
+// the condition is absent.
+func rmqPodReadyStatus(pod *corev1.Pod) corev1.ConditionStatus {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status
+		}
+	}
+	return corev1.ConditionUnknown
+}
+
+// rmqPodUpdatePredicate limits Pod update events that enqueue a RabbitMq reconcile
+// to the changes the controller actually acts on: readiness transitions, the
+// serving label, the rejoin annotation, phase, and (dis)appearance of a deletion
+// timestamp. Routine kubelet status heartbeats bump resourceVersion without
+// changing any of these, so this avoids a reconcile storm. Create/Delete/Generic
+// events are left to pass (nil funcs default to true).
+func rmqPodUpdatePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPod, ok1 := e.ObjectOld.(*corev1.Pod)
+			newPod, ok2 := e.ObjectNew.(*corev1.Pod)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return rmqPodReadyStatus(oldPod) != rmqPodReadyStatus(newPod) ||
+				oldPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] != newPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] ||
+				oldPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != newPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] ||
+				oldPod.Status.Phase != newPod.Status.Phase ||
+				(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil)
+		},
+	}
 }
 
 // FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
@@ -1793,29 +1850,10 @@ func rmqReadyPods(pods []corev1.Pod, excludeNodes, excludePodNames map[string]bo
 		if pod.Spec.NodeName == "" || excludeNodes[pod.Spec.NodeName] || excludePodNames[pod.Name] {
 			continue
 		}
-		if pod.Status.Phase != corev1.PodRunning || len(pod.Status.ContainerStatuses) == 0 {
+		if !podReady(pod) {
 			continue
 		}
-		podReady := false
-		for _, condition := range pod.Status.Conditions {
-			if condition.Type == corev1.PodReady {
-				podReady = condition.Status == corev1.ConditionTrue
-				break
-			}
-		}
-		if !podReady {
-			continue
-		}
-		allReady := true
-		for _, cs := range pod.Status.ContainerStatuses {
-			if !cs.Ready {
-				allReady = false
-				break
-			}
-		}
-		if allReady {
-			readyPods = append(readyPods, *pod)
-		}
+		readyPods = append(readyPods, *pod)
 	}
 	return readyPods
 }
@@ -1826,6 +1864,11 @@ type rmqMgmtCreds struct {
 	password string
 	tls      bool   // management endpoint is TLS (spec.tls.secretName set)
 	caPEM    []byte // CA bundle to verify the endpoint (spec.tls.caSecretName), may be empty
+	// caConfiguredSeparately is true when the user pointed spec.tls.caSecretName at
+	// a secret distinct from spec.tls.secretName. In that case an empty caPEM is a
+	// misconfiguration (the named CA secret has no ca.crt) and we fail closed rather
+	// than silently skipping verification.
+	caConfiguredSeparately bool
 }
 
 type rmqNodeStatus struct {
@@ -1870,6 +1913,8 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 	creds := &rmqMgmtCreds{username: user, password: pass}
 	if instance.Spec.TLS.SecretName != "" {
 		creds.tls = true
+		creds.caConfiguredSeparately = instance.Spec.TLS.CaSecretName != "" &&
+			instance.Spec.TLS.CaSecretName != instance.Spec.TLS.SecretName
 		if instance.Spec.TLS.CaSecretName != "" {
 			caSecret := &corev1.Secret{}
 			if err := r.Get(ctx, types.NamespacedName{
@@ -1884,27 +1929,54 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 	return creds, nil
 }
 
-// rmqManagementGet performs a bounded read from a ready broker's management API.
-func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, path string, result interface{}) (retErr error) {
-	scheme, port := "http", rabbitmq.ManagementPort
+// rmqManagementClient builds the HTTP client used for a RabbitMQ management-API
+// scan against a single pod. It is built once per scan so paginated reads reuse
+// one connection (and one TLS handshake) instead of dialing per page.
+//
+// TLS verification policy:
+//   - caPEM present: verify against it.
+//   - caPEM empty but a separate CA secret was explicitly configured: fail closed
+//     (the named CA secret is missing ca.crt — a misconfiguration we must not paper
+//     over on a gate that authorizes destructive PVC deletion).
+//   - caPEM empty and no separate CA configured: this is the legitimate
+//     TLS-without-separate-CA deployment. Skip verification for this internal,
+//     cluster-local probe, but log it so it is auditable.
+func (r *Reconciler) rmqManagementClient(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (*http.Client, error) {
+	if r.ManagementHTTPClient != nil {
+		return r.ManagementHTTPClient, nil
+	}
 	transport := &http.Transport{}
 	if creds.tls {
-		scheme, port = "https", rabbitmq.ManagementTLSPort
 		serverName := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace)
 		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12, ServerName: serverName}
-		if len(creds.caPEM) > 0 {
+		switch {
+		case len(creds.caPEM) > 0:
 			pool := x509.NewCertPool()
 			if !pool.AppendCertsFromPEM(creds.caPEM) {
-				return fmt.Errorf("failed to parse RabbitMQ CA certificate")
+				return nil, fmt.Errorf("failed to parse RabbitMQ CA certificate")
 			}
 			tlsCfg.RootCAs = pool
-		} else {
-			// No CA available to verify the endpoint. This is an internal, cluster-local
-			// health probe (not user data), so skip verification rather than fail the
-			// safety gate. Provide spec.tls.caSecretName to enable verification.
+		case creds.caConfiguredSeparately:
+			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt; cannot verify the management endpoint", instance.Spec.TLS.CaSecretName)
+		default:
+			// Legitimate no-separate-CA deployment: nothing to verify against.
+			// Skip verification for this internal probe, but make it auditable.
+			log.FromContext(ctx).Info(
+				"RabbitMq management probe skipping TLS verification (no CA material available); set spec.tls.caSecretName to enable verification",
+				"instance", instance.Name, "pod", pod.Name)
 			tlsCfg.InsecureSkipVerify = true
 		}
 		transport.TLSClientConfig = tlsCfg
+	}
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
+}
+
+// rmqManagementGet performs a bounded read from a ready broker's management API
+// using a caller-provided client (built once per scan by rmqManagementClient).
+func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, httpClient *http.Client, creds *rmqMgmtCreds, path string, result interface{}) (retErr error) {
+	scheme, port := "http", rabbitmq.ManagementPort
+	if creds.tls {
+		scheme, port = "https", rabbitmq.ManagementTLSPort
 	}
 
 	// Use the .svc hostname for DNS, while TLS verifies the certificate's SAN without that suffix.
@@ -1920,11 +1992,7 @@ func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1b
 	}
 	req.SetBasicAuth(creds.username, creds.password)
 
-	client := r.ManagementHTTPClient
-	if client == nil {
-		client = &http.Client{Transport: transport, Timeout: 15 * time.Second}
-	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -1952,8 +2020,12 @@ func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1b
 // ready Kubernetes pods that are confirmed as running RabbitMQ cluster members.
 // The separate replacement-rejoin workflow executes RabbitMQ CLI commands in pods.
 func (r *Reconciler) rmqClusterNodes(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) ([]rmqNodeStatus, error) {
+	httpClient, err := r.rmqManagementClient(ctx, instance, pod, creds)
+	if err != nil {
+		return nil, err
+	}
 	var nodes []rmqNodeStatus
-	if err := r.rmqManagementGet(ctx, instance, pod, creds, "/api/nodes?columns=name,running", &nodes); err != nil {
+	if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, "/api/nodes?columns=name,running", &nodes); err != nil {
 		return nil, err
 	}
 	seen := make(map[string]bool, len(nodes))
@@ -1969,20 +2041,33 @@ func (r *Reconciler) rmqClusterNodes(ctx context.Context, instance *rabbitmqv1be
 	return nodes, nil
 }
 
-// rmqQueuesSafeAfterDeletion checks each quorum queue's own replica majority.
-// Cluster membership alone cannot prove queue availability: a quorum queue can
-// have fewer members than the broker cluster, including only two members.
-func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, candidateNode string, safeNodes map[string]bool) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+// scanQueues iterates every queue from GET /api/queues/detailed on the given pod,
+// validating the pagination envelope and de-duplicating queues, and invokes
+// perQueue for each one. It builds a single HTTP client so paginated reads reuse
+// one connection. perQueue may return an error to abort the scan; "soft"
+// conditions a caller wants to evaluate only after a complete pass (e.g. a
+// queue still missing a replica) should be recorded in the closure and checked
+// after scanQueues returns nil. An empty cluster returns nil.
+func (r *Reconciler) scanQueues(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	pod *corev1.Pod,
+	creds *rmqMgmtCreds,
+	columns string,
+	perQueue func(rmqQueueStatus) error,
+) error {
+	httpClient, err := r.rmqManagementClient(ctx, instance, pod, creds)
+	if err != nil {
+		return err
+	}
 	seenQueues := map[string]bool{}
 	expectedPages := 0
 	expectedItems := 0
 	scannedItems := 0
 	for page := 1; page <= 100; page++ {
 		var queues rmqQueuePage
-		path := fmt.Sprintf("/api/queues/detailed?pagination=true&page=%d&page_size=500&columns=name,vhost,type,node,durable,members,online", page)
-		if err := r.rmqManagementGet(ctx, instance, pod, creds, path, &queues); err != nil {
+		path := fmt.Sprintf("/api/queues/detailed?pagination=true&page=%d&page_size=500&columns=%s", page, columns)
+		if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, path, &queues); err != nil {
 			return err
 		}
 		if queues.Page == nil || *queues.Page != page || queues.PageCount == nil ||
@@ -1994,23 +2079,22 @@ func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *r
 		if *queues.PageCount == 0 && page == 1 && *queues.ItemCount == 0 && *queues.FilteredCount == 0 {
 			return nil
 		}
-		if *queues.PageCount < page || *queues.PageCount > 100 {
+		if *queues.PageCount < page || *queues.PageCount > 100 ||
+			*queues.PageCount != (*queues.FilteredCount+499)/500 {
 			return fmt.Errorf("RabbitMq queue page %d has invalid pagination data", page)
-		}
-		if *queues.PageCount != (*queues.FilteredCount+499)/500 {
-			return fmt.Errorf("RabbitMq queue page %d has inconsistent total count", page)
 		}
 		if expectedPages == 0 {
 			expectedPages = *queues.PageCount
 			expectedItems = *queues.FilteredCount
 		} else if *queues.PageCount != expectedPages || *queues.FilteredCount != expectedItems {
-			return fmt.Errorf("RabbitMq queue pagination changed during consent check")
+			return fmt.Errorf("RabbitMq queue pagination changed during scan")
 		}
 		if page < *queues.PageCount && len(queues.Items) != 500 {
 			return fmt.Errorf("RabbitMq queue page %d is incomplete", page)
 		}
 		scannedItems += len(queues.Items)
-		for _, queue := range queues.Items {
+		for i := range queues.Items {
+			queue := queues.Items[i]
 			if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
 				return fmt.Errorf("RabbitMq queue page %d has a queue without name, vhost, or type", page)
 			}
@@ -2019,62 +2103,8 @@ func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *r
 				return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
 			}
 			seenQueues[key] = true
-			if queue.Type != "quorum" {
-				// A stream can carry data on the candidate PVC, but RabbitMQ does
-				// not expose the same queue-majority guarantee for streams.
-				if queue.Type == "stream" {
-					if len(queue.Members) == 0 {
-						return fmt.Errorf("RabbitMq stream %s/%s has unknown members", queue.Vhost, queue.Name)
-					}
-					streamMembers := make(map[string]bool, len(queue.Members))
-					for _, member := range queue.Members {
-						if member == "" || streamMembers[member] {
-							return fmt.Errorf("RabbitMq stream %s/%s has ambiguous members", queue.Vhost, queue.Name)
-						}
-						streamMembers[member] = true
-						if member == candidateNode {
-							return fmt.Errorf("RabbitMq stream %s/%s has a replica on the candidate", queue.Vhost, queue.Name)
-						}
-					}
-				} else if queue.Type != "classic" {
-					return fmt.Errorf("RabbitMq queue %s/%s has unknown type %s", queue.Vhost, queue.Name, queue.Type)
-				} else {
-					// Classic queues are single-replica: losing their hosting PVC can
-					// lose durable queue data despite healthy broker cluster quorum.
-					if queue.Durable == nil {
-						return fmt.Errorf("RabbitMq classic queue %s/%s has unknown durability", queue.Vhost, queue.Name)
-					}
-					if *queue.Durable {
-						if queue.Node == "" || queue.Node == candidateNode || !safeNodes[queue.Node] {
-							return fmt.Errorf("RabbitMq durable classic queue %s/%s has unsafe or unknown hosting node %q", queue.Vhost, queue.Name, queue.Node)
-						}
-					}
-				}
-				continue
-			}
-			if len(queue.Members) == 0 || queue.Online == nil {
-				return fmt.Errorf("RabbitMq quorum queue %s/%s has unknown membership", queue.Vhost, queue.Name)
-			}
-			members := make(map[string]bool, len(queue.Members))
-			for _, member := range queue.Members {
-				if member == "" || members[member] {
-					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous membership", queue.Vhost, queue.Name)
-				}
-				members[member] = true
-			}
-			online := make(map[string]bool, len(queue.Online))
-			survivors := 0
-			for _, member := range queue.Online {
-				if !members[member] || online[member] {
-					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous online members", queue.Vhost, queue.Name)
-				}
-				online[member] = true
-				if safeNodes[member] {
-					survivors++
-				}
-			}
-			if survivors < len(queue.Members)/2+1 {
-				return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe online members of %d", queue.Vhost, queue.Name, survivors, len(queue.Members))
+			if err := perQueue(queue); err != nil {
+				return err
 			}
 		}
 		if page == *queues.PageCount {
@@ -2087,16 +2117,87 @@ func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *r
 	return fmt.Errorf("RabbitMq queue pagination exceeds 100 pages")
 }
 
-// rmqRunningNodeCount returns the number of nodes in a management API response
-// reporting running=true.
-func rmqRunningNodeCount(nodes []rmqNodeStatus) int {
-	count := 0
-	for _, node := range nodes {
-		if node.Running {
-			count++
-		}
+// quorumQueueMembers validates and returns the configured-member and online-member
+// sets of a quorum queue from a management-API queue entry.
+func quorumQueueMembers(queue rmqQueueStatus) (members, online map[string]bool, err error) {
+	if len(queue.Members) == 0 || queue.Online == nil {
+		return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has unknown membership", queue.Vhost, queue.Name)
 	}
-	return count
+	members = make(map[string]bool, len(queue.Members))
+	for _, member := range queue.Members {
+		if member == "" || members[member] {
+			return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous membership", queue.Vhost, queue.Name)
+		}
+		members[member] = true
+	}
+	online = make(map[string]bool, len(queue.Online))
+	for _, member := range queue.Online {
+		if !members[member] || online[member] {
+			return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous online members", queue.Vhost, queue.Name)
+		}
+		online[member] = true
+	}
+	return members, online, nil
+}
+
+// rmqQueuesSafeAfterDeletion checks each quorum queue's own replica majority.
+// Cluster membership alone cannot prove queue availability: a quorum queue can
+// have fewer members than the broker cluster, including only two members.
+func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, candidateNode string, safeNodes map[string]bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return r.scanQueues(ctx, instance, pod, creds,
+		"name,vhost,type,node,durable,members,online",
+		func(queue rmqQueueStatus) error {
+			switch queue.Type {
+			case "stream":
+				// A stream can carry data on the candidate PVC, but RabbitMQ does
+				// not expose the same queue-majority guarantee for streams.
+				if len(queue.Members) == 0 {
+					return fmt.Errorf("RabbitMq stream %s/%s has unknown members", queue.Vhost, queue.Name)
+				}
+				streamMembers := make(map[string]bool, len(queue.Members))
+				for _, member := range queue.Members {
+					if member == "" || streamMembers[member] {
+						return fmt.Errorf("RabbitMq stream %s/%s has ambiguous members", queue.Vhost, queue.Name)
+					}
+					streamMembers[member] = true
+					if member == candidateNode {
+						return fmt.Errorf("RabbitMq stream %s/%s has a replica on the candidate", queue.Vhost, queue.Name)
+					}
+				}
+				return nil
+			case "classic":
+				// Classic queues are single-replica: losing their hosting PVC can
+				// lose durable queue data despite healthy broker cluster quorum.
+				if queue.Durable == nil {
+					return fmt.Errorf("RabbitMq classic queue %s/%s has unknown durability", queue.Vhost, queue.Name)
+				}
+				if *queue.Durable {
+					if queue.Node == "" || queue.Node == candidateNode || !safeNodes[queue.Node] {
+						return fmt.Errorf("RabbitMq durable classic queue %s/%s has unsafe or unknown hosting node %q", queue.Vhost, queue.Name, queue.Node)
+					}
+				}
+				return nil
+			case "quorum":
+				members, online, err := quorumQueueMembers(queue)
+				if err != nil {
+					return err
+				}
+				survivors := 0
+				for member := range online {
+					if safeNodes[member] {
+						survivors++
+					}
+				}
+				if survivors < quorumOf(int32(len(members))) {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe online members of %d", queue.Vhost, queue.Name, survivors, len(members))
+				}
+				return nil
+			default:
+				return fmt.Errorf("RabbitMq queue %s/%s has unknown type %s", queue.Vhost, queue.Name, queue.Type)
+			}
+		})
 }
 
 // rmqRunningSurvivorCount verifies each ready survivor pod maps unambiguously to a
@@ -2205,8 +2306,7 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		}
 		requestID := pvc.Annotations[remediationv1.RequestIDAnnotation]
 		consentState := rabbitmqv1beta1.PVCRemediationConsentPending
-		if pvc.Annotations[remediationv1.SafeToDeleteAnnotation] == "true" &&
-			requestID != "" && pvc.Annotations[remediationv1.ConsentIDAnnotation] == requestID {
+		if remediationv1.HasRemediationConsent(pvc.Annotations) {
 			consentState = rabbitmqv1beta1.PVCRemediationConsentGranted
 		}
 		entry := rabbitmqv1beta1.PVCRemediationStatus{
@@ -2350,26 +2450,62 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Error(err, "RabbitMq management API live-quorum check failed; deferring consent", "pod", readyPod.Name)
 		return err
 	}
-	runningNodes := rmqRunningNodeCount(nodes)
+	runningNodeNames := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		if node.Running {
+			runningNodeNames[node.Name] = true
+		}
+	}
+	podByName := make(map[string]*corev1.Pod, len(podList.Items))
+	for i := range podList.Items {
+		podByName[podList.Items[i].Name] = &podList.Items[i]
+	}
+	persistRemediationStatus := func() {
+		if len(newRemediationStatus) == 0 {
+			instance.Status.PVCRemediation = nil
+		} else {
+			instance.Status.PVCRemediation = newRemediationStatus
+		}
+	}
+
 	if hasRecoveryPending {
-		if instance.Status.ReadyCount < *instance.Spec.Replicas || runningNodes < int(*instance.Spec.Replicas) {
-			Log.Info("RabbitMq replacement has not rejoined; keeping remediation slot occupied",
-				"readyCount", instance.Status.ReadyCount, "runningNodes", runningNodes,
-				"replicas", *instance.Spec.Replicas)
-			return fmt.Errorf("RabbitMq replacement has not restored all %d replicas", *instance.Spec.Replicas)
-		}
+		// Release the remediation slot per-PVC as soon as *that* replacement has
+		// rejoined (its pod is Ready and its node is running in the live cluster
+		// view). Do not gate release on the whole cluster being back at the full
+		// configured replica count: an unrelated broker that is intentionally down
+		// (maintenance) or separately failed would otherwise pin the single slot
+		// forever and block all future PVC remediations.
+		var stillRecovering []string
 		for name := range pendingRecovery {
-			delete(newRemediationStatus, name)
-			if current, exists := observedRemediationStatus[name]; exists {
-				newRemediationStatus[name] = current
+			ordinal, ok := rmqPVCOrdinal(name)
+			if !ok {
+				// Cannot map to a replacement pod; keep the slot occupied rather
+				// than release a remediation we can no longer track.
+				stillRecovering = append(stillRecovering, name)
+				continue
 			}
+			podName := fmt.Sprintf("%s-server-%d", instance.Name, ordinal)
+			replacementNode := "rabbit@" + rabbitmq.ManagementPodServerName(podName, instance.Name, instance.Namespace)
+			pod := podByName[podName]
+			if pod != nil && podReady(pod) && runningNodeNames[replacementNode] {
+				delete(newRemediationStatus, name)
+				if current, exists := observedRemediationStatus[name]; exists {
+					newRemediationStatus[name] = current
+				}
+				continue
+			}
+			stillRecovering = append(stillRecovering, name)
+		}
+		if len(stillRecovering) > 0 {
+			// Keep the slot occupied (no new consent) until every tracked
+			// replacement has rejoined. One remediation at a time.
+			persistRemediationStatus()
+			Log.Info("RabbitMq replacement(s) have not rejoined; keeping remediation slot occupied",
+				"pending", stillRecovering)
+			return fmt.Errorf("RabbitMq replacement(s) have not rejoined: %v", stillRecovering)
 		}
 	}
-	if len(newRemediationStatus) == 0 {
-		instance.Status.PVCRemediation = nil
-	} else {
-		instance.Status.PVCRemediation = newRemediationStatus
-	}
+	persistRemediationStatus()
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -2383,12 +2519,6 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		Log.Info("RabbitMq running healthy survivors below quorum; deferring consent",
 			"runningSurvivors", runningSurvivors, "quorum", quorum)
 		return nil
-	}
-	runningNodeNames := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
-		if node.Running {
-			runningNodeNames[node.Name] = true
-		}
 	}
 	safeNodes := make(map[string]bool, len(readySurvivors))
 	for _, survivor := range readySurvivors {
@@ -2449,6 +2579,15 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	return nil
 }
 
+// quorumOf returns the majority size (floor(n/2)+1) for n members. Returns 0 for
+// n <= 0 so callers treat a degenerate cluster as unable to form quorum.
+func quorumOf(n int32) int {
+	if n <= 0 {
+		return 0
+	}
+	return int(n/2 + 1)
+}
+
 // canRetainQuorumAfterLosingOneReplica reports whether the configured cluster
 // can retain a majority of its members after one replica is deleted. PVC
 // remediation must not authorize deletion when the remaining configured
@@ -2457,8 +2596,7 @@ func canRetainQuorumAfterLosingOneReplica(replicas int32) bool {
 	if replicas <= 0 {
 		return false
 	}
-	quorum := replicas/2 + 1
-	return replicas-1 >= quorum
+	return int(replicas-1) >= quorumOf(replicas)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -2541,7 +2679,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(r.FindRabbitmqForPod),
 			builder.WithPredicates(predicate.And(
-				predicate.ResourceVersionChangedPredicate{},
+				rmqPodUpdatePredicate(),
 				predicate.NewPredicateFuncs(IsRabbitmqPod),
 			)),
 		).

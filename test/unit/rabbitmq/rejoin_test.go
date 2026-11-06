@@ -264,25 +264,24 @@ func assertQuorumQueueMembership(t *testing.T, fx *fakeExec, nodeName string, wa
 	}
 }
 
-func clusterPod(name string, rejoinReady bool) *corev1.Pod {
-	gateStatus := corev1.ConditionFalse
+// clusterPod builds a Running pod with its rabbitmq container ready. serving
+// controls the serving label (membership in the client Service) and the PodReady
+// condition: a pod serving=true is Ready and in client traffic; serving=false is
+// held out (e.g. a replacement the controller is still verifying).
+func clusterPod(name string, serving bool) *corev1.Pod {
 	podReady := corev1.ConditionFalse
-	gateReason := "RejoinPending"
-	if rejoinReady {
-		gateStatus = corev1.ConditionTrue
+	servingValue := rabbitmqv1beta1.RabbitMQServingFalse
+	if serving {
 		podReady = corev1.ConditionTrue
-		gateReason = "RejoinVerified"
+		servingValue = rabbitmqv1beta1.RabbitMQServingTrue
 	}
+	labels := rabbitmqresources.SelectorLabels(testName)
+	labels[rabbitmqv1beta1.RabbitMQServingLabel] = servingValue
 	p := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: testNS,
-			Labels:    rabbitmqresources.SelectorLabels(testName),
-		},
-		Spec: corev1.PodSpec{
-			ReadinessGates: []corev1.PodReadinessGate{{
-				ConditionType: corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
-			}},
+			Labels:    labels,
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
@@ -292,11 +291,6 @@ func clusterPod(name string, rejoinReady bool) *corev1.Pod {
 			}},
 			Conditions: []corev1.PodCondition{
 				{Type: corev1.PodReady, Status: podReady},
-				{
-					Type:   corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
-					Status: gateStatus,
-					Reason: gateReason,
-				},
 			},
 		},
 	}
@@ -408,13 +402,11 @@ func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
 	return instance
 }
 
+// podRejoinReady reports whether the controller has returned a pod to client
+// traffic (serving label == "true"). Kept under its original name so the many
+// call sites read the same; semantics now follow the serving label.
 func podRejoinReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition) {
-			return condition.Status == corev1.ConditionTrue
-		}
-	}
-	return false
+	return pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingTrue
 }
 
 // realClusterStatus42 is a sample of `rabbitmqctl cluster_status --formatter
@@ -497,6 +489,44 @@ func TestRejoinCLICommandsHaveFiniteTimeout(t *testing.T) {
 	remaining := time.Until(deadline)
 	if deadline.IsZero() || remaining <= 0 || deadline.After(started.Add(3*time.Minute)) {
 		t.Fatalf("RabbitMQ CLI execution did not receive a finite timeout: deadline=%v started=%v", deadline, started)
+	}
+}
+
+// TestRejoinHoldsFreshReplacementOutOfService verifies the serving-label hold:
+// a replacement created by the StatefulSet template starts serving=true, and the
+// controller actively flips it to serving=false to keep it out of client traffic
+// until it has rejoined. A stale rejoin annotation makes the controller rebind and
+// requeue without running the full rejoin, isolating the hold behaviour.
+func TestRejoinHoldsFreshReplacementOutOfService(t *testing.T) {
+	fx := &fakeExec{running: map[string][]string{}}
+
+	target := replacementPod("stale-request")
+	// Simulate a freshly-created replacement: born serving=true from the template.
+	target.Labels[rabbitmqv1beta1.RabbitMQServingLabel] = rabbitmqv1beta1.RabbitMQServingTrue
+	r := newReconciler(t, fx,
+		replacementPVC(newPVCUID),
+		target,
+		clusterPod(testName+"-server-1", true))
+
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !requeue {
+		t.Fatal("expected requeue after holding the fresh replacement and rebinding its request")
+	}
+	if len(fx.calls) != 0 {
+		t.Fatalf("must not run rejoin CLI before binding the current request, calls=%v", fx.calls)
+	}
+	got := &corev1.Pod{}
+	if err := r.Get(context.Background(), types.NamespacedName{Namespace: testNS, Name: target.Name}, got); err != nil {
+		t.Fatal(err)
+	}
+	if podRejoinReady(got) {
+		t.Fatal("expected the controller to hold the fresh replacement out of client traffic (serving=false)")
+	}
+	if got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != testRequestID {
+		t.Fatalf("rejoin annotation = %q, want the consent request ID %q", got.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster], testRequestID)
 	}
 }
 

@@ -61,9 +61,17 @@ const (
 	// the annotation after verifying cluster membership.
 	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
 
-	// RabbitMQRejoinReadyCondition gates Pod readiness until a consented replacement
-	// node has rejoined the RabbitMQ cluster.
-	RabbitMQRejoinReadyCondition = "rabbitmq.openstack.org/rejoin-ready"
+	// RabbitMQServingLabel controls whether a pod is included in the client-facing
+	// Service. Every pod is created with the label set to "true" (pods serve by
+	// default, so operator downtime never removes a healthy pod from client
+	// traffic). The controller sets it to "false" only to hold a consented
+	// replacement out of client traffic until it has rejoined the cluster, then
+	// restores it to "true". The client Service selector requires serving=true.
+	RabbitMQServingLabel = "rabbitmq.openstack.org/serving"
+
+	// RabbitMQServingTrue / RabbitMQServingFalse are the two values of RabbitMQServingLabel.
+	RabbitMQServingTrue  = "true"
+	RabbitMQServingFalse = "false"
 )
 
 // QueueType represents a RabbitMQ queue type

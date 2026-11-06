@@ -307,7 +307,7 @@ func TestPVCRemediationConsentRequiresHealthySurvivorQuorum(t *testing.T) {
 			},
 		},
 		{
-			name:       "survivor with ready containers but rejoin readiness gate false does not count",
+			name:       "survivor with ready containers but held out of serving does not count",
 			replicas:   3,
 			readyCount: 2,
 			pods: []corev1.Pod{
@@ -398,12 +398,11 @@ func readyRabbitMQPod(name, nodeName string) corev1.Pod {
 
 func rejoinPendingRabbitMQPod(name, nodeName string) corev1.Pod {
 	pod := readyRabbitMQPod(name, nodeName)
-	pod.Spec.ReadinessGates = []corev1.PodReadinessGate{{
-		ConditionType: corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
-	}}
+	// A replacement held out of client traffic (serving=false) is not Ready, so it
+	// must not be counted as a healthy survivor for consent.
+	pod.Labels = map[string]string{rabbitmqv1beta1.RabbitMQServingLabel: rabbitmqv1beta1.RabbitMQServingFalse}
 	pod.Status.Conditions = []corev1.PodCondition{
 		{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-		{Type: corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition), Status: corev1.ConditionFalse},
 	}
 	return pod
 }
@@ -413,5 +412,147 @@ func unavailableRabbitMQPod(name, nodeName string) corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       corev1.PodSpec{NodeName: nodeName},
 		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+}
+
+// runningNotReadyRabbitMQPod is a pod whose rabbitmq container is up but that is
+// not Ready (e.g. a replacement still rejoining).
+func runningNotReadyRabbitMQPod(name, nodeName string) corev1.Pod {
+	pod := readyRabbitMQPod(name, nodeName)
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	return pod
+}
+
+// TestPVCRemediationSlotReleasedPerReplacement verifies the slot-trap fix: the
+// single remediation slot is released as soon as the specific replacement has
+// rejoined (its pod Ready and its node running in the live view), even if an
+// unrelated broker is down and the cluster is therefore below the full configured
+// replica count. Previously the slot required the whole cluster back at Replicas,
+// which an unrelated outage could block forever.
+func TestPVCRemediationSlotReleasedPerReplacement(t *testing.T) {
+	const (
+		namespace = "openstack"
+		requestID = "request-uid"
+	)
+	testCases := []struct {
+		name               string
+		replacementRunning bool // replacement node reported running in /api/nodes
+		replacementReady   bool // replacement pod Ready
+		wantSlotReleased   bool
+		wantErr            bool
+	}{
+		{
+			name:               "unrelated broker down but replacement rejoined releases the slot",
+			replacementRunning: true,
+			replacementReady:   true,
+			wantSlotReleased:   true,
+			wantErr:            false,
+		},
+		{
+			name:               "replacement not yet rejoined keeps the slot occupied",
+			replacementRunning: false,
+			replacementReady:   false,
+			wantSlotReleased:   false,
+			wantErr:            true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			replicas := int32(3)
+			instance := &rabbitmqv1beta1.RabbitMq{
+				ObjectMeta: metav1.ObjectMeta{Name: "rabbitmq", Namespace: namespace},
+				Spec: rabbitmqv1beta1.RabbitMqSpec{
+					RabbitMqSpecCore: rabbitmqv1beta1.RabbitMqSpecCore{Replicas: &replicas},
+				},
+				Status: rabbitmqv1beta1.RabbitMqStatus{
+					// Only two of three replicas Ready: an unrelated broker (server-2)
+					// is down, so the cluster is below the full configured count.
+					ReadyCount: 2,
+					PVCRemediation: map[string]rabbitmqv1beta1.PVCRemediationStatus{
+						"persistence-rabbitmq-server-0": {
+							PVCUID:       "old-pvc-uid",
+							RequestID:    requestID,
+							StuckNode:    "worker-0",
+							ConsentState: rabbitmqv1beta1.PVCRemediationConsentGranted,
+						},
+					},
+				},
+			}
+			// The replacement claim exists with a NEW UID and no stuck annotation:
+			// this is recovery, not a fresh consent request.
+			replacementPVC := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "persistence-rabbitmq-server-0",
+					Namespace: namespace,
+					UID:       "new-pvc-uid",
+					Labels:    map[string]string{"app.kubernetes.io/name": instance.Name},
+				},
+			}
+
+			server0 := readyRabbitMQPod("rabbitmq-server-0", "worker-0")
+			if !tc.replacementReady {
+				server0 = runningNotReadyRabbitMQPod("rabbitmq-server-0", "worker-0")
+			}
+			pods := []corev1.Pod{
+				server0,
+				readyRabbitMQPod("rabbitmq-server-1", "worker-1"),
+				unavailableRabbitMQPod("rabbitmq-server-2", "worker-2"),
+			}
+
+			scheme := runtime.NewScheme()
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := rabbitmqv1beta1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "remediation.openstack.org", Version: "v1beta1"}})
+			mapper.Add(schema.GroupVersionKind{Group: "remediation.openstack.org", Version: "v1beta1", Kind: "PodRemediator"}, meta.RESTScopeNamespace)
+			objects := []client.Object{replacementPVC, instance, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "rabbitmq-default-user", Namespace: namespace},
+				Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("test-password")},
+			}}
+			for i := range pods {
+				pod := pods[i].DeepCopy()
+				pod.Namespace = namespace
+				pod.Labels = map[string]string{"app.kubernetes.io/name": instance.Name}
+				objects = append(objects, pod)
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).
+				WithStatusSubresource(&rabbitmqv1beta1.RabbitMq{}).WithObjects(objects...).Build()
+
+			transport := rabbitMQManagementTransport(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path != "/api/nodes" {
+					return nil, fmt.Errorf("unexpected management endpoint %s", request.URL.Path)
+				}
+				server0Running := "false"
+				if tc.replacementRunning {
+					server0Running = "true"
+				}
+				// server-2 is the unrelated broker that is down.
+				body := fmt.Sprintf(`[{"name":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","running":%s},`+
+					`{"name":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","running":true},`+
+					`{"name":"rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack","running":false}]`, server0Running)
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: request}, nil
+			})
+			rabbitmqReconciler := &rabbitmqcontroller.Reconciler{Client: kubeClient, Scheme: scheme, ManagementHTTPClient: &http.Client{Transport: transport}}
+			crHelper, err := helper.NewHelper(instance, kubeClient, nil, scheme, logr.Discard())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = rabbitmqReconciler.CheckForStuckPVCRequiringRemediation(context.Background(), instance, crHelper)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected the slot to remain occupied with an error while the replacement is still rejoining")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error releasing the remediation slot: %v", err)
+			}
+			released := instance.Status.PVCRemediation == nil
+			if released != tc.wantSlotReleased {
+				t.Fatalf("slot released = %v, want %v (PVCRemediation=%+v)", released, tc.wantSlotReleased, instance.Status.PVCRemediation)
+			}
+		})
 	}
 }

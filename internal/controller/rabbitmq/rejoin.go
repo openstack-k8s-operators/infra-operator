@@ -31,7 +31,6 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -113,7 +112,10 @@ func rejoinEnabled(instance *rabbitmqv1beta1.RabbitMq) bool {
 	return rabbitmq.IsVersion4_1OrLater(version)
 }
 
-func podIsReady(pod *corev1.Pod) bool {
+// podReady reports whether a pod is Running with its PodReady condition true.
+// The kubelet sets PodReady only when all containers are ready, so this is the
+// single source of truth for "healthy serving broker".
+func podReady(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
 	}
@@ -125,17 +127,41 @@ func podIsReady(pod *corev1.Pod) bool {
 	return false
 }
 
-func podRejoinReady(pod *corev1.Pod) bool {
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition) {
-			return condition.Status == corev1.ConditionTrue
+// ensurePodsServingLabeled backfills serving=true on any RabbitMq pod that has no
+// serving label yet. It never changes a pod that already carries the label (so a
+// deliberate serving=false hold is preserved). This guarantees that applying the
+// client Service selector (serving=true) does not drop already-running pods on an
+// operator upgrade.
+func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) error {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels(rabbitmq.SelectorLabels(instance.Name)),
+	); err != nil {
+		return fmt.Errorf("listing RabbitMq pods to backfill serving label: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if _, ok := pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; ok {
+			continue
+		}
+		if _, err := r.setPodServing(ctx, pod, true); err != nil {
+			return err
 		}
 	}
-	return false
+	return nil
 }
 
-// podRabbitMQContainerReady allows exec in a target whose custom readiness gate
-// is deliberately false while its RabbitMQ container is otherwise running.
+// podServing reports whether a pod is currently included in the client-facing
+// Service (serving label == "true"). Pods are created with the label "true"; the
+// controller flips it to "false" to hold a consented replacement out of client
+// traffic until it has rejoined the cluster.
+func podServing(pod *corev1.Pod) bool {
+	return pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingTrue
+}
+
+// podRabbitMQContainerReady allows exec in a target that is deliberately held out
+// of client traffic (serving=false) while its RabbitMQ container is running.
 func podRabbitMQContainerReady(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodRunning {
 		return false
@@ -273,7 +299,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		}
 
 		pod := podsByName[podName]
-		if pod != nil && remediation.QueueReplicaState == rabbitmqv1beta1.PVCRemediationQueueReplicasGrown && podRejoinReady(pod) {
+		if pod != nil && remediation.QueueReplicaState == rabbitmqv1beta1.PVCRemediationQueueReplicasGrown && podServing(pod) {
 			if pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] == remediation.RequestID {
 				if err := r.clearRejoinAnnotation(ctx, pod); err != nil {
 					return true, err
@@ -290,7 +316,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		if pod == nil {
 			continue
 		}
-		if _, err := r.setRejoinReady(ctx, pod, false); err != nil {
+		if _, err := r.setPodServing(ctx, pod, false); err != nil {
 			return true, err
 		}
 		if remediation.RequestID == "" {
@@ -316,8 +342,9 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		}
 	}
 
-	// Ordinary pods pass the gate once the operator observes them. A replacement
-	// waiting for recovery stays out of client-facing Services.
+	// Ordinary pods serve by default; the operator only needs to restore the
+	// serving label on any pod a previous pass held. A replacement waiting for
+	// recovery is held out (serving=false) of client-facing Services.
 	changed := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -325,7 +352,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		if _, pending := pendingPods[pod.Name]; pending {
 			ready = false
 		}
-		updated, err := r.setRejoinReady(ctx, pod, ready)
+		updated, err := r.setPodServing(ctx, pod, ready)
 		if err != nil {
 			return true, err
 		}
@@ -366,7 +393,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	var anchorMembership clusterMembership
 	for i := range pods.Items {
 		peer := &pods.Items[i]
-		if peer.Name == target.Name || !podIsReady(peer) {
+		if peer.Name == target.Name || !podReady(peer) {
 			continue
 		}
 		membership, err := r.clusterMembership(ctx, instance, peer)
@@ -463,94 +490,38 @@ func (r *Reconciler) verifyQuorumQueueReplicasOnline(
 		return fmt.Errorf("reading management credentials: %w", err)
 	}
 
-	expectedPages := 0
-	expectedItems := 0
-	scannedItems := 0
-	seenQueues := make(map[string]bool)
+	// Record "soft" conditions and decide only after a complete pass: a missing
+	// replica needs another grow pass even if a different queue is still syncing.
 	missingReplicaQueue := ""
 	offlineReplicaQueue := ""
-	for page := 1; page <= 100; page++ {
-		var queues rmqQueuePage
-		path := fmt.Sprintf("/api/queues/detailed?pagination=true&page=%d&page_size=500&columns=name,vhost,type,members,online", page)
-		if err := r.rmqManagementGet(ctx, instance, pod, creds, path, &queues); err != nil {
-			return err
-		}
-		if queues.Page == nil || *queues.Page != page || queues.PageCount == nil ||
-			queues.PageSize == nil || *queues.PageSize != 500 || queues.ItemCount == nil ||
-			queues.FilteredCount == nil || queues.Items == nil ||
-			*queues.ItemCount != len(queues.Items) || *queues.FilteredCount < 0 {
-			return fmt.Errorf("RabbitMq queue page %d has incomplete pagination data", page)
-		}
-		if *queues.PageCount == 0 && page == 1 && *queues.ItemCount == 0 && *queues.FilteredCount == 0 {
-			return nil
-		}
-		if *queues.PageCount < page || *queues.PageCount > 100 ||
-			*queues.PageCount != (*queues.FilteredCount+499)/500 {
-			return fmt.Errorf("RabbitMq queue page %d has invalid pagination data", page)
-		}
-		if expectedPages == 0 {
-			expectedPages = *queues.PageCount
-			expectedItems = *queues.FilteredCount
-		} else if *queues.PageCount != expectedPages || *queues.FilteredCount != expectedItems {
-			return fmt.Errorf("RabbitMq queue pagination changed during rejoin")
-		}
-		if page < *queues.PageCount && len(queues.Items) != 500 {
-			return fmt.Errorf("RabbitMq queue page %d is incomplete", page)
-		}
-		scannedItems += len(queues.Items)
-		for _, queue := range queues.Items {
-			if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
-				return fmt.Errorf("RabbitMq queue page %d has a queue without name, vhost, or type", page)
-			}
-			key := queue.Vhost + "\x00" + queue.Name
-			if seenQueues[key] {
-				return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
-			}
-			seenQueues[key] = true
+	if err := r.scanQueues(ctx, instance, pod, creds,
+		"name,vhost,type,members,online",
+		func(queue rmqQueueStatus) error {
 			if queue.Type != "quorum" {
-				continue
+				return nil
 			}
-			if len(queue.Members) == 0 || queue.Online == nil {
-				return fmt.Errorf("RabbitMq quorum queue %s/%s has unknown membership", queue.Vhost, queue.Name)
-			}
-			members := make(map[string]bool, len(queue.Members))
-			for _, member := range queue.Members {
-				if member == "" || members[member] {
-					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous membership", queue.Vhost, queue.Name)
-				}
-				members[member] = true
+			members, online, err := quorumQueueMembers(queue)
+			if err != nil {
+				return err
 			}
 			if !members[targetNode] {
 				missingReplicaQueue = queue.Vhost + "/" + queue.Name
-				continue
-			}
-			online := make(map[string]bool, len(queue.Online))
-			for _, member := range queue.Online {
-				if !members[member] || online[member] {
-					return fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous online members", queue.Vhost, queue.Name)
-				}
-				online[member] = true
+				return nil
 			}
 			if !online[targetNode] {
 				offlineReplicaQueue = queue.Vhost + "/" + queue.Name
 			}
-		}
-		if page == *queues.PageCount {
-			if scannedItems != expectedItems {
-				return fmt.Errorf("RabbitMq queue pagination returned %d of %d queues", scannedItems, expectedItems)
-			}
-			// A missing replica needs another grow pass even if a different queue is
-			// still syncing. Check this only after scanning every queue.
-			if missingReplicaQueue != "" {
-				return fmt.Errorf("%w: %s does not include %s", errQuorumQueueReplicaMissing, missingReplicaQueue, targetNode)
-			}
-			if offlineReplicaQueue != "" {
-				return fmt.Errorf("RabbitMq quorum queue %s replacement member %s is not online yet", offlineReplicaQueue, targetNode)
-			}
 			return nil
-		}
+		}); err != nil {
+		return err
 	}
-	return fmt.Errorf("RabbitMq queue pagination exceeds 100 pages")
+	if missingReplicaQueue != "" {
+		return fmt.Errorf("%w: %s does not include %s", errQuorumQueueReplicaMissing, missingReplicaQueue, targetNode)
+	}
+	if offlineReplicaQueue != "" {
+		return fmt.Errorf("RabbitMq quorum queue %s replacement member %s is not online yet", offlineReplicaQueue, targetNode)
+	}
+	return nil
 }
 
 func (r *Reconciler) finishNodeRejoin(
@@ -597,48 +568,32 @@ func (r *Reconciler) finishNodeRejoin(
 	if err != nil {
 		return fmt.Errorf("verifying quorum queue replicas on %s: %w", pod.Name, err)
 	}
-	if _, err := r.setRejoinReady(ctx, pod, true); err != nil {
+	if _, err := r.setPodServing(ctx, pod, true); err != nil {
 		return err
 	}
 	return r.clearRejoinAnnotation(ctx, pod)
 }
 
-func (r *Reconciler) setRejoinReady(ctx context.Context, pod *corev1.Pod, ready bool) (bool, error) {
-	wanted := corev1.ConditionFalse
-	reason := "RejoinPending"
-	message := "Waiting for the RabbitMQ controller to verify cluster membership"
-	if ready {
-		wanted = corev1.ConditionTrue
-		reason = "RejoinVerified"
-		message = "RabbitMQ cluster membership is verified"
+// setPodServing sets the serving label that controls whether a pod is included in
+// the client-facing Service, patching metadata (not status). It returns whether a
+// change was made. Holding a replacement out of client traffic (serving=false)
+// never removes a healthy pod when the operator is absent, because pods are born
+// serving=true and only the operator flips the label.
+func (r *Reconciler) setPodServing(ctx context.Context, pod *corev1.Pod, serving bool) (bool, error) {
+	wanted := rabbitmqv1beta1.RabbitMQServingFalse
+	if serving {
+		wanted = rabbitmqv1beta1.RabbitMQServingTrue
 	}
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition) &&
-			condition.Status == wanted && condition.Reason == reason {
-			return false, nil
-		}
+	if pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == wanted {
+		return false, nil
 	}
 	base := pod.DeepCopy()
-	newCondition := corev1.PodCondition{
-		Type:               corev1.PodConditionType(rabbitmqv1beta1.RabbitMQRejoinReadyCondition),
-		Status:             wanted,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: metav1.Now(),
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
 	}
-	updated := false
-	for i := range pod.Status.Conditions {
-		if pod.Status.Conditions[i].Type == newCondition.Type {
-			pod.Status.Conditions[i] = newCondition
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		pod.Status.Conditions = append(pod.Status.Conditions, newCondition)
-	}
-	if err := r.Client.Status().Patch(ctx, pod, client.MergeFrom(base)); err != nil {
-		return false, fmt.Errorf("setting rejoin readiness on pod %s: %w", pod.Name, err)
+	pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] = wanted
+	if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+		return false, fmt.Errorf("setting serving label on pod %s: %w", pod.Name, err)
 	}
 	return true, nil
 }

@@ -154,7 +154,13 @@ func HeadlessService(r *rabbitmqv1.RabbitMq) (*corev1.Service, error) {
 // matching the old rabbitmq-cluster-operator layout
 func ClientService(r *rabbitmqv1.RabbitMq) (*corev1.Service, error) {
 	ls := CommonLabels(r.Name)
+	// Select only pods marked serving=true. Pods are created with this label set
+	// to "true" (see StatefulSet pod template); the controller flips it to "false"
+	// to hold a consented replacement out of client traffic until it has rejoined.
+	// The headless service deliberately does NOT filter on this label so the
+	// replacement remains reachable for clustering and the operator's probe.
 	selector := SelectorLabels(r.Name)
+	selector[rabbitmqv1.RabbitMQServingLabel] = rabbitmqv1.RabbitMQServingTrue
 
 	ports := buildClientServicePorts(r)
 
