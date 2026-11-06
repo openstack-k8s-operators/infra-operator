@@ -1122,8 +1122,12 @@ func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabb
 				Name:      svcName,
 				Namespace: instance.Namespace,
 				Labels:    labelMap,
+				// Select the pod by name AND require serving=true, so a replacement
+				// the controller is holding out of client traffic (serving=false) is
+				// also removed from its per-pod Service, which feeds transport URLs.
 				Selector: map[string]string{
-					appsv1.StatefulSetPodNameLabel: podName,
+					appsv1.StatefulSetPodNameLabel:       podName,
+					rabbitmqv1beta1.RabbitMQServingLabel: rabbitmqv1beta1.RabbitMQServingTrue,
 				},
 				Ports: []corev1.ServicePort{
 					{Name: "amqp", Port: 5672, TargetPort: intstr.FromInt(5672)},

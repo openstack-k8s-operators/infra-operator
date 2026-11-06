@@ -631,6 +631,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 					g.Expect(svc.Annotations["metallb.universe.tf/loadBalancerIPs"]).To(Equal(expectedIPs[i]))
 					g.Expect(svc.Annotations["metallb.universe.tf/address-pool"]).To(Equal("internalapi"))
 					g.Expect(svc.Spec.Selector).To(HaveKeyWithValue("statefulset.kubernetes.io/pod-name", fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i)))
+					// A per-pod service must also require serving=true so a held
+					// replacement is removed from the transport-URL path.
+					g.Expect(svc.Spec.Selector).To(HaveKeyWithValue("rabbitmq.openstack.org/serving", "true"))
 				}
 			}, timeout, interval).Should(Succeed())
 		})
