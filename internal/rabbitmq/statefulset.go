@@ -45,6 +45,17 @@ func StatefulSet(
 	matchls := SelectorLabels(r.Name)
 	ls := CommonLabels(r.Name)
 
+	// Pod template labels carry the serving label (default "true") on every pod,
+	// unconditionally. The client Service selects serving=true, so pods serve by
+	// default and operator downtime never removes a healthy pod from client
+	// traffic. The controller flips this to "false" only to hold a consented
+	// replacement out until it has rejoined the cluster.
+	podLabels := make(map[string]string, len(ls)+1)
+	for k, v := range ls {
+		podLabels[k] = v
+	}
+	podLabels[rabbitmqv1.RabbitMQServingLabel] = rabbitmqv1.RabbitMQServingTrue
+
 	// Default replica count
 	replicas := ptr.To(int32(1))
 	if r.Spec.Replicas != nil {
@@ -160,7 +171,7 @@ func StatefulSet(
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls,
+					Labels: podLabels,
 					Annotations: map[string]string{
 						"config-hash": configHash,
 					},
