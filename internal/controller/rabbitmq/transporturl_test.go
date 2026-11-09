@@ -114,6 +114,19 @@ func TestCreateTransportURLSecret(t *testing.T) {
 			quorum:     true,
 			wantURL:    "rabbit://nova:secret@rabbitmq.openstack.svc:5672/?ssl=0",
 		},
+		{
+			// Per-pod hosts already carry their own port (host:port), e.g. when
+			// several per-pod services share a single LoadBalancer IP on distinct
+			// ports. The embedded port must be used verbatim, not the shared one.
+			name:       "per-pod hosts with embedded ports",
+			username:   "nova",
+			password:   "p@ss",
+			hosts:      []string{"r-server-0.openstack.svc:5672", "r-server-1.openstack.svc:5673", "r-server-2.openstack.svc:5674"},
+			port:       "5672",
+			vhost:      "/",
+			tlsEnabled: false,
+			wantURL:    "rabbit://nova:p%40ss@r-server-0.openstack.svc:5672,nova:p%40ss@r-server-1.openstack.svc:5673,nova:p%40ss@r-server-2.openstack.svc:5674/?ssl=0",
+		},
 	}
 
 	for _, tt := range tests {

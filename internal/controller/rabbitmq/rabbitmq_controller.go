@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1047,6 +1049,16 @@ func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabb
 
 	Log.Info("Creating per-pod services using podOverride configuration")
 
+	// The client port to advertise per pod. When TLS is enabled clients connect
+	// on the amqps port, otherwise on amqp. The port value can be overridden per
+	// pod via podOverride (e.g. to place several per-pod services on a single
+	// shared LoadBalancer IP with metallb allow-shared-ip), so it is read back
+	// from the reconciled service rather than assumed.
+	clientPortName := "amqp"
+	if instance.Spec.TLS.SecretName != "" {
+		clientPortName = "amqps"
+	}
+
 	var serviceHostnames []string
 	var requeueNeeded bool
 	for i := 0; i < replicas; i++ {
@@ -1102,7 +1114,18 @@ func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabb
 			requeueNeeded = true
 		}
 
-		serviceHostnames = append(serviceHostnames, svc.GetServiceHostname())
+		// Advertise the per-pod endpoint as host:port so that consumers (the
+		// TransportURL controller) use the correct, possibly overridden, port for
+		// each pod instead of a single shared port.
+		hostname := svc.GetServiceHostname()
+		endpoint := hostname
+		for _, p := range svc.GetSpec().Ports {
+			if p.Name == clientPortName {
+				endpoint = net.JoinHostPort(hostname, strconv.Itoa(int(p.Port)))
+				break
+			}
+		}
+		serviceHostnames = append(serviceHostnames, endpoint)
 		instance.Status.ServiceHostnames = serviceHostnames
 	}
 

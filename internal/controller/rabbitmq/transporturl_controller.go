@@ -683,7 +683,15 @@ func (r *TransportURLReconciler) createTransportURLSecret(
 	encodedPass := url.QueryEscape(password)
 	var hostParts []string
 	for _, host := range hosts {
-		hostParts = append(hostParts, fmt.Sprintf("%s:%s@%s", encodedUser, encodedPass, net.JoinHostPort(host, port)))
+		// Per-pod hostnames (from RabbitMq.Status.ServiceHostnames) already carry
+		// their own port as host:port, since each pod may advertise a different
+		// port (e.g. when sharing a single LoadBalancer IP). Only append the
+		// shared default port when the entry does not already contain one.
+		endpoint := host
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			endpoint = net.JoinHostPort(host, port)
+		}
+		hostParts = append(hostParts, fmt.Sprintf("%s:%s@%s", encodedUser, encodedPass, endpoint))
 	}
 	transportURL := fmt.Sprintf("rabbit://%s%s%s", strings.Join(hostParts, ","), vhost, query)
 

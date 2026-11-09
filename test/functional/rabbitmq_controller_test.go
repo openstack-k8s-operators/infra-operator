@@ -636,6 +636,90 @@ var _ = Describe("RabbitMQ Controller", func() {
 		})
 	})
 
+	When("RabbitMQ per-pod services share one IP with overridden ports", func() {
+		BeforeEach(func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = 3
+			// All three per-pod services share a single LoadBalancer IP via
+			// metallb allow-shared-ip, so all exposed ports must be distinct.
+			mkService := func(amqpPort, amqpsPort int64) map[string]any {
+				return map[string]any{
+					"metadata": map[string]any{
+						"annotations": map[string]any{
+							"metallb.universe.tf/address-pool":    "internalapi",
+							"metallb.universe.tf/allow-shared-ip": "internalapi",
+							"metallb.universe.tf/loadBalancerIPs": "192.0.2.20",
+						},
+					},
+					"spec": map[string]any{
+						"type": string(corev1.ServiceTypeLoadBalancer),
+						"ports": []map[string]any{
+							{"name": "amqp", "port": amqpPort},
+							{"name": "amqps", "port": amqpsPort},
+						},
+					},
+				}
+			}
+			spec["podOverride"] = map[string]any{
+				"services": []map[string]any{
+					mkService(5672, 5671),
+					mkService(5673, 5675),
+					mkService(5674, 5676),
+				},
+			}
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+		})
+
+		It("overrides amqp and amqps ports while keeping the container targetPorts", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+			expectedAMQPPorts := []int32{5672, 5673, 5674}
+			expectedAMQPSPorts := []int32{5671, 5675, 5676}
+			Eventually(func(g Gomega) {
+				for i := 0; i < 3; i++ {
+					svcName := types.NamespacedName{
+						Name:      fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i),
+						Namespace: namespace,
+					}
+					svc := &corev1.Service{}
+					g.Expect(k8sClient.Get(ctx, svcName, svc)).Should(Succeed())
+					g.Expect(svc.Annotations["metallb.universe.tf/loadBalancerIPs"]).To(Equal("192.0.2.20"))
+					g.Expect(svc.Annotations["metallb.universe.tf/allow-shared-ip"]).To(Equal("internalapi"))
+
+					var amqp, amqps *corev1.ServicePort
+					for j := range svc.Spec.Ports {
+						switch svc.Spec.Ports[j].Name {
+						case "amqp":
+							amqp = &svc.Spec.Ports[j]
+						case "amqps":
+							amqps = &svc.Spec.Ports[j]
+						}
+					}
+					g.Expect(amqp).ToNot(BeNil())
+					g.Expect(amqps).ToNot(BeNil())
+					// Both exposed ports are distinct across the shared-IP Services...
+					g.Expect(amqp.Port).To(Equal(expectedAMQPPorts[i]))
+					g.Expect(amqps.Port).To(Equal(expectedAMQPSPorts[i]))
+					// ...while targetPorts remain on the RabbitMQ listener ports.
+					g.Expect(amqp.TargetPort.IntValue()).To(Equal(5672))
+					g.Expect(amqps.TargetPort.IntValue()).To(Equal(5671))
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("records per-pod host:port endpoints in status", func() {
+			SimulateRabbitMQClusterReady(rabbitmqName)
+			Eventually(func(g Gomega) {
+				instance := GetRabbitMQ(rabbitmqName)
+				g.Expect(instance.Status.ServiceHostnames).To(HaveLen(3))
+				for i, expPort := range []string{"5672", "5673", "5674"} {
+					expected := fmt.Sprintf("%s-server-%d.%s.svc:%s", rabbitmqDefaultName, i, namespace, expPort)
+					g.Expect(instance.Status.ServiceHostnames[i]).To(Equal(expected))
+				}
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("RabbitMQ per-pod services with wrong number of service overrides", func() {
 		BeforeEach(func() {
 			spec := GetDefaultRabbitMQSpec()
