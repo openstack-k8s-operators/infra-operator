@@ -46,6 +46,8 @@ go.work.sum
 __pycache__/
 *.pyc
 
-# claude and AI tools
+# local AI assistant configuration
 .claude
+.codex/
+.cursor/
 CLAUDE.md
