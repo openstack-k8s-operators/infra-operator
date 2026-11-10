@@ -408,7 +408,7 @@ var _ = Describe("InstanceHa Controller", func() {
 					if e.Name == "METRICS_TLS_KEY" && e.Value == instanceha.MetricsKeyPath {
 						keyEnvFound = true
 					}
-					if e.Name == "METRICS_TLS_MIN_VERSION" && e.Value == "1.2" {
+					if e.Name == "METRICS_TLS_MIN_VERSION" && e.Value == "1.3" {
 						minVerEnvFound = true
 					}
 					if e.Name == "METRICS_TLS_CIPHERS" && e.Value == "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA" {
