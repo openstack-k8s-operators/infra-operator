@@ -80,7 +80,7 @@ func (spec *InstanceHaSpec) Default() {
 		spec.InstanceHaHeartbeatPort = 7411
 	}
 	if spec.MetricsTLS.MinTLSVersion == "" {
-		spec.MetricsTLS.MinTLSVersion = "1.2"
+		spec.MetricsTLS.MinTLSVersion = "1.3"
 	}
 	if spec.MetricsTLS.CipherSuites == "" {
 		spec.MetricsTLS.CipherSuites = "HIGH:!aNULL:!MD5:!RC4:!3DES:!kRSA"
@@ -98,6 +98,7 @@ func (r *InstanceHa) ValidateCreate(ctx context.Context, c client.Client) (admis
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
 	allErrs = append(allErrs, r.validateCipherSuites(basePath)...)
+	allErrs = append(allErrs, r.validateMinTLSVersion(basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -130,6 +131,7 @@ func (r *InstanceHa) ValidateUpdate(ctx context.Context, c client.Client, old ru
 	allErrs = append(allErrs, r.Spec.ValidateTopology(basePath, r.Namespace)...)
 	allErrs = append(allErrs, r.validateUniqueOpenStackCloud(ctx, c, basePath)...)
 	allErrs = append(allErrs, r.validateCipherSuites(basePath)...)
+	allErrs = append(allErrs, r.validateMinTLSVersion(basePath)...)
 
 	if len(allErrs) != 0 {
 		return allWarn, apierrors.NewInvalid(
@@ -196,6 +198,23 @@ func (r *InstanceHa) validateCipherSuites(basePath *field.Path) field.ErrorList 
 			allErrs = append(allErrs, field.Invalid(fldPath, ciphers,
 				"cipher string must not use '@SECLEVEL=0' (disables all security requirements)"))
 		}
+	}
+	return allErrs
+}
+
+// validateMinTLSVersion rejects any minTLSVersion other than 1.3. TLS 1.2 does
+// not support the hybrid post-quantum key exchange (X25519MLKEM768), so allowing
+// it would silently opt the metrics endpoint out of post-quantum protection.
+// This mirrors the CRD enum and acts as defense-in-depth for that constraint.
+func (r *InstanceHa) validateMinTLSVersion(basePath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	minVersion := r.Spec.MetricsTLS.MinTLSVersion
+	// Empty is handled by defaulting (set to 1.3); only reject explicit non-1.3.
+	if minVersion != "" && minVersion != "1.3" {
+		allErrs = append(allErrs, field.Invalid(
+			basePath.Child("metricsTLS", "minTLSVersion"), minVersion,
+			"minTLSVersion must be \"1.3\"; earlier versions do not support the "+
+				"hybrid post-quantum key exchange"))
 	}
 	return allErrs
 }
