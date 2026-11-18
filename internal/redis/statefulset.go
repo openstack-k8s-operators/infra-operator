@@ -31,6 +31,30 @@ func StatefulSet(
 	}
 	ls := labels.GetLabels(r, "redis", matchls)
 
+	replicas := int32(1)
+	if r.Spec.Replicas != nil {
+		replicas = *r.Spec.Replicas
+	}
+
+	// Both the redis and sentinel containers run wait_for_master() before they
+	// start listening, so the startup-probe window must cover the worst-case
+	// master-discovery time. That time grows with the number of peers, so the
+	// failure threshold is derived from the replica count instead of a fixed
+	// value that only fits a 3-replica cluster. Once startup succeeds,
+	// liveness/readiness use aggressive timing.
+	startupPeriod := int32(3)
+	startupFailureThreshold := discoveryStartupFailureThreshold(replicas, startupPeriod)
+
+	startupProbe := &corev1.Probe{
+		TimeoutSeconds:   5,
+		PeriodSeconds:    startupPeriod,
+		FailureThreshold: startupFailureThreshold,
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"/var/lib/operator-scripts/redis_probe.sh", "liveness"},
+			},
+		},
+	}
 	livenessProbe := &corev1.Probe{
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
@@ -51,22 +75,35 @@ func StatefulSet(
 			},
 		},
 	}
+	sentinelStartupProbe := &corev1.Probe{
+		TimeoutSeconds:   5,
+		PeriodSeconds:    startupPeriod,
+		FailureThreshold: startupFailureThreshold, // same window as the redis container
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+			},
+		},
+	}
 	sentinelLivenessProbe := &corev1.Probe{
 		TimeoutSeconds:      5,
 		PeriodSeconds:       3,
-		InitialDelaySeconds: 3,
+		InitialDelaySeconds: 5,
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+			},
+		},
 	}
 	sentinelReadinessProbe := &corev1.Probe{
 		TimeoutSeconds:      5,
 		PeriodSeconds:       5,
 		InitialDelaySeconds: 5,
-	}
-
-	sentinelLivenessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
-	}
-	sentinelReadinessProbe.TCPSocket = &corev1.TCPSocketAction{
-		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(26379)},
+			},
+		},
 	}
 	name := r.Name + "-" + "redis"
 	clusterDomain := clusterdns.GetDNSClusterDomain()
@@ -82,6 +119,9 @@ func StatefulSet(
 	}, {
 		Name:  "CONFIG_HASH",
 		Value: configHash,
+	}, {
+		Name:  "REPLICAS",
+		Value: strconv.Itoa(int(*r.Spec.Replicas)),
 	}}
 
 	sts := &appsv1.StatefulSet{
@@ -122,6 +162,7 @@ func StatefulSet(
 								ContainerPort: 6379,
 								Name:          "redis",
 							}},
+							StartupProbe:   startupProbe,
 							LivenessProbe:  livenessProbe,
 							ReadinessProbe: readinessProbe,
 						}, {
@@ -143,6 +184,7 @@ func StatefulSet(
 								ContainerPort: 26379,
 								Name:          "sentinel",
 							}},
+							StartupProbe:   sentinelStartupProbe,
 							ReadinessProbe: sentinelReadinessProbe,
 							LivenessProbe:  sentinelLivenessProbe,
 						},
@@ -172,4 +214,36 @@ func StatefulSet(
 		)
 	}
 	return sts
+}
+
+// discoveryStartupFailureThreshold returns a startup-probe FailureThreshold
+// large enough to cover the worst-case wait_for_master() duration in
+// common.sh for the given replica count. wait_for_master checks each peer
+// sequentially and, per peer, can spend one TIMEOUT (3s) on the Sentinel
+// query plus one TIMEOUT (3s) on the redis ROLE fallback, then sleeps
+// SENTINEL_RETRY_DELAY (3s) between the SENTINEL_RETRIES (10) attempts.
+// These mirror the defaults in templates/redis/bin/common.sh.
+func discoveryStartupFailureThreshold(replicas int32, periodSeconds int32) int32 {
+	const (
+		sentinelRetries = 10 // SENTINEL_RETRIES
+		retryDelay      = 3  // SENTINEL_RETRY_DELAY (s)
+		perPeerSeconds  = 6  // TIMEOUT sentinel query + TIMEOUT redis ROLE fallback
+		marginSeconds   = 30 // headroom for scheduling/config generation
+		minThreshold    = 60 // never shorter than the historical 180s window
+	)
+
+	peers := replicas - 1
+	if peers < 0 {
+		peers = 0
+	}
+	discoverySeconds := sentinelRetries * (int(peers)*perPeerSeconds + retryDelay)
+
+	if periodSeconds < 1 {
+		periodSeconds = 1
+	}
+	threshold := int32((discoverySeconds+marginSeconds)/int(periodSeconds)) + 1
+	if threshold < minThreshold {
+		threshold = minThreshold
+	}
+	return threshold
 }
