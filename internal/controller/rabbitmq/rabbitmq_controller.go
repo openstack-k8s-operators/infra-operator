@@ -1059,6 +1059,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 
+	// The spec has been applied to the managed resources. Optional recovery and
+	// consent workflows report progress separately and must not hold back this signal.
+	instance.Status.ObservedGeneration = instance.Generation
+
 	// Repair cluster membership before evaluating whether PVC recovery is complete.
 	// The operation is request-scoped by the pending PVC remediation record.
 	if requeue, err := r.ReconcileNodeRejoin(ctx, instance); err != nil {
@@ -1083,11 +1087,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Log.Info("PVC remediation consent deferred; requeuing", "reason", err.Error())
 		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
-
-	// Mark ObservedGeneration only after the full reconciliation succeeds.
-	// This ensures consumers (e.g., OSCP) can trust that the controller has
-	// fully processed the spec at this generation.
-	instance.Status.ObservedGeneration = instance.Generation
 
 	return ctrl.Result{}, nil
 }
@@ -1890,11 +1889,6 @@ type rmqMgmtCreds struct {
 	password string
 	tls      bool   // management endpoint is TLS (spec.tls.secretName set)
 	caPEM    []byte // CA bundle to verify the endpoint (spec.tls.caSecretName), may be empty
-	// caConfiguredSeparately is true when the user pointed spec.tls.caSecretName at
-	// a secret distinct from spec.tls.secretName. In that case an empty caPEM is a
-	// misconfiguration (the named CA secret has no ca.crt) and we fail closed rather
-	// than silently skipping verification.
-	caConfiguredSeparately bool
 }
 
 type rmqNodeStatus struct {
@@ -1939,8 +1933,6 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 	creds := &rmqMgmtCreds{username: user, password: pass}
 	if instance.Spec.TLS.SecretName != "" {
 		creds.tls = true
-		creds.caConfiguredSeparately = instance.Spec.TLS.CaSecretName != "" &&
-			instance.Spec.TLS.CaSecretName != instance.Spec.TLS.SecretName
 		if instance.Spec.TLS.CaSecretName != "" {
 			caSecret := &corev1.Secret{}
 			if err := r.Get(ctx, types.NamespacedName{
@@ -1961,17 +1953,20 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 //
 // TLS verification policy:
 //   - caPEM present: verify against it.
-//   - caPEM empty but a separate CA secret was explicitly configured: fail closed
+//   - caPEM empty but a CA secret was configured (including the TLS secret): fail closed
 //     (the named CA secret is missing ca.crt — a misconfiguration we must not paper
 //     over on a gate that authorizes destructive PVC deletion).
-//   - caPEM empty and no separate CA configured: this is the legitimate
-//     TLS-without-separate-CA deployment. Skip verification for this internal,
+//   - caPEM empty and no CA secret configured: this is the legitimate
+//     TLS-without-CA deployment. Skip verification for this internal,
 //     cluster-local probe, but log it so it is auditable.
 func (r *Reconciler) rmqManagementClient(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (*http.Client, error) {
 	if r.ManagementHTTPClient != nil {
 		return r.ManagementHTTPClient, nil
 	}
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
 	if creds.tls {
 		serverName := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace)
 		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12, ServerName: serverName}
@@ -1982,10 +1977,10 @@ func (r *Reconciler) rmqManagementClient(ctx context.Context, instance *rabbitmq
 				return nil, fmt.Errorf("failed to parse RabbitMQ CA certificate")
 			}
 			tlsCfg.RootCAs = pool
-		case creds.caConfiguredSeparately:
+		case instance.Spec.TLS.CaSecretName != "":
 			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt; cannot verify the management endpoint", instance.Spec.TLS.CaSecretName)
 		default:
-			// Legitimate no-separate-CA deployment: nothing to verify against.
+			// No CA secret configured: nothing to verify against.
 			// Skip verification for this internal probe, but make it auditable.
 			log.FromContext(ctx).Info(
 				"RabbitMq management probe skipping TLS verification (no CA material available); set spec.tls.caSecretName to enable verification",
@@ -2309,7 +2304,7 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		return nil
 	}
 
-	// List only PVCs belonging to this RabbitMq cluster.
+	// List PVCs labeled for this RabbitMq cluster; validate claim names below.
 	pvcList := &corev1.PersistentVolumeClaimList{}
 	if err := r.List(ctx, pvcList,
 		client.InNamespace(instance.Namespace),
@@ -2324,8 +2319,19 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	pvcByName := make(map[string]*corev1.PersistentVolumeClaim, len(pvcList.Items))
 	candidates := make([]*corev1.PersistentVolumeClaim, 0)
 	stuckNodes := make(map[string]bool)
+	pvcPrefix := fmt.Sprintf("persistence-%s-server-", instance.Name)
 	for i := range pvcList.Items {
 		pvc := &pvcList.Items[i]
+		// A shared name label alone does not establish that this is a broker's
+		// data claim. Require the exact StatefulSet claim prefix and ordinal.
+		suffix, matches := strings.CutPrefix(pvc.Name, pvcPrefix)
+		if !matches {
+			continue
+		}
+		ordinal, err := strconv.Atoi(suffix)
+		if err != nil || ordinal < 0 || strconv.Itoa(ordinal) != suffix {
+			continue
+		}
 		pvcByName[pvc.Name] = pvc
 		if pvc.Annotations == nil || pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation] == "" {
 			continue
@@ -2345,12 +2351,6 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		newRemediationStatus[pvc.Name] = entry
 		stuckNodes[entry.StuckNode] = true
 		if entry.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted && pvc.DeletionTimestamp == nil {
-			// Exclude PVCs whose name has no valid ordinal suffix: they must not be
-			// ordered as ordinal 0 and win consent ahead of well-formed PVCs.
-			if _, ok := rmqPVCOrdinal(pvc.Name); !ok {
-				Log.Info("Skipping stuck PVC with unparseable ordinal suffix", "pvc", pvc.Name)
-				continue
-			}
 			candidates = append(candidates, pvc)
 		}
 	}

@@ -702,6 +702,8 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 	}
 
 	instance := instanceWithRecovery(3)
+	instance.Generation = 7
+	instance.Status.ObservedGeneration = 6
 	instance.Spec.ContainerImage = "rabbitmq:4.2"
 	instance.UID = types.UID("rabbitmq-uid")
 	instance.Finalizers = []string{"openstack.org/rabbitmq"}
@@ -763,6 +765,9 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 	}
 	if persisted.Status.PVCRemediation[testPVCName].QueueReplicaState != rabbitmqv1beta1.PVCRemediationQueueReplicasGrown {
 		t.Fatal("deferred reconcile status patch did not persist queueReplicaState=Grown")
+	}
+	if persisted.Status.ObservedGeneration != persisted.Generation {
+		t.Fatalf("rejoin deferral left observedGeneration=%d behind generation=%d", persisted.Status.ObservedGeneration, persisted.Generation)
 	}
 	assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), true)
 }
