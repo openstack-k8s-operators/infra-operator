@@ -119,6 +119,7 @@ type PodCommandExecutor func(
 // Reconciler reconciles a RabbitMq object.
 type Reconciler struct {
 	client.Client
+	APIReader          client.Reader
 	Kclient            kubernetes.Interface
 	config             *rest.Config
 	Scheme             *runtime.Scheme
@@ -177,9 +178,10 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
 	Log := r.GetLogger(ctx)
 
-	// Fetch the RabbitMq instance
+	// Recovery records authorize pod admission. A pod-create watch may overtake
+	// the cached status update that recorded consent, so read the CR directly.
 	instance := &rabbitmqv1beta1.RabbitMq{}
-	err := r.Get(ctx, req.NamespacedName, instance)
+	err := r.safetyReader().Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -321,6 +323,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return
 		}
 	}()
+
+	// Record the generation being processed even when inputs or finalizers defer
+	// reconciliation. Conditions report whether its resources are ready.
+	instance.Status.ObservedGeneration = instance.Generation
 
 	//
 	// initialize status
@@ -1059,10 +1065,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 
-	// The spec has been applied to the managed resources. Optional recovery and
-	// consent workflows report progress separately and must not hold back this signal.
-	instance.Status.ObservedGeneration = instance.Generation
-
 	// Repair cluster membership before evaluating whether PVC recovery is complete.
 	// The operation is request-scoped by the pending PVC remediation record.
 	if requeue, err := r.ReconcileNodeRejoin(ctx, instance); err != nil {
@@ -1768,14 +1770,11 @@ func (r *Reconciler) cleanupOldRabbitmqClusterCR(ctx context.Context, instance *
 // "persistence-<sts>-server-<ordinal>" shape the RabbitMQ volume claim template
 // produces, so unrelated PVCs that merely carry the name label are excluded.
 func IsRabbitmqPVC(obj client.Object) bool {
-	if obj.GetLabels()[labels.K8sAppName] == "" {
+	clusterName := obj.GetLabels()[labels.K8sAppName]
+	if clusterName == "" {
 		return false
 	}
-	name := obj.GetName()
-	if !strings.HasPrefix(name, "persistence-") || !strings.Contains(name, "-server-") {
-		return false
-	}
-	_, ok := rmqPVCOrdinal(name)
+	_, ok := rabbitMQClaimOrdinal(clusterName, obj.GetName())
 	return ok
 }
 
@@ -1919,7 +1918,7 @@ type rmqQueuePage struct {
 // enabled, the CA secret used to verify the RabbitMQ management HTTP API endpoint.
 func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (*rmqMgmtCreds, error) {
 	secret := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{
+	if err := r.safetyReader().Get(ctx, types.NamespacedName{
 		Name:      fmt.Sprintf("%s-default-user", instance.Name),
 		Namespace: instance.Namespace,
 	}, secret); err != nil {
@@ -1935,7 +1934,7 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 		creds.tls = true
 		if instance.Spec.TLS.CaSecretName != "" {
 			caSecret := &corev1.Secret{}
-			if err := r.Get(ctx, types.NamespacedName{
+			if err := r.safetyReader().Get(ctx, types.NamespacedName{
 				Name:      instance.Spec.TLS.CaSecretName,
 				Namespace: instance.Namespace,
 			}, caSecret); err != nil {
@@ -2319,17 +2318,10 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	pvcByName := make(map[string]*corev1.PersistentVolumeClaim, len(pvcList.Items))
 	candidates := make([]*corev1.PersistentVolumeClaim, 0)
 	stuckNodes := make(map[string]bool)
-	pvcPrefix := fmt.Sprintf("persistence-%s-server-", instance.Name)
 	for i := range pvcList.Items {
 		pvc := &pvcList.Items[i]
-		// A shared name label alone does not establish that this is a broker's
-		// data claim. Require the exact StatefulSet claim prefix and ordinal.
-		suffix, matches := strings.CutPrefix(pvc.Name, pvcPrefix)
-		if !matches {
-			continue
-		}
-		ordinal, err := strconv.Atoi(suffix)
-		if err != nil || ordinal < 0 || strconv.Itoa(ordinal) != suffix {
+		// A shared label alone does not identify this broker's data claim.
+		if _, ok := rabbitMQClaimOrdinal(instance.Name, pvc.Name); !ok {
 			continue
 		}
 		pvcByName[pvc.Name] = pvc
@@ -2360,8 +2352,9 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	}
 	// Keep a granted remediation in status after its PVC leaves the stuck list. PVC deletion
 	// is only the start of recovery; do not authorize another member until RabbitMQ has
-	// restored the configured replica count. A consent cleared while the same PVC still
-	// exists means deletion was aborted or consent was withdrawn, so re-evaluate that
+	// restored that replacement's membership. Other outages remain subject to the
+	// survivor and queue gates before another consent. A consent cleared while
+	// the same PVC still exists means deletion was aborted or consent was withdrawn, so re-evaluate that
 	// request instead of waiting for a replacement that cannot exist yet.
 	hasRecoveryPending := false
 	pendingRecovery := make(map[string]bool)
@@ -2513,7 +2506,11 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			podName := fmt.Sprintf("%s-server-%d", instance.Name, ordinal)
 			replacementNode := "rabbit@" + rabbitmq.ManagementPodServerName(podName, instance.Name, instance.Namespace)
 			pod := podByName[podName]
-			if pod != nil && podReady(pod) && runningNodeNames[replacementNode] {
+			claim := pvcByName[name]
+			recovery := newRemediationStatus[name]
+			replacementClaim := claim != nil && claim.DeletionTimestamp == nil &&
+				recovery.PVCUID != "" && string(claim.UID) != recovery.PVCUID
+			if replacementClaim && pod != nil && podUsesPVC(pod, name) && podReady(pod) && runningNodeNames[replacementNode] {
 				delete(newRemediationStatus, name)
 				if current, exists := observedRemediationStatus[name]; exists {
 					newRemediationStatus[name] = current
@@ -2544,7 +2541,7 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 	if runningSurvivors < int(quorum) {
 		Log.Info("RabbitMq running healthy survivors below quorum; deferring consent",
 			"runningSurvivors", runningSurvivors, "quorum", quorum)
-		return nil
+		return fmt.Errorf("RabbitMq running healthy survivors %d below quorum %d", runningSurvivors, quorum)
 	}
 	safeNodes := make(map[string]bool, len(readySurvivors))
 	for _, survivor := range readySurvivors {
@@ -2627,6 +2624,9 @@ func canRetainQuorumAfterLosingOneReplica(replicas int32) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	r.config = mgr.GetConfig()
 	if r.PodCommandExecutor == nil {
 		r.PodCommandExecutor = rsh.ExecInPod

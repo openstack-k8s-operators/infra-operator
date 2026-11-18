@@ -242,6 +242,20 @@ flowchart TD
     D -->|"consent or fencing no longer valid"| X
 ```
 
+RabbitMQ is managed in this same operator process and registers an application
+validator with PodRemediator. Immediately before the finalized-token write, that
+validator uses uncached Kubernetes reads and fresh RabbitMQ management API reads
+to recheck the ready/running survivors and each queue's safety. Missing credentials,
+unavailable management endpoints, or unsafe broker/queue membership reject the
+prepared deletion. This also applies to RabbitMQ consent granted before the
+operator was upgraded; it does not depend on a new PVC annotation. Other workload
+operators retain the existing annotation contract.
+
+The application check and the PVC write are separate operations. The optimistic
+lock rejects a consent withdrawal during validation, and fencing is refreshed
+after validation. A broker failure after the last live check remains possible;
+there is no atomic transaction across RabbitMQ and the Kubernetes API.
+
 Until the finalized token is written to the PVC, consent withdrawal or lost
 fencing rejects the prepared record and cleanup does not start. The finalized
 token write is the transaction's commit boundary: after it, reconciliation
@@ -380,3 +394,27 @@ The in-repository tests cover this controller at three levels: unit tests in
 KUTTL integration test in `test/kuttl/tests/podremediator-deletion-commit/`.
 A real node-failure scenario must be validated on a cluster with NHC and SNR
 installed.
+
+## RabbitMQ replacement recovery
+
+RabbitMQ grants consent for one data PVC at a time. The recovery record keeps the
+original PVC UID and request ID. The slot remains occupied while that claim is
+terminating, while its replacement claim is absent, or until a pod using the new
+claim is Ready and its broker is running in the live cluster view. Recovery on
+RabbitMQ 4.1 and later also verifies cluster rejoin and quorum-queue replicas
+before publishing the replacement through client Services.
+
+Slot release follows the recovered replacement rather than requiring the full
+configured replica count. An unrelated offline broker does not permanently pin
+the slot. A subsequent PVC still has to pass the configured-capacity, ready and
+running survivor, and per-queue safety gates; a five-broker cluster requires at
+least three healthy survivors after excluding the next candidate and stuck nodes.
+
+All new RabbitMQ pods start with `rabbitmq.openstack.org/serving=false`. The
+controller reads recovery records and claim identity directly from the API before
+admitting ordinary pods and backfilling existing unlabeled pods. It does this before
+applying the client Service selector. Recorded replacements stay excluded until
+rejoin and queue verification finish. Existing admitted pods retain their label
+across container restarts or operator downtime. A newly created pod needs the
+operator to admit it, so it waits outside client Services while the operator is
+unavailable. The headless clustering Service does not select on this label.

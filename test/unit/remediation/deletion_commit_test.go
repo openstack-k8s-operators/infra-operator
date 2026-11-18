@@ -346,3 +346,98 @@ func TestPendingDeletionAllowsOtherPVCProgress(t *testing.T) {
 		}
 	}
 }
+
+func TestDeletionCommitRunsApplicationValidator(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		registered   bool
+		reject       bool
+		withdraw     bool
+		wantDeletion bool
+	}{
+		{name: "healthy application", registered: true, wantDeletion: true},
+		{name: "external workload uses annotation consent", wantDeletion: true},
+		{name: "application loses quorum before commit", registered: true, reject: true},
+		{name: "withdrawal during application check", registered: true, withdraw: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, pr := remediationFixture(t, remediationNode(corev1.ConditionFalse))
+			base := r.Client
+			claim := &corev1.PersistentVolumeClaim{}
+			key := client.ObjectKey{Namespace: "test", Name: "claim"}
+			if err := base.Get(ctx, key, claim); err != nil {
+				t.Fatal(err)
+			}
+			pod := podUsingClaim("pod", "worker-0", "pod-uid", []string{"test.example/hold"})
+			if err := base.Create(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			if tc.registered {
+				r.ValidatePVCDeletion = func(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+					calls++
+					if pvc.Annotations[deletionCommitTokenAnnotation] == "" || pvc.Annotations[deletionCommitFinalizedAnnotation] != "" {
+						t.Fatal("validator did not run between preparation and finalization")
+					}
+					if tc.withdraw {
+						current := &corev1.PersistentVolumeClaim{}
+						if err := base.Get(ctx, key, current); err != nil {
+							t.Fatal(err)
+						}
+						delete(current.Annotations, remediationv1.ConsentIDAnnotation)
+						if err := base.Update(ctx, current); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if tc.reject {
+						return fmt.Errorf("application no longer has quorum")
+					}
+					return nil
+				}
+			}
+			recorder := &podDeleteRecordingClient{Client: base}
+			r.Client = recorder
+			r.APIReader = base
+			_, reconcileErr := reconcileRemediation(ctx, r, pr)
+			if tc.wantDeletion && reconcileErr != nil {
+				t.Fatal(reconcileErr)
+			}
+			if tc.registered && calls != 1 {
+				t.Fatalf("validator called %d times", calls)
+			}
+			if got := len(recorder.podDeleteRequests) > 0; got != tc.wantDeletion {
+				t.Fatalf("Pod deletion=%v, want %v", got, tc.wantDeletion)
+			}
+			if err := base.Get(ctx, key, claim); err != nil {
+				t.Fatal(err)
+			}
+			if got := claim.Annotations[deletionCommitFinalizedAnnotation] != ""; got != tc.wantDeletion {
+				t.Fatalf("deletion finalized=%v, want %v", got, tc.wantDeletion)
+			}
+			if !tc.wantDeletion {
+				if remediationv1.HasRemediationConsent(claim.Annotations) {
+					t.Fatal("rejected preparation retained consent")
+				}
+				commits := &corev1.ConfigMapList{}
+				if err := base.List(ctx, commits, client.InNamespace(key.Namespace)); err != nil {
+					t.Fatal(err)
+				}
+				if len(commits.Items) != 0 {
+					t.Fatal("rejected preparation retained a deletion record")
+				}
+			}
+			if tc.wantDeletion {
+				// Once finalized, later application failure cannot roll back the
+				// transaction or stop cleanup resuming after a process restart.
+				r.ValidatePVCDeletion = func(context.Context, *corev1.PersistentVolumeClaim) error {
+					t.Fatal("committed deletion unexpectedly reran validation")
+					return nil
+				}
+				if _, err := reconcileRemediation(ctx, r, pr); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

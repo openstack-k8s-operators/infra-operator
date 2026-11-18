@@ -494,6 +494,9 @@ func TestPVCRemediationSlotReleasedPerReplacement(t *testing.T) {
 			if !tc.replacementReady {
 				server0 = runningNotReadyRabbitMQPod("rabbitmq-server-0", "worker-0")
 			}
+			server0.Spec.Volumes = []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: replacementPVC.Name},
+			}}}
 			pods := []corev1.Pod{
 				server0,
 				readyRabbitMQPod("rabbitmq-server-1", "worker-1"),

@@ -46,6 +46,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -493,7 +494,7 @@ func TestRejoinCLICommandsHaveFiniteTimeout(t *testing.T) {
 }
 
 // TestRejoinHoldsFreshReplacementOutOfService verifies the serving-label hold:
-// a replacement created by the StatefulSet template starts serving=true, and the
+// a replacement from an older template may still start serving=true, and the
 // controller actively flips it to serving=false to keep it out of client traffic
 // until it has rejoined. A stale rejoin annotation makes the controller rebind and
 // requeue without running the full rejoin, isolating the hold behaviour.
@@ -501,7 +502,7 @@ func TestRejoinHoldsFreshReplacementOutOfService(t *testing.T) {
 	fx := &fakeExec{running: map[string][]string{}}
 
 	target := replacementPod("stale-request")
-	// Simulate a freshly-created replacement: born serving=true from the template.
+	// Simulate a replacement created before the template started using serving=false.
 	target.Labels[rabbitmqv1beta1.RabbitMQServingLabel] = rabbitmqv1beta1.RabbitMQServingTrue
 	r := newReconciler(t, fx,
 		replacementPVC(newPVCUID),
@@ -734,8 +735,22 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 		WithScheme(scheme).
 		WithStatusSubresource(&rabbitmqv1beta1.RabbitMq{}, &corev1.Pod{}).
 		WithObjects(objects...).Build()
+	// The Pod watch can overtake the RabbitMq status cache. Recovery/admission
+	// must use the API reader's durable record, not this stale cached view.
+	cached := interceptor.NewClient(c, interceptor.Funcs{
+		Get: func(ctx context.Context, delegate client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := delegate.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if cr, ok := obj.(*rabbitmqv1beta1.RabbitMq); ok {
+				cr.Status.PVCRemediation = nil
+			}
+			return nil
+		},
+	})
 	r := &rabbitmqcontroller.Reconciler{
-		Client:               c,
+		Client:               cached,
+		APIReader:            c,
 		Kclient:              kubernetesfake.NewSimpleClientset(),
 		Scheme:               scheme,
 		PodCommandExecutor:   fx.run,

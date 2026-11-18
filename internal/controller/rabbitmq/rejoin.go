@@ -127,11 +127,9 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// ensurePodsServingLabeled backfills serving=true on any RabbitMq pod that has no
-// serving label yet. It never changes a pod that already carries the label (so a
-// deliberate serving=false hold is preserved). This guarantees that applying the
-// client Service selector (serving=true) does not drop already-running pods on an
-// operator upgrade.
+// ensurePodsServingLabeled admits ordinary new pods and backfills pre-existing
+// unlabeled pods before the client Service selector is applied. A recorded
+// replacement keeps its initial serving=false until rejoin and queue recovery.
 func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) error {
 	pods := &corev1.PodList{}
 	if err := r.List(ctx, pods,
@@ -142,7 +140,30 @@ func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rab
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if _, ok := pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; ok {
+		// Recovery records are persisted before publishing deletion consent, so
+		// a replacement is recognizable on its first reconcile. Never backfill
+		// or admit it before ReconcileNodeRejoin verifies membership and queues.
+		held := false
+		if rejoinEnabled(instance) {
+			for name, recovery := range instance.Status.PVCRemediation {
+				ordinal, ok := rmqPVCOrdinal(name)
+				if !ok || recovery.ConsentState != rabbitmqv1beta1.PVCRemediationConsentGranted ||
+					pod.Name != fmt.Sprintf("%s-server-%d", instance.Name, ordinal) {
+					continue
+				}
+				claim := &corev1.PersistentVolumeClaim{}
+				if err := r.safetyReader().Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: name}, claim); err != nil {
+					if !apierrors.IsNotFound(err) {
+						return err
+					}
+					held = true
+				} else {
+					held = claim.DeletionTimestamp != nil || string(claim.UID) != recovery.PVCUID
+				}
+				break
+			}
+		}
+		if held {
 			continue
 		}
 		if _, err := r.setPodServing(ctx, pod, true); err != nil {
@@ -152,10 +173,7 @@ func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rab
 	return nil
 }
 
-// podServing reports whether a pod is currently included in the client-facing
-// Service (serving label == "true"). Pods are created with the label "true"; the
-// controller flips it to "false" to hold a consented replacement out of client
-// traffic until it has rejoined the cluster.
+// podServing reports whether the controller has admitted a pod to client Services.
 func podServing(pod *corev1.Pod) bool {
 	return pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingTrue
 }
@@ -308,7 +326,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 			}
 			if pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] == "" {
 				// The verified replacement already completed rejoin and queue growth.
-				// Let the PVC handshake check that the configured replica count is back.
+				// Let the PVC handshake release this replacement's remediation slot.
 				continue
 			}
 		}
@@ -342,9 +360,8 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		}
 	}
 
-	// Ordinary pods serve by default; the operator only needs to restore the
-	// serving label on any pod a previous pass held. A replacement waiting for
-	// recovery is held out (serving=false) of client-facing Services.
+	// Admit ordinary pods, including pods starting with serving=false. Pending
+	// replacements stay outside client Services until recovery is verified.
 	changed := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
@@ -576,9 +593,8 @@ func (r *Reconciler) finishNodeRejoin(
 
 // setPodServing sets the serving label that controls whether a pod is included in
 // the client-facing Service, patching metadata (not status). It returns whether a
-// change was made. Holding a replacement out of client traffic (serving=false)
-// never removes a healthy pod when the operator is absent, because pods are born
-// serving=true and only the operator flips the label.
+// change was made. New pods wait for admission, while existing pods retain their
+// serving label through container restarts and operator downtime.
 func (r *Reconciler) setPodServing(ctx context.Context, pod *corev1.Pod, serving bool) (bool, error) {
 	wanted := rabbitmqv1beta1.RabbitMQServingFalse
 	if serving {

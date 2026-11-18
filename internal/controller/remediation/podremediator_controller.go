@@ -88,6 +88,11 @@ type PodRemediatorReconciler struct {
 	Kclient       kubernetes.Interface
 	DynamicClient dynamic.Interface
 
+	// ValidatePVCDeletion is an optional in-process application safety gate,
+	// called immediately before the finalized-token write. The manager wires
+	// RabbitMQ's validator here; other workloads retain the consent contract.
+	ValidatePVCDeletion func(context.Context, *corev1.PersistentVolumeClaim) error
+
 	// ConsentPollInterval controls how often the controller re-checks PVCs
 	// waiting for fencing or app-operator safe-to-delete consent.
 	// Configurable via PODREMEDIATOR_CONSENT_POLL_INTERVAL env var (e.g. "2m").

@@ -264,6 +264,14 @@ func (r *PodRemediatorReconciler) finalizePreparedDeletionCommit(ctx context.Con
 		}
 		return nil, fmt.Errorf("PVC %s lost deletion consent before commitment: %w", pvc.Name, errPreparedCommitRejected)
 	}
+	if r.ValidatePVCDeletion != nil {
+		if err := r.ValidatePVCDeletion(ctx, pvc.DeepCopy()); err != nil {
+			if rejectErr := r.rejectPreparedDeletionCommit(ctx, pvc, commit, state); rejectErr != nil {
+				return nil, rejectErr
+			}
+			return nil, fmt.Errorf("PVC %s application safety check failed: %w", pvc.Name, err)
+		}
+	}
 	// PVC optimistic locking catches consent updates, but Node/SNR changes do
 	// not change the PVC's resource version. Recheck those before committing.
 	fenced, err := r.deletionFencingCurrent(ctx, instance, pvc, state.Node)
@@ -276,6 +284,8 @@ func (r *PodRemediatorReconciler) finalizePreparedDeletionCommit(ctx context.Con
 		}
 		return nil, fmt.Errorf("PVC %s lost current fencing before commitment: %w", pvc.Name, errPreparedCommitRejected)
 	}
+	// A consent change during the live check changes resourceVersion
+	// and conflicts with this write. A finalized token remains irreversible.
 	old := pvc.DeepCopy()
 	finalized := pvc.DeepCopy()
 	finalized.Annotations[deletionCommitFinalizedAnnotation] = state.Token

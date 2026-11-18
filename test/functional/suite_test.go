@@ -275,11 +275,16 @@ var _ = BeforeSuite(func() {
 	err = bgpReconciler.SetupWithManager(context.Background(), k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	rabbitmqReconciler := &rabbitmq_ctrl.Reconciler{
+		Client: k8sManager.GetClient(), APIReader: k8sManager.GetAPIReader(),
+		Scheme: k8sManager.GetScheme(), Kclient: kclient,
+	}
 	err = (&remediation_ctrl.PodRemediatorReconciler{
-		Client:        k8sManager.GetClient(),
-		Scheme:        k8sManager.GetScheme(),
-		Kclient:       kclient,
-		DynamicClient: dynClient,
+		Client:              k8sManager.GetClient(),
+		Scheme:              k8sManager.GetScheme(),
+		Kclient:             kclient,
+		DynamicClient:       dynClient,
+		ValidatePVCDeletion: rabbitmqReconciler.ValidatePVCDeletion,
 	}).SetupWithManager(context.Background(), k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -311,11 +316,7 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
-	err = (&rabbitmq_ctrl.Reconciler{
-		Client:  k8sManager.GetClient(),
-		Scheme:  k8sManager.GetScheme(),
-		Kclient: kclient,
-	}).SetupWithManager(k8sManager)
+	err = rabbitmqReconciler.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	err = (&rabbitmq_ctrl.RabbitMQVhostReconciler{

@@ -45,16 +45,14 @@ func StatefulSet(
 	matchls := SelectorLabels(r.Name)
 	ls := CommonLabels(r.Name)
 
-	// Pod template labels carry the serving label (default "true") on every pod,
-	// unconditionally. The client Service selects serving=true, so pods serve by
-	// default and operator downtime never removes a healthy pod from client
-	// traffic. The controller flips this to "false" only to hold a consented
-	// replacement out until it has rejoined the cluster.
+	// Every new pod starts outside client Services. The controller admits ordinary
+	// pods and releases recorded replacements only after rejoin and queue recovery.
+	// Existing pods retain their serving label across container/operator restarts.
 	podLabels := make(map[string]string, len(ls)+1)
 	for k, v := range ls {
 		podLabels[k] = v
 	}
-	podLabels[rabbitmqv1.RabbitMQServingLabel] = rabbitmqv1.RabbitMQServingTrue
+	podLabels[rabbitmqv1.RabbitMQServingLabel] = rabbitmqv1.RabbitMQServingFalse
 
 	// Default replica count
 	replicas := ptr.To(int32(1))

@@ -370,10 +370,9 @@ type RabbitMqStatus struct {
 	// Conditions
 	Conditions condition.Conditions `json:"conditions,omitempty" optional:"true"`
 
-	// ObservedGeneration - the most recent generation observed for this
-	// service. If the observed generation is less than the spec generation,
-	// then the controller has not processed the latest changes injected by
-	// the openstack-operator in the top-level CR (e.g. the ContainerImage)
+	// ObservedGeneration is the most recent generation the controller has started
+	// reconciling. Readiness conditions report whether that desired state has
+	// been applied successfully; missing inputs can defer resource updates.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// LastAppliedTopology - the last applied Topology
