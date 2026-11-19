@@ -608,7 +608,10 @@ func (r *Reconciler) setPodServing(ctx context.Context, pod *corev1.Pod, serving
 		pod.Labels = map[string]string{}
 	}
 	pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] = wanted
-	if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+	// Guard with the base resourceVersion: if the StatefulSet recreated this pod
+	// after the rejoin/queue checks ran, the patch must conflict rather than mark
+	// an unchecked pod as serving.
+	if err := r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return false, fmt.Errorf("setting serving label on pod %s: %w", pod.Name, err)
 	}
 	return true, nil

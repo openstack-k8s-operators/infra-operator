@@ -2364,12 +2364,22 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 		}
 		pvc, exists := pvcByName[name]
 		if exists && previous.PVCUID != "" && previous.PVCUID == string(pvc.UID) && pvc.DeletionTimestamp == nil {
-			// PodRemediator can abort a prepared deletion and clear the PVC handshake
-			// when its Pod-user snapshot changes. The same claim is still present, so
-			// this is a fresh-consent retry, not replacement recovery.
-			Log.Info("Re-evaluating consent for PVC still present after consent was cleared",
-				"pvc", name, "pvcUID", pvc.UID)
-			continue
+			// The cached PVC list can lag a deletion that has already been finalized.
+			// Confirm with an uncached read before treating this as a fresh-consent
+			// retry; otherwise keep the hold so a replacement cannot be pre-empted.
+			live := &corev1.PersistentVolumeClaim{}
+			err := r.safetyReader().Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: name}, live)
+			switch {
+			case err == nil && string(live.UID) == previous.PVCUID && live.DeletionTimestamp == nil:
+				// PodRemediator can abort a prepared deletion and clear the PVC handshake
+				// when its Pod-user snapshot changes. The same claim is still present, so
+				// this is a fresh-consent retry, not replacement recovery.
+				Log.Info("Re-evaluating consent for PVC still present after consent was cleared",
+					"pvc", name, "pvcUID", pvc.UID)
+				continue
+			case err != nil && !k8s_errors.IsNotFound(err):
+				Log.Error(err, "Failed to confirm PVC state before releasing remediation hold; keeping hold", "pvc", name)
+			}
 		}
 		newRemediationStatus[name] = previous
 		pendingRecovery[name] = true
