@@ -2371,6 +2371,12 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			err := r.safetyReader().Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: name}, live)
 			switch {
 			case err == nil && string(live.UID) == previous.PVCUID && live.DeletionTimestamp == nil:
+				if remediationv1.HasRemediationConsent(live.Annotations) {
+					// Consent is still live on this claim (the cached copy just hadn't
+					// caught up yet): keep the granted record and keep deferring consent.
+					newRemediationStatus[name] = previous
+					continue
+				}
 				// PodRemediator can abort a prepared deletion and clear the PVC handshake
 				// when its Pod-user snapshot changes. The same claim is still present, so
 				// this is a fresh-consent retry, not replacement recovery.

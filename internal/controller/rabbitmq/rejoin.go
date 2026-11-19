@@ -308,7 +308,10 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		}
 		podName := fmt.Sprintf("%s-server-%d", instance.Name, ordinal)
 		pvc := &corev1.PersistentVolumeClaim{}
-		pvcErr := r.Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: pvcName}, pvc)
+		// Use an uncached read: a lagging PVC watch could still show the original
+		// UID while the replacement pod is already up, which would skip this
+		// replacement out of pendingPods and admit it before verification.
+		pvcErr := r.safetyReader().Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: pvcName}, pvc)
 		if pvcErr != nil && !apierrors.IsNotFound(pvcErr) {
 			return true, fmt.Errorf("reading replacement PVC %s: %w", pvcName, pvcErr)
 		}
