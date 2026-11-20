@@ -117,6 +117,24 @@ func StatefulSet(
 	// Build init containers
 	var initContainers []corev1.Container
 
+	// Client-Service exclusion does not isolate Erlang/Raft peer traffic.
+	// Block the broker process itself until this pod UID is approved.
+	if *replicas > 1 && IsVersion4_1OrLater(targetVersion) {
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "startup-gate",
+			Image:   r.Spec.ContainerImage,
+			Command: []string{"sh", "-c"},
+			Args: []string{`set -eu
+test -n "$POD_UID"
+echo "Waiting for RabbitMQ startup approval"
+while [ "$(cat /etc/pod-info/startupApproved 2>/dev/null || true)" != "$POD_UID" ]; do sleep 2; done`},
+			Env: []corev1.EnvVar{{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
+			}}},
+			VolumeMounts: []corev1.VolumeMount{{Name: "pod-info", MountPath: "/etc/pod-info", ReadOnly: true}},
+		})
+	}
+
 	// Add data-wipe init container for storage upgrades.
 	// Runs BEFORE setup-container and clears /var/lib/rabbitmq.
 	// Version-specific marker files prevent duplicate wipes across pod restarts.

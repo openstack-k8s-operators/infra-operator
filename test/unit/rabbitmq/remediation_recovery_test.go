@@ -88,10 +88,12 @@ func TestDeletionValidationRefreshesRabbitMQSafety(t *testing.T) {
 		queues        string
 		missingRecord bool
 		wantError     bool
+		readFails     bool
 	}{
 		{name: "unchanged healthy survivors"},
 		{name: "survivor fails after consent", offline: map[int]bool{0: true, 2: true}, wantError: true},
-		{name: "queue loses majority after consent", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]}`, wantError: true},
+		{name: "queue loses majority after consent", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]}`, readFails: true, wantError: true},
+		{name: "online replicas lose Ra consensus after consent", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`, readFails: true, wantError: true},
 		{name: "durable classic queue appears on candidate", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","durable":true}]}`, wantError: true},
 		{name: "recovery record withdrawn", missingRecord: true, wantError: true},
 	} {
@@ -117,6 +119,11 @@ func TestDeletionValidationRefreshesRabbitMQSafety(t *testing.T) {
 			// The ordinary client is no longer trusted for commit-time reads.
 			r.APIReader = r.Client
 			r.ManagementHTTPClient = managementClientWithMembership(3, tc.offline, tc.queues)
+			executor := &fakeExec{}
+			if tc.readFails {
+				executor.quorumReadErr = fmt.Errorf("Ra group cannot confirm leadership")
+			}
+			r.PodCommandExecutor = executor.run
 			if err := r.ValidatePVCDeletion(ctx, claim); (err != nil) != tc.wantError {
 				t.Fatalf("validation error = %v, want error %v", err, tc.wantError)
 			}

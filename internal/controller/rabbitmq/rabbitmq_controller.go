@@ -1816,6 +1816,7 @@ func rmqPodUpdatePredicate() predicate.Predicate {
 			return rmqPodReadyStatus(oldPod) != rmqPodReadyStatus(newPod) ||
 				oldPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] != newPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] ||
 				oldPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != newPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] ||
+				oldPod.Annotations[rabbitmqv1beta1.AnnotationStartupApproved] != newPod.Annotations[rabbitmqv1beta1.AnnotationStartupApproved] ||
 				oldPod.Status.Phase != newPod.Status.Phase ||
 				(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil)
 		},
@@ -2164,9 +2165,13 @@ func quorumQueueMembers(queue rmqQueueStatus) (members, online map[string]bool, 
 // Cluster membership alone cannot prove queue availability: a quorum queue can
 // have fewer members than the broker cluster, including only two members.
 func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, candidateNode string, safeNodes map[string]bool) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// A management scan plus several bounded Ra proof batches can legitimately
+	// exceed 30 seconds on a large queue set. Keep a finite outer bound while
+	// leaving each HTTP request and CLI command independently bounded.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return r.scanQueues(ctx, instance, pod, creds,
+	quorumQueues := []rmqQueueStatus{}
+	err := r.scanQueues(ctx, instance, pod, creds,
 		"name,vhost,type,node,durable,members,online",
 		func(queue rmqQueueStatus) error {
 			switch queue.Type {
@@ -2200,24 +2205,29 @@ func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *r
 				}
 				return nil
 			case "quorum":
-				members, online, err := quorumQueueMembers(queue)
+				members, _, err := quorumQueueMembers(queue)
 				if err != nil {
 					return err
 				}
 				survivors := 0
-				for member := range online {
+				for member := range members {
 					if safeNodes[member] {
 						survivors++
 					}
 				}
 				if survivors < quorumOf(int32(len(members))) {
-					return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe online members of %d", queue.Vhost, queue.Name, survivors, len(members))
+					return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe members of %d", queue.Vhost, queue.Name, survivors, len(members))
 				}
+				quorumQueues = append(quorumQueues, queue)
 				return nil
 			default:
 				return fmt.Errorf("RabbitMq queue %s/%s has unknown type %s", queue.Vhost, queue.Name, queue.Type)
 			}
 		})
+	if err != nil {
+		return err
+	}
+	return r.verifyQueueQuorumReads(ctx, pod, quorumQueues, safeNodes)
 }
 
 // rmqRunningSurvivorCount verifies each ready survivor pod maps unambiguously to a
@@ -2334,11 +2344,12 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			consentState = rabbitmqv1beta1.PVCRemediationConsentGranted
 		}
 		entry := rabbitmqv1beta1.PVCRemediationStatus{
-			PVCUID:            string(pvc.UID),
-			StuckNode:         pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
-			RequestID:         requestID,
-			ConsentState:      consentState,
-			QueueReplicaState: rabbitmqv1beta1.PVCRemediationQueueReplicasPending,
+			PVCUID:             string(pvc.UID),
+			StuckNode:          pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+			RequestID:          requestID,
+			ConsentState:       consentState,
+			QueueReplicaState:  rabbitmqv1beta1.PVCRemediationQueueReplicasPending,
+			MemberRemovalState: rabbitmqv1beta1.PVCRemediationMemberRemovalPending,
 		}
 		newRemediationStatus[pvc.Name] = entry
 		stuckNodes[entry.StuckNode] = true

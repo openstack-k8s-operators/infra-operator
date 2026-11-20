@@ -166,6 +166,13 @@ func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rab
 		if held {
 			continue
 		}
+		allowed, _, err := r.ensurePodStartup(ctx, instance, pod)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			continue
+		}
 		if _, err := r.setPodServing(ctx, pod, true); err != nil {
 			return err
 		}
@@ -211,6 +218,12 @@ type rabbitmqCommandOutput struct {
 // per-queue failures on stderr while still exiting successfully.
 func (r *Reconciler) rabbitmqCommand(ctx context.Context, podName types.NamespacedName, command string, args ...string) (rabbitmqCommandOutput, error) {
 	cmd := append([]string{command}, args...)
+	if command == "rabbitmq-queues" {
+		// RPM-based S2I images ship this CLI in /usr/lib/rabbitmq/bin without
+		// the /usr/sbin link provided for rabbitmqctl. Preserve image-specific
+		// PATH entries and pass every argument positionally through the shell.
+		cmd = append([]string{"sh", "-c", `PATH="$PATH:/usr/lib/rabbitmq/bin"; export PATH; exec "$@"`, "--"}, cmd...)
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, rabbitmqCommandTimeout)
 	defer cancel()
 
@@ -225,8 +238,11 @@ func (r *Reconciler) rabbitmqCommand(ctx context.Context, podName types.Namespac
 			output.stderr = errOut.String()
 			return nil
 		})
-	if err != nil && output.stderr != "" {
-		return output, fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(output.stderr))
+	if err != nil {
+		detail := strings.TrimSpace(output.stdout + "\n" + output.stderr)
+		if detail != "" {
+			return output, fmt.Errorf("%w (output: %.4096s)", err, detail)
+		}
 	}
 	return output, err
 }
@@ -355,7 +371,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 				pod.Annotations = map[string]string{}
 			}
 			pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] = remediation.RequestID
-			if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+			if err := r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 				return true, fmt.Errorf("authorizing rejoin on %s: %w", pod.Name, err)
 			}
 			log.Info("Authorized replacement pod rejoin from PVC consent", "pod", pod.Name, "pvc", pvcName)
@@ -368,9 +384,16 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	changed := false
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		ready := true
+		var ready bool
 		if _, pending := pendingPods[pod.Name]; pending {
 			ready = false
+		} else {
+			allowed, startupChanged, err := r.ensurePodStartup(ctx, instance, pod)
+			if err != nil {
+				return true, err
+			}
+			ready = allowed
+			changed = changed || startupChanged
 		}
 		updated, err := r.setPodServing(ctx, pod, ready)
 		if err != nil {
@@ -401,11 +424,6 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	if target == nil {
 		return true, nil
 	}
-	if !podRabbitMQContainerReady(target) {
-		log.Info("Authorized rejoin is waiting for the RabbitMQ container", "pod", target.Name)
-		return true, nil
-	}
-
 	replicas := *instance.Spec.Replicas
 	quorum := int(replicas/2 + 1)
 	targetNode := rejoinNodeName(instance, target.Name)
@@ -431,10 +449,25 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		return true, nil
 	}
 
-	anchorName := types.NamespacedName{Namespace: anchor.Namespace, Name: anchor.Name}
 	targetName := types.NamespacedName{Namespace: target.Namespace, Name: target.Name}
 	anchorNode := rejoinNodeName(instance, anchor.Name)
 	remediation := instance.Status.PVCRemediation[targetPVCName]
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := r.safetyReader().Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: targetPVCName}, claim); err != nil {
+		return true, err
+	}
+	if remediation.MemberRemovalState != rabbitmqv1beta1.PVCRemediationMemberRemoved ||
+		remediation.ReplacementPVCUID != string(claim.UID) {
+		return true, r.removeOldMember(ctx, instance, target, anchor, pods.Items, targetPVCName, anchorMembership)
+	}
+	allowed, startupChanged, err := r.ensurePodStartup(ctx, instance, target)
+	if err != nil {
+		return true, err
+	}
+	if !allowed || startupChanged || !podRabbitMQContainerReady(target) {
+		log.Info("Authorized rejoin is waiting for replacement startup", "pod", target.Name)
+		return true, nil
+	}
 	targetMembership, err := r.clusterMembership(ctx, instance, target)
 	if err != nil {
 		return true, fmt.Errorf("reading target cluster status: %w", err)
@@ -454,26 +487,8 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		return true, nil
 	}
 
-	// A deleted seed remains in disk_nodes/ram_nodes but disappears from
-	// running_nodes. Forget only that configured-but-offline member. Never
-	// forget an online node or infer stale membership from a partial status.
-	if anchorMembership.Configured[targetNode] && !anchorMembership.Running[targetNode] {
-		if _, err := r.rabbitmqctl(ctx, anchorName, "forget_cluster_node", targetNode); err != nil {
-			return true, fmt.Errorf("forgetting stale RabbitMQ node %s: %w", targetNode, err)
-		}
-		anchorMembership, err = r.clusterMembership(ctx, instance, anchor)
-		if err != nil {
-			return true, fmt.Errorf("verifying stale node removal from anchor: %w", err)
-		}
-		if len(anchorMembership.Running) < quorum || !anchorMembership.Running[anchorNode] {
-			log.Info("Anchor lost quorum after forgetting stale node; deferring rejoin", "pod", anchor.Name, "quorum", quorum)
-			return true, nil
-		}
-		if anchorMembership.Configured[targetNode] || anchorMembership.Running[targetNode] {
-			log.Info("Anchor still reports stale node after forget; deferring rejoin", "pod", anchor.Name, "target", targetNode)
-			return true, nil
-		}
-	}
+	// The old member was removed and that progress persisted before startup.
+	// join_cluster performs the fresh-member reset/add lifecycle on the target.
 	if _, err := r.rabbitmqctl(ctx, targetName, "join_cluster", anchorNode); err != nil {
 		return true, fmt.Errorf("joining RabbitMQ node %s to %s: %w", target.Name, anchorNode, err)
 	}
@@ -623,7 +638,7 @@ func (r *Reconciler) setPodServing(ctx context.Context, pod *corev1.Pod, serving
 func (r *Reconciler) clearRejoinAnnotation(ctx context.Context, pod *corev1.Pod) error {
 	base := pod.DeepCopy()
 	delete(pod.Annotations, rabbitmqv1beta1.AnnotationRejoinCluster)
-	if err := r.Patch(ctx, pod, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("clearing rejoin annotation on %s: %w", pod.Name, err)
 	}
 	return nil

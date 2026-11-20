@@ -54,12 +54,12 @@ func TestStatefulSet_WithoutDataWipe(t *testing.T) {
 		}
 	}
 
-	// Should have setup-container only
-	if len(initContainers) != 1 {
-		t.Errorf("expected 1 init container, got %d", len(initContainers))
+	// Startup approval precedes setup, so no broker process can contact peers.
+	if len(initContainers) != 2 {
+		t.Fatalf("expected 2 init containers, got %d", len(initContainers))
 	}
-	if initContainers[0].Name != "setup-container" {
-		t.Errorf("init container name = %q, want %q", initContainers[0].Name, "setup-container")
+	if initContainers[0].Name != "startup-gate" || initContainers[1].Name != "setup-container" {
+		t.Errorf("unexpected init container order: %v", initContainers)
 	}
 }
 
@@ -99,16 +99,16 @@ func TestStatefulSet_WithDataWipe(t *testing.T) {
 	sts := StatefulSet(r, "hash123", nil, nil, "4.2", true, ProxyConfig{})
 
 	initContainers := sts.Spec.Template.Spec.InitContainers
-	if len(initContainers) != 2 {
-		t.Fatalf("expected 2 init containers, got %d", len(initContainers))
+	if len(initContainers) != 3 {
+		t.Fatalf("expected 3 init containers, got %d", len(initContainers))
 	}
 
-	// wipe-data first, then setup-container
-	if initContainers[0].Name != "wipe-data" {
-		t.Errorf("first init container = %q, want %q", initContainers[0].Name, "wipe-data")
+	// Approval must precede any setup that could alter persistent state.
+	if initContainers[0].Name != "startup-gate" || initContainers[1].Name != "wipe-data" {
+		t.Errorf("unexpected pre-setup init container order: %v", initContainers)
 	}
-	if initContainers[1].Name != "setup-container" {
-		t.Errorf("second init container = %q, want %q", initContainers[1].Name, "setup-container")
+	if initContainers[2].Name != "setup-container" {
+		t.Errorf("third init container = %q, want %q", initContainers[2].Name, "setup-container")
 	}
 }
 

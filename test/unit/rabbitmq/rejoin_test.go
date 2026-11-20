@@ -19,11 +19,14 @@ package rabbitmq_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -83,10 +86,16 @@ type fakeExec struct {
 	statusOutput       map[string]string // optional raw cluster_status response by pod name
 	statusErr          map[string]error  // optional cluster_status exec error by pod name
 	postForgetRunning  map[string][]string
+	consistent         map[string][]string // optional leader membership, independent of the local cache
+	quorumReadErr      error
+	quorumReadOutput   string
 }
 
 func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config, podName types.NamespacedName,
 	_ string, cmd []string, fun func(*bytes.Buffer, *bytes.Buffer) error) error {
+	if len(cmd) >= 5 && cmd[0] == "sh" && cmd[1] == "-c" && cmd[3] == "--" {
+		cmd = cmd[4:] // Execute the intended CLI after the image PATH adapter.
+	}
 	if len(cmd) == 0 {
 		return errors.New("empty command")
 	}
@@ -124,8 +133,15 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 		for pod, nodes := range f.configured {
 			f.configured[pod] = withoutNode(nodes, staleNode)
 		}
+		for pod, nodes := range f.consistent {
+			f.consistent[pod] = withoutNode(nodes, staleNode)
+		}
 		for pod, nodes := range f.postForgetRunning {
 			f.running[pod] = append([]string(nil), nodes...)
+		}
+		for queue := range f.quorumQueueMembers {
+			delete(f.quorumQueueMembers[queue], staleNode)
+			delete(f.quorumQueueOnline[queue], staleNode)
 		}
 	}
 	if command == "rabbitmqctl" && len(args) >= 1 && args[0] == "join_cluster" {
@@ -169,7 +185,103 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 		out.Write(b)
 		return fun(&out, &bytes.Buffer{})
 	}
+	if command == "rabbitmqctl" && len(args) > 1 && args[0] == "-q" && args[1] == "eval" {
+		if len(args) > 2 && strings.Contains(args[2], `QUEUE_CONSENSUS=`) {
+			if f.quorumReadErr != nil {
+				return f.quorumReadErr
+			}
+			bracketedGenerator := regexp.MustCompile(`\|\| \{V,N,Expected,Nodes\}<-\[`)
+			if !bracketedGenerator.MatchString(args[2]) {
+				return errors.New("malformed queue consensus generator")
+			}
+			output := f.quorumReadOutput
+			if output == "" {
+				type participant struct {
+					Node       string `json:"node"`
+					State      string `json:"state"`
+					Membership string `json:"membership"`
+					Term       int64  `json:"term"`
+					Leader     string `json:"leader"`
+					Members    int    `json:"members"`
+					Error      bool   `json:"error"`
+				}
+				type result struct {
+					Vhost           string        `json:"vhost"`
+					Name            string        `json:"name"`
+					ExpectedMembers int           `json:"expected_members"`
+					Acknowledged    int           `json:"acknowledged"`
+					Participants    []participant `json:"participants"`
+				}
+				queuePattern := regexp.MustCompile(`\{base64:decode\(<<"([A-Za-z0-9+/=]*)">>\),base64:decode\(<<"([A-Za-z0-9+/=]*)">>\),([0-9]+),\[((?:base64:decode\(<<"[A-Za-z0-9+/=]*">>\),?)*)\]\}`)
+				nodePattern := regexp.MustCompile(`base64:decode\(<<"([A-Za-z0-9+/=]*)">>\)`)
+				matches := queuePattern.FindAllStringSubmatch(args[2], -1)
+				queues := make([]result, 0, len(matches))
+				for _, match := range matches {
+					vhostBytes, _ := base64.StdEncoding.DecodeString(match[1])
+					nameBytes, _ := base64.StdEncoding.DecodeString(match[2])
+					expected, _ := strconv.Atoi(match[3])
+					nodeMatches := nodePattern.FindAllStringSubmatch(match[4], -1)
+					nodes := make([]string, 0, len(nodeMatches))
+					for _, nodeMatch := range nodeMatches {
+						decoded, _ := base64.StdEncoding.DecodeString(nodeMatch[1])
+						nodes = append(nodes, string(decoded))
+					}
+					item := result{Vhost: string(vhostBytes), Name: string(nameBytes), ExpectedMembers: expected, Acknowledged: len(nodes)}
+					leader := nodes[len(nodes)-1]
+					for _, current := range nodes {
+						item.Participants = append(item.Participants, participant{
+							Node: current, Membership: "voter", Term: 1,
+							Leader: leader, Members: expected,
+						})
+						if current == leader {
+							item.Participants[len(item.Participants)-1].State = "leader"
+						} else {
+							item.Participants[len(item.Participants)-1].State = "follower"
+						}
+					}
+					queues = append(queues, item)
+				}
+				encoded, _ := json.Marshal(queues)
+				output = "QUEUE_CONSENSUS=" + string(encoded) + "\nok\n"
+			}
+			return fun(bytes.NewBufferString(output), &bytes.Buffer{})
+		}
+		members := f.configured[podName.Name]
+		if authoritative, ok := f.consistent[podName.Name]; ok {
+			members = authoritative
+		}
+		if members == nil {
+			members = f.running[podName.Name]
+		}
+		b, _ := json.Marshal(members)
+		var out bytes.Buffer
+		out.WriteString("MEMBERS=" + string(b) + "\nok\n")
+		return fun(&out, &bytes.Buffer{})
+	}
 	return nil
+}
+
+func TestFakeExecRejectsMalformedQueueGenerator(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	vhost := base64.StdEncoding.EncodeToString([]byte("/"))
+	queue := base64.StdEncoding.EncodeToString([]byte("orders"))
+	first := node(testName + "-server-1")
+	second := node(testName + "-server-2")
+	firstJSON := base64.StdEncoding.EncodeToString([]byte(first))
+	secondJSON := base64.StdEncoding.EncodeToString([]byte(second))
+	expression := `Results=[Process(V,N,Expected,Nodes) || {V,N,Expected,Nodes}<-` +
+		`{base64:decode(<<"` + vhost + `">>),base64:decode(<<"` + queue + `">>),2,[` +
+		`base64:decode(<<"` + firstJSON + `">>),base64:decode(<<"` + secondJSON + `">>)]}],` +
+		`io:format("QUEUE_CONSENSUS=~ts~n",[rabbit_json:encode(Results)]),ok.`
+	cmd := []string{"rabbitmqctl", "-q", "eval", expression}
+	if err := fx.run(context.Background(), kubernetesfake.NewSimpleClientset(), nil,
+		types.NamespacedName{Name: testName + "-server-1", Namespace: testNS}, "",
+		cmd, func(*bytes.Buffer, *bytes.Buffer) error { return nil }); err == nil {
+		t.Fatal("malformed unbracketed queue generator must be rejected")
+	}
 }
 
 func appendUnique(nodes []string, node string) []string {
@@ -253,6 +365,14 @@ func modelOfflineStaleSeed(fx *fakeExec) {
 		pod := testName + "-server-" + ordinal
 		fx.running[pod] = []string{node(testName + "-server-1"), node(testName + "-server-2")}
 		fx.configured[pod] = []string{seed, node(testName + "-server-1"), node(testName + "-server-2")}
+	}
+}
+
+func modelRemovedSeed(fx *fakeExec) {
+	modelOfflineStaleSeed(fx)
+	for _, ordinal := range []string{"1", "2"} {
+		pod := testName + "-server-" + ordinal
+		fx.configured[pod] = append([]string(nil), fx.running[pod]...)
 	}
 }
 
@@ -403,6 +523,17 @@ func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
 	return instance
 }
 
+// Post-start rejoin/queue tests begin after the separate pre-start removal
+// phase. startup_test.go exercises that phase and its durable boundary.
+func instanceAfterMemberRemoval(replicas int32) *rabbitmqv1beta1.RabbitMq {
+	instance := instanceWithRecovery(replicas)
+	entry := instance.Status.PVCRemediation[testPVCName]
+	entry.MemberRemovalState = rabbitmqv1beta1.PVCRemediationMemberRemoved
+	entry.ReplacementPVCUID = newPVCUID
+	instance.Status.PVCRemediation[testPVCName] = entry
+	return instance
+}
+
 // podRejoinReady reports whether the controller has returned a pod to client
 // traffic (serving label == "true"). Kept under its original name so the many
 // call sites read the same; semantics now follow the serving label.
@@ -439,7 +570,7 @@ func TestRejoinAcceptsRabbitMQ42ClusterStatus(t *testing.T) {
 		replacementPod(testRequestID),
 		clusterPod(testName+"-server-1", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("RabbitMQ 4.2 cluster status was rejected: %v", err)
 	}
@@ -483,7 +614,7 @@ func TestRejoinCLICommandsHaveFiniteTimeout(t *testing.T) {
 		return errors.New("fake command failure")
 	}
 
-	_, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	_, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("expected failed peer probe to defer rejoin, got: %v", err)
 	}
@@ -509,7 +640,7 @@ func TestRejoinHoldsFreshReplacementOutOfService(t *testing.T) {
 		target,
 		clusterPod(testName+"-server-1", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -540,7 +671,7 @@ func TestRejoinBindsAnnotationToRecordedRequestID(t *testing.T) {
 		target,
 		clusterPod(testName+"-server-1", true))
 
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -567,7 +698,7 @@ func TestRejoinWaitsForReplacementPVC(t *testing.T) {
 	fx := &fakeExec{running: map[string][]string{}}
 
 	r := newReconciler(t, fx, replacementPod(testRequestID))
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -597,7 +728,7 @@ func TestRejoinRefusesWithoutHealthyPeer(t *testing.T) {
 
 	r := newReconciler(t, fx, replacementPVC(newPVCUID), replacementPod(testRequestID))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -612,7 +743,7 @@ func TestRejoinRefusesWithoutHealthyPeer(t *testing.T) {
 	}
 }
 
-func TestRejoinHappyPath(t *testing.T) {
+func TestRejoinAfterPersistedMemberRemoval(t *testing.T) {
 	fx := newFakeExecWithQuorumQueues(map[string][]string{
 		testName + "-server-0": {node(testName + "-server-0")}, // replacement is standalone
 		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
@@ -620,7 +751,7 @@ func TestRejoinHappyPath(t *testing.T) {
 	})
 	// This is the actual deleted-seed state: server-0 remains configured in
 	// the surviving cluster but is absent from its running membership.
-	modelOfflineStaleSeed(fx)
+	modelRemovedSeed(fx)
 
 	target := replacementPod(testRequestID)
 	r := newReconciler(t, fx, target,
@@ -628,7 +759,7 @@ func TestRejoinHappyPath(t *testing.T) {
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
 
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -637,10 +768,9 @@ func TestRejoinHappyPath(t *testing.T) {
 		t.Error("expected requeue after performing a rejoin")
 	}
 
-	// forget happens on a peer, targeting the stale node; join happens on target.
-	// On 4.1+ join_cluster self-prepares, so no stop_app/reset/start_app.
-	if fx.orderOf("forget_cluster_node "+node(testName+"-server-0")) < 0 {
-		t.Errorf("expected forget_cluster_node on peer, calls=%v", fx.calls)
+	// Member removal was persisted before this broker started. Do not repeat it.
+	if fx.orderOf("forget_cluster_node") >= 0 {
+		t.Errorf("must not forget a member after allowing startup, calls=%v", fx.calls)
 	}
 	if fx.orderOf(testName+"-server-0:rabbitmqctl join_cluster "+node(testName+"-server-1")) < 0 &&
 		fx.orderOf(testName+"-server-0:rabbitmqctl join_cluster "+node(testName+"-server-2")) < 0 {
@@ -650,10 +780,6 @@ func TestRejoinHappyPath(t *testing.T) {
 		if fx.orderOf(unwanted) != -1 {
 			t.Errorf("did not expect %q on 4.1+, calls=%v", unwanted, fx.calls)
 		}
-	}
-	// Ordering: forget (on peer) precedes join (on target).
-	if fx.orderOf("forget_cluster_node") >= fx.orderOf("join_cluster") {
-		t.Errorf("repair steps out of order: %v", fx.calls)
 	}
 	queueGrowth := testName + "-server-0:rabbitmq-queues grow " + node(testName+"-server-0") + " all --errors-only --silent"
 	if fx.orderOf(queueGrowth) < 0 {
@@ -686,7 +812,7 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
 		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
 	})
-	modelOfflineStaleSeed(fx)
+	modelRemovedSeed(fx)
 
 	scheme := runtime.NewScheme()
 	for _, addToScheme := range []func(*runtime.Scheme) error{
@@ -702,7 +828,7 @@ func TestReconcilePersistsQuorumQueueGrowthStatus(t *testing.T) {
 		}
 	}
 
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 	instance.Generation = 7
 	instance.Status.ObservedGeneration = 6
 	instance.Spec.ContainerImage = "rabbitmq:4.2"
@@ -801,7 +927,7 @@ func TestRejoinKeepsReadinessClosedUntilQuorumReplicasAreOnline(t *testing.T) {
 		replacementPVC(newPVCUID),
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 
 	if _, err := r.ReconcileNodeRejoin(context.Background(), instance); err == nil || !strings.Contains(err.Error(), "not online yet") {
 		t.Fatalf("expected rejoin to wait for online queue replicas, got %v", err)
@@ -848,7 +974,7 @@ func TestRejoinGrowsQuorumQueuesCreatedDuringRecovery(t *testing.T) {
 		replacementPVC(newPVCUID),
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 
 	if _, err := r.ReconcileNodeRejoin(context.Background(), instance); err == nil || !strings.Contains(err.Error(), "not online yet") {
 		t.Fatalf("expected rejoin to wait for initial replicas to sync, got %v", err)
@@ -908,7 +1034,7 @@ func TestRejoinRetriesFailedQuorumQueueGrowth(t *testing.T) {
 		replacementPVC(newPVCUID),
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 
 	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance)
 	if err == nil {
@@ -979,7 +1105,7 @@ func TestRejoinKeepsGateClosedOnPerQueueGrowErrors(t *testing.T) {
 				replacementPVC(newPVCUID),
 				clusterPod(testName+"-server-1", true),
 				clusterPod(testName+"-server-2", true))
-			instance := instanceWithRecovery(3)
+			instance := instanceAfterMemberRemoval(3)
 
 			requeue, err := r.ReconcileNodeRejoin(context.Background(), instance)
 			if err == nil || !strings.Contains(err.Error(), "per-queue errors") {
@@ -1018,7 +1144,7 @@ func TestRejoinAlreadyMemberVerifiesAndClears(t *testing.T) {
 	target := replacementPod(testRequestID)
 	r := newReconciler(t, fx, replacementPVC(newPVCUID), target, clusterPod(testName+"-server-1", true))
 
-	instance := instanceWithRecovery(3)
+	instance := instanceAfterMemberRemoval(3)
 	_, err := r.ReconcileNodeRejoin(context.Background(), instance)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1069,7 +1195,7 @@ func TestRejoinRefusesNonStandaloneTarget(t *testing.T) {
 		replacementPod(testRequestID),
 		clusterPod(testName+"-server-1", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1098,7 +1224,7 @@ func TestRejoinDoesNotForgetTargetThatAnchorReportsRunning(t *testing.T) {
 		replacementPod(testRequestID),
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1125,14 +1251,16 @@ func TestRejoinDefersIfAnchorLosesQuorumAfterForget(t *testing.T) {
 	// survivor that no longer has quorum.
 	fx.postForgetRunning[testName+"-server-1"] = []string{node(testName + "-server-1")}
 
+	instance := rawRecovery()
 	r := newReconciler(t, fx,
+		instance,
 		replacementPVC(newPVCUID),
-		replacementPod(testRequestID),
+		gatedReplacement(),
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance)
+	if err == nil {
+		t.Fatal("expected an error after survivor quorum changed")
 	}
 	if !requeue {
 		t.Fatal("expected requeue after anchor quorum changed")
@@ -1170,7 +1298,7 @@ func TestRejoinFailsClosedOnAmbiguousTargetStatus(t *testing.T) {
 				replacementPod(testRequestID),
 				clusterPod(testName+"-server-1", true),
 				clusterPod(testName+"-server-2", true))
-			requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+			requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 			if err == nil {
 				t.Fatal("expected ambiguous target status to fail closed")
 			}
@@ -1195,7 +1323,7 @@ func TestRejoinDefersOnAmbiguousAnchorStatus(t *testing.T) {
 		replacementPVC(newPVCUID),
 		replacementPod(testRequestID),
 		clusterPod(testName+"-server-1", true))
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceWithRecovery(3))
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

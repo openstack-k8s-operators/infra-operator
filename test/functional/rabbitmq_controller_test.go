@@ -131,6 +131,36 @@ var _ = Describe("RabbitMQ Controller", func() {
 	})
 
 	When("client Service admission is reconciled", func() {
+		It("approves only the current ordinary pod UID before broker startup", func() {
+			claimName := "persistence-" + rabbitmqName.Name + "-server-0"
+			claim := CreateBoundPVC(namespace, claimName, "")
+			DeferCleanup(th.DeleteInstance, claim)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rabbitmqName.Name + "-server-0", Namespace: namespace,
+					Labels: map[string]string{"app.kubernetes.io/name": rabbitmqName.Name, "app.kubernetes.io/component": "rabbitmq"}},
+				Spec: corev1.PodSpec{
+					TerminationGracePeriodSeconds: ptr.To(int64(0)),
+					InitContainers:                []corev1.Container{{Name: "startup-gate", Image: "rabbitmq:4.2"}},
+					Containers:                    []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}},
+					Volumes: []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+					}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(th.DeleteInstance, pod)
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = int32(3)
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+			Eventually(func(g Gomega) {
+				current := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current)).To(Succeed())
+				g.Expect(current.Annotations).To(HaveKeyWithValue(rabbitmqv1.AnnotationStartupApproved, string(current.UID)))
+				g.Expect(GetRabbitMQStatefulSet(rabbitmqName).Spec.Template.Spec.InitContainers[0].Name).To(Equal("startup-gate"))
+			}, timeout, interval).Should(Succeed())
+		})
+
 		DescribeTable("admits ordinary pods and requires the serving selector", func(initialServing string) {
 			// Create the pre-existing pod before the CR, as on an operator upgrade.
 			pod := &corev1.Pod{
@@ -170,7 +200,7 @@ var _ = Describe("RabbitMQ Controller", func() {
 			Eventually(func(g Gomega) {
 				current := GetRabbitMQ(rabbitmqName)
 				current.Status.PVCRemediation = map[string]rabbitmqv1.PVCRemediationStatus{
-					claimName: {PVCUID: "deleted-original-uid", RequestID: "recovery-request", StuckNode: "worker-0", ConsentState: rabbitmqv1.PVCRemediationConsentGranted},
+					claimName: {PVCUID: "deleted-original-uid", RequestID: "recovery-request", StuckNode: "worker-0", ConsentState: rabbitmqv1.PVCRemediationConsentGranted, MemberRemovalState: rabbitmqv1.PVCRemediationMemberRemovalPending},
 				}
 				g.Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
@@ -194,6 +224,8 @@ var _ = Describe("RabbitMQ Controller", func() {
 				current := &corev1.Pod{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current)).To(Succeed())
 				g.Expect(current.Annotations).To(HaveKeyWithValue(rabbitmqv1.AnnotationRejoinCluster, "recovery-request"))
+				g.Expect(current.Annotations).NotTo(HaveKey(rabbitmqv1.AnnotationStartupApproved))
+				g.Expect(GetRabbitMQ(rabbitmqName).Status.PVCRemediation[claimName].MemberRemovalState).To(Equal(rabbitmqv1.PVCRemediationMemberRemovalPending))
 				g.Expect(current.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingFalse))
 				service := &corev1.Service{}
 				g.Expect(k8sClient.Get(ctx, rabbitmqName, service)).To(Succeed())

@@ -51,9 +51,9 @@ const (
 	AnnotationClientsReconfigured = "rabbitmq.openstack.org/clients-reconfigured"
 
 	// AnnotationRejoinCluster carries the PodRemediator request ID that authorizes
-	// the controller to repair this pod's cluster membership: forget the stale
-	// member from a surviving peer, then join this node back into the
-	// existing cluster. This is required because RabbitMQ 4.1+ designates the
+	// the controller to repair this pod's cluster membership. The old member is
+	// removed from a surviving peer before startup approval, then this pod can
+	// join as a fresh member. This is required because RabbitMQ 4.1+ designates the
 	// lowest-ordinal pod (server-0) as the peer-discovery seed node: if it is
 	// recreated with a blank data directory after a consented PVC replacement, it
 	// forms its own standalone cluster instead of rejoining. The request ID binds
@@ -61,12 +61,15 @@ const (
 	// the annotation after verifying cluster membership.
 	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
 
+	// AnnotationStartupApproved contains the UID of the pod allowed to start
+	// RabbitMQ. It is never set on the StatefulSet template.
+	AnnotationStartupApproved = "rabbitmq.openstack.org/startup-approved"
+
 	// RabbitMQServingLabel controls whether a pod is included in the client-facing
-	// Service. Every pod is created with the label set to "true" (pods serve by
-	// default, so operator downtime never removes a healthy pod from client
-	// traffic). The controller sets it to "false" only to hold a consented
-	// replacement out of client traffic until it has rejoined the cluster, then
-	// restores it to "true". The client Service selector requires serving=true.
+	// Service. Every new pod starts with serving=false. Ordinary pods are admitted
+	// after live claim/recovery checks; replacements wait for rejoin and queue
+	// recovery. Existing admitted pods retain their label through container and
+	// operator restarts. The client Service selector requires serving=true.
 	RabbitMQServingLabel = "rabbitmq.openstack.org/serving"
 
 	// RabbitMQServingTrue / RabbitMQServingFalse are the two values of RabbitMQServingLabel.
@@ -334,6 +337,12 @@ type PVCRemediationStatus struct {
 	// RequestID is the PodRemediator request whose consent authorized deletion
 	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
 	RequestID string `json:"requestID,omitempty"`
+	// ReplacementPVCUID binds member-removal progress to the replacement data.
+	ReplacementPVCUID string `json:"replacementPVCUID,omitempty"`
+	// MemberRemovalState records that the old broker and its queue replicas
+	// were removed before permitting the replacement RabbitMQ process to start.
+	// +kubebuilder:validation:Enum=Pending;Removed
+	MemberRemovalState PVCRemediationMemberRemovalState `json:"memberRemovalState,omitempty"`
 	// QueueReplicaState records whether quorum queue replicas have been grown
 	// on the replacement node.
 	// +kubebuilder:validation:Enum=Pending;Grown
@@ -347,6 +356,16 @@ type PVCRemediationStatus struct {
 
 // PVCRemediationConsentState records the safe-to-delete consent state for one PVC.
 type PVCRemediationConsentState string
+
+// PVCRemediationMemberRemovalState records the pre-start membership transition.
+type PVCRemediationMemberRemovalState string
+
+const (
+	// PVCRemediationMemberRemovalPending keeps the replacement startup gate closed.
+	PVCRemediationMemberRemovalPending PVCRemediationMemberRemovalState = "Pending"
+	// PVCRemediationMemberRemoved allows this replacement claim to join afresh.
+	PVCRemediationMemberRemoved PVCRemediationMemberRemovalState = "Removed"
+)
 
 const (
 	// PVCRemediationConsentPending means consent has not been granted.

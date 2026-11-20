@@ -2082,6 +2082,14 @@ spec:
                       - Pending
                       - Granted
                       type: string
+                    memberRemovalState:
+                      description: |-
+                        MemberRemovalState records that the old broker and its queue replicas
+                        were removed before permitting the replacement RabbitMQ process to start.
+                      enum:
+                      - Pending
+                      - Removed
+                      type: string
                     pvcUID:
                       description: |-
                         PVCUID identifies the claim tracked by this status entry. A replacement
@@ -2095,6 +2103,10 @@ spec:
                       enum:
                       - Pending
                       - Grown
+                      type: string
+                    replacementPVCUID:
+                      description: ReplacementPVCUID binds member-removal progress
+                        to the replacement data.
                       type: string
                     requestID:
                       description: |-

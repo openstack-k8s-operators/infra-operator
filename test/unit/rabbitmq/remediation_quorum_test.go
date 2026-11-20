@@ -57,6 +57,8 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 		wantConsent     bool
 		wantError       bool
 		failStatusPatch bool
+		readFails       bool
+		readOutput      string
 	}{
 		{
 			name:      "two-member quorum queue loses majority with candidate",
@@ -67,6 +69,18 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			name:        "three-member quorum queue retains majority",
 			queues:      `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
 			wantConsent: true,
+		},
+		{
+			name:      "online replicas without a working Ra quorum deny consent",
+			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			readFails: true,
+			wantError: true,
+		},
+		{
+			name:       "an unconfirmed Ra read denies consent",
+			queues:     `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			readOutput: "ok\n",
+			wantError:  true,
 		},
 		{
 			name:        "no queues retains broker quorum",
@@ -232,7 +246,14 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 				}
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: request}, nil
 			})
-			rabbitmqReconciler := &rabbitmqcontroller.Reconciler{Client: kubeClient, Scheme: scheme, ManagementHTTPClient: &http.Client{Transport: transport}}
+			executor := &fakeExec{quorumReadOutput: tc.readOutput}
+			if tc.readFails {
+				executor.quorumReadErr = fmt.Errorf("Ra group has no elected leader")
+			}
+			rabbitmqReconciler := &rabbitmqcontroller.Reconciler{
+				Client: kubeClient, Scheme: scheme,
+				ManagementHTTPClient: &http.Client{Transport: transport}, PodCommandExecutor: executor.run,
+			}
 			crHelper, err := helper.NewHelper(instance, kubeClient, nil, scheme, logr.Discard())
 			if err != nil {
 				t.Fatal(err)
