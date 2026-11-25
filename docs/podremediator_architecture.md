@@ -424,11 +424,11 @@ For most workloads, deleting the PVC is the end of the process: a fresh pod
 starts with empty storage and catches up. A clustered RabbitMQ broker cannot,
 for two reasons.
 
-**The cluster remembers the dead broker.** The surviving brokers still list it
-as a member, and every quorum queue still counts it when determining whether it
-has a majority. A queue with three replicas tolerates one loss, and while the
-cluster treats the dead member as potentially returning, it continues to
-reserve a place for it.
+**The RabbitMQ cluster remembers the dead broker.** The surviving brokers
+still list it as a member, and every quorum queue still counts it when
+determining whether it has a majority. A queue with three replicas tolerates
+one loss, and while the cluster treats the dead member as potentially
+returning, it continues to reserve a place for it.
 
 **A replacement pod has the same name but none of the data.** Kubernetes
 recreates `rabbitmq-server-0` with the same hostname and a new empty volume. If
@@ -574,13 +574,13 @@ the user-supplied file wins: setting
 disables CMR despite the operator's default.
 
 If CMR is disabled on a cluster that then goes through PVC remediation,
-recovery stops at step 4 and does not complete on its own. Nothing becomes
-unsafe — the replacement is simply never admitted to client traffic, and the
-cluster keeps serving from its remaining brokers — but it will not clear
-without intervention. The RabbitMq reports `Ready=False` with reason
-`NodeRejoinInProgress`, and the operator log names the queue still missing the
-replica. Re-enabling CMR, or growing the queue manually with
-`rabbitmq-queues grow <node> all`, lets the next reconcile finish the recovery.
+recovery stops at step 4 and does not complete on its own. The remaining
+brokers keep serving, and the replacement is not admitted to client traffic
+until recovery completes, but it will not clear without intervention. The
+RabbitMq reports `Ready=False` with reason `NodeRejoinInProgress`, and the
+operator log names the queue still missing the replica. Re-enabling CMR, or
+growing the queue manually with `rabbitmq-queues grow <node> all`, lets the
+next reconcile finish the recovery.
 
 Do not disable CMR on a cluster that takes part in PVC remediation.
 
