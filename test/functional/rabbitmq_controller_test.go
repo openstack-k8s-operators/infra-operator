@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"    //revive:disable:dot-imports
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	//revive:disable-next-line:dot-imports
 
@@ -126,6 +127,120 @@ var _ = Describe("RabbitMQ Controller", func() {
 				g.Expect(erlArgs).ToNot(ContainSubstring("-kernel inetrc"))
 			}, timeout, interval).Should(Succeed())
 
+		})
+	})
+
+	When("client Service admission is reconciled", func() {
+		BeforeEach(func() {
+			// The gate keys off a PodRemediator CR, not the CRD: without one
+			// none of this machinery is deployed.
+			DeferCleanup(th.DeleteInstance, EnablePVCRemediation(namespace))
+		})
+
+		It("approves only the current ordinary pod UID before broker startup", func() {
+			claimName := "persistence-" + rabbitmqName.Name + "-server-0"
+			claim := CreateBoundPVC(namespace, claimName, "")
+			DeferCleanup(th.DeleteInstance, claim)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rabbitmqName.Name + "-server-0", Namespace: namespace,
+					Labels: map[string]string{"app.kubernetes.io/name": rabbitmqName.Name, "app.kubernetes.io/component": "rabbitmq"}},
+				Spec: corev1.PodSpec{
+					TerminationGracePeriodSeconds: ptr.To(int64(0)),
+					InitContainers:                []corev1.Container{{Name: "startup-gate", Image: "rabbitmq:4.2"}},
+					Containers:                    []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}},
+					Volumes: []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+					}}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(th.DeleteInstance, pod)
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = int32(3)
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+			Eventually(func(g Gomega) {
+				current := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current)).To(Succeed())
+				g.Expect(current.Annotations).To(HaveKeyWithValue(rabbitmqv1.AnnotationStartupApproved, string(current.UID)))
+				g.Expect(GetRabbitMQStatefulSet(rabbitmqName).Spec.Template.Spec.InitContainers[0].Name).To(Equal("startup-gate"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		DescribeTable("admits ordinary pods and requires the serving selector", func(initialServing string) {
+			// Create the pre-existing pod before the CR, as on an operator upgrade.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: rabbitmqName.Name + "-server-0", Namespace: namespace,
+					Labels: map[string]string{"app.kubernetes.io/name": rabbitmqName.Name, "app.kubernetes.io/component": "rabbitmq"}},
+				Spec: corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(0)), Containers: []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}}},
+			}
+			if initialServing != "" {
+				pod.Labels[rabbitmqv1.RabbitMQServingLabel] = initialServing
+			}
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(th.DeleteInstance, pod)
+			// Multi-replica: a single broker has no quorum to protect, so it is
+			// deliberately left out of the admission machinery entirely.
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = int32(3)
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+			Eventually(func(g Gomega) {
+				current := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current)).To(Succeed())
+				g.Expect(current.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingTrue))
+				service := &corev1.Service{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, service)).To(Succeed())
+				g.Expect(service.Spec.Selector).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingTrue))
+				sts := GetRabbitMQStatefulSet(rabbitmqName)
+				g.Expect(sts.Spec.Template.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingFalse))
+			}, timeout, interval).Should(Succeed())
+		},
+			Entry("backfills a legacy pod without a serving label", ""),
+			Entry("admits an ordinary pod born outside client Services", rabbitmqv1.RabbitMQServingFalse),
+		)
+
+		It("keeps a recorded replacement outside client Services from creation", func() {
+			spec := GetDefaultRabbitMQSpec()
+			spec["replicas"] = int32(3)
+			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
+			DeferCleanup(th.DeleteInstance, rabbitmq)
+			Eventually(func(g Gomega) { g.Expect(GetRabbitMQStatefulSet(rabbitmqName)).NotTo(BeNil()) }, timeout, interval).Should(Succeed())
+			claimName := "persistence-" + rabbitmqName.Name + "-server-0"
+			Eventually(func(g Gomega) {
+				current := GetRabbitMQ(rabbitmqName)
+				current.Status.PVCRemediation = map[string]rabbitmqv1.PVCRemediationStatus{
+					claimName: {PVCUID: "deleted-original-uid", RequestID: "recovery-request", StuckNode: "worker-0", Phase: rabbitmqv1.PVCRemediationConsented},
+				}
+				g.Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+			// The shared helper removes pvc-protection: EnvTest has no
+			// kube-controller-manager to remove that finalizer during cleanup.
+			claim := CreateBoundPVC(namespace, claimName, "")
+			DeferCleanup(th.DeleteInstance, claim)
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(claim), claim)).To(Succeed())
+			claim.Labels = map[string]string{"app.kubernetes.io/name": rabbitmqName.Name}
+			Expect(k8sClient.Update(ctx, claim)).To(Succeed())
+			sts := GetRabbitMQStatefulSet(rabbitmqName)
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: rabbitmqName.Name + "-server-0", Namespace: namespace, Labels: sts.Spec.Template.Labels},
+				Spec: corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(0)), Containers: []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}}, Volumes: []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName}}}}},
+			}
+			Expect(pod.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingFalse))
+			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+			DeferCleanup(th.DeleteInstance, pod)
+			// Seeing the request annotation proves rejoin reconciliation ran;
+			// the replacement must still be held while its broker is not ready.
+			Eventually(func(g Gomega) {
+				current := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), current)).To(Succeed())
+				g.Expect(current.Annotations).To(HaveKeyWithValue(rabbitmqv1.AnnotationRejoinCluster, "recovery-request"))
+				g.Expect(current.Annotations).NotTo(HaveKey(rabbitmqv1.AnnotationStartupApproved))
+				g.Expect(GetRabbitMQ(rabbitmqName).Status.PVCRemediation[claimName].Phase).To(Equal(rabbitmqv1.PVCRemediationConsented))
+				g.Expect(current.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingFalse))
+				service := &corev1.Service{}
+				g.Expect(k8sClient.Get(ctx, rabbitmqName, service)).To(Succeed())
+				g.Expect(service.Spec.Selector).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingTrue))
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 
@@ -335,6 +450,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 
 			Eventually(func(g Gomega) {
 				instance := GetRabbitMQ(rabbitmqName)
+				// ObservedGeneration means the spec was fully applied, so it must
+				// not advance while a required input is missing.
+				g.Expect(instance.Status.ObservedGeneration).NotTo(Equal(instance.Generation))
 				g.Expect(instance.Status.Conditions.Has(condition.TLSInputReadyCondition)).To(BeTrue())
 				tlsCondition := instance.Status.Conditions.Get(condition.TLSInputReadyCondition)
 				g.Expect(tlsCondition.Status).To(Equal(corev1.ConditionFalse))
@@ -572,6 +690,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 
 	When("RabbitMQ per-pod services with podOverride", func() {
 		BeforeEach(func() {
+			// This case asserts the serving selector on per-pod Services, which
+			// is only applied where PVC remediation is configured.
+			DeferCleanup(th.DeleteInstance, EnablePVCRemediation(namespace))
 			spec := GetDefaultRabbitMQSpec()
 			spec["replicas"] = 3
 			spec["podOverride"] = map[string]any{
@@ -631,6 +752,9 @@ var _ = Describe("RabbitMQ Controller", func() {
 					g.Expect(svc.Annotations["metallb.universe.tf/loadBalancerIPs"]).To(Equal(expectedIPs[i]))
 					g.Expect(svc.Annotations["metallb.universe.tf/address-pool"]).To(Equal("internalapi"))
 					g.Expect(svc.Spec.Selector).To(HaveKeyWithValue("statefulset.kubernetes.io/pod-name", fmt.Sprintf("%s-server-%d", rabbitmqDefaultName, i)))
+					// A per-pod service must also require serving=true so a held
+					// replacement is removed from the transport-URL path.
+					g.Expect(svc.Spec.Selector).To(HaveKeyWithValue("rabbitmq.openstack.org/serving", "true"))
 				}
 			}, timeout, interval).Should(Succeed())
 		})

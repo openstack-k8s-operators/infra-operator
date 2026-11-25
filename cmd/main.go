@@ -353,22 +353,23 @@ func main() {
 	setupLog.Info("PodRemediator configured",
 		"consentPollInterval", podRemediatorConsentPoll,
 		"periodicPollInterval", podRemediatorPeriodicPoll)
+	rabbitmqReconciler := &rabbitmqcontroller.Reconciler{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+		Scheme: mgr.GetScheme(), Kclient: kclient,
+	}
 	if err := (&remediationcontroller.PodRemediatorReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
 		Kclient:              kclient,
 		DynamicClient:        dynamicClient,
+		ValidatePVCDeletion:  rabbitmqReconciler.ValidatePVCDeletion,
 		ConsentPollInterval:  podRemediatorConsentPoll,
 		PeriodicPollInterval: podRemediatorPeriodicPoll,
 	}).SetupWithManager(context.Background(), mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "PodRemediator")
 		os.Exit(1)
 	}
-	if err := (&rabbitmqcontroller.Reconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Kclient: kclient,
-	}).SetupWithManager(mgr); err != nil {
+	if err := rabbitmqReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RabbitMq")
 		os.Exit(1)
 	}

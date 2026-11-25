@@ -35,7 +35,7 @@ func baseRabbitMq() *rabbitmqv1.RabbitMq {
 func TestClientServiceNoOverride(t *testing.T) {
 	r := baseRabbitMq()
 
-	svc, err := ClientService(r)
+	svc, err := ClientService(r, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestClientServiceLoadBalancerClassOverride(t *testing.T) {
 		},
 	}
 
-	svc, err := ClientService(r)
+	svc, err := ClientService(r, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestClientServiceMultipleOverrides(t *testing.T) {
 		},
 	}
 
-	svc, err := ClientService(r)
+	svc, err := ClientService(r, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestClientServiceMetadataOverride(t *testing.T) {
 		},
 	}
 
-	svc, err := ClientService(r)
+	svc, err := ClientService(r, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestClientServiceUnsafeFieldsIgnored(t *testing.T) {
 		},
 	}
 
-	svc, err := ClientService(r)
+	svc, err := ClientService(r, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
