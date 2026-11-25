@@ -27,8 +27,10 @@ import (
 	"strings"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -48,7 +50,7 @@ type queueQuorumReadResult struct {
 	Vhost           string                   `json:"vhost"`
 	Name            string                   `json:"name"`
 	ExpectedMembers int                      `json:"expected_members"`
-	Acknowledged    int                      `json:"acknowledged"`
+	Acknowledged    []string                 `json:"acknowledged"`
 	Participants    []queueQuorumParticipant `json:"participants"`
 	Error           string                   `json:"error,omitempty"`
 }
@@ -146,8 +148,8 @@ func (r *Reconciler) verifyQueueQuorumReads(ctx context.Context, peer *corev1.Po
                     end,
                     VoterNodes=[B || #{node:=B,membership:=<<"voter">>,error:=false} <- Participants],
                     Acknowledged=fun(Overview) ->
-                        length([B || B<-VoterNodes,
-                            PeerQueryIndex(Overview,B)>BeforeQueryIndex])
+                        [B || B<-VoterNodes,
+                            PeerQueryIndex(Overview,B)>BeforeQueryIndex]
                     end,
                     Required=Expected div 2 + 1,
                     Await=fun F(0) ->
@@ -159,7 +161,7 @@ func (r *Reconciler) verifyQueueQuorumReads(ctx context.Context, peer *corev1.Po
                     F(Tries) ->
                         {ok,Overview,_}=erpc:call(Leader,ra,member_overview,
                             [{RaName,Leader},3000],4000),
-                        case Acknowledged(Overview) >= Required of
+                        case length(Acknowledged(Overview)) >= Required of
                             true ->
                                 #{vhost=>V,name=>N,expected_members=>Expected,
                                   acknowledged=>Acknowledged(Overview),
@@ -171,15 +173,15 @@ func (r *Reconciler) verifyQueueQuorumReads(ctx context.Context, peer *corev1.Po
                     end,
                     Await(20);
                 _ ->
-                    #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>0,
+                    #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>[],
                       participants=>[#{node=><<"heartbeat_error">>,error=>true}]}
             end;
         _ ->
-            #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>0,
+            #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>[],
               participants=>[#{node=><<"leader_error">>,error=>true}]}
     end
 catch C:R:S ->
-    #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>0,participants=>[],
+    #{vhost=>V,name=>N,expected_members=>Expected,acknowledged=>[],participants=>[],
       error=>iolist_to_binary(io_lib:format("~p",[{C,R,S}]))}
     end
 end,
@@ -215,8 +217,19 @@ Results=[Process(V,N,Expected,Nodes) || {V,N,Expected,Nodes}<-` + "[" + strings.
 			if result.Error != "" {
 				return fmt.Errorf("RabbitMq quorum queue %s/%s proof failed: %s", queue.Vhost, queue.Name, result.Error)
 			}
-			if result.Acknowledged < int(quorumOf(int32(result.ExpectedMembers))) {
-				return fmt.Errorf("RabbitMq quorum queue %s/%s lacks a candidate-excluded heartbeat majority: %d of %d", queue.Vhost, queue.Name, result.Acknowledged, result.ExpectedMembers)
+			required := result.ExpectedMembers/2 + 1
+			if result.ExpectedMembers <= 0 {
+				return fmt.Errorf("RabbitMq quorum queue %s/%s has invalid configured membership", queue.Vhost, queue.Name)
+			}
+			acknowledged := make(map[string]bool, len(result.Acknowledged))
+			for _, node := range result.Acknowledged {
+				if node == "" || acknowledged[node] {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s returned an invalid acknowledgement", queue.Vhost, queue.Name)
+				}
+				acknowledged[node] = true
+			}
+			if len(acknowledged) < required {
+				return fmt.Errorf("RabbitMq quorum queue %s/%s lacks a candidate-excluded heartbeat majority: %d of %d", queue.Vhost, queue.Name, len(acknowledged), result.ExpectedMembers)
 			}
 			groups := map[string][]queueQuorumParticipant{}
 			memberSet := make(map[string]bool, len(queue.Members))
@@ -239,16 +252,20 @@ Results=[Process(V,N,Expected,Nodes) || {V,N,Expected,Nodes}<-` + "[" + strings.
 				}
 				nodes := map[string]bool{}
 				leaders := 0
+				acknowledgedInGroup := 0
 				for _, participant := range group {
 					if nodes[participant.Node] {
 						return fmt.Errorf("queue survivor consensus returned duplicate node %s", participant.Node)
 					}
 					nodes[participant.Node] = true
+					if acknowledged[participant.Node] {
+						acknowledgedInGroup++
+					}
 					if participant.State == "leader" {
 						leaders++
 					}
 				}
-				if leaders <= 1 && len(nodes) >= quorumOf(int32(result.ExpectedMembers)) {
+				if leaders == 1 && len(nodes) >= required && acknowledgedInGroup >= required {
 					confirmed = true
 					break
 				}
@@ -360,10 +377,16 @@ func (r *Reconciler) ensurePodStartup(ctx context.Context, instance *rabbitmqv1.
 	// the surviving cluster, and only for the exact claim that removal targeted.
 	if recovery, exists := current.Status.PVCRemediation[pvcName]; exists &&
 		recovery.Consented() && string(claim.UID) != recovery.PVCUID {
-		if recovery.RequestID == "" || recovery.PVCUID == "" ||
-			!recovery.Phase.AtLeast(rabbitmqv1.PVCRemediationMemberRemoved) ||
-			recovery.ReplacementPVCUID != string(claim.UID) ||
-			live.Annotations[rabbitmqv1.AnnotationRejoinCluster] != recovery.RequestID {
+		// A recreated pod on the already verified replacement PVC needs only
+		// ordinary UID-scoped approval. Before Recovered, the exact removal
+		// request and rejoin authorization are still required.
+		verifiedReplacement := recovery.Phase.AtLeast(rabbitmqv1.PVCRemediationRecovered) &&
+			recovery.ReplacementPVCUID == string(claim.UID)
+		if !verifiedReplacement &&
+			(recovery.RequestID == "" || recovery.PVCUID == "" ||
+				!recovery.Phase.AtLeast(rabbitmqv1.PVCRemediationMemberRemoved) ||
+				recovery.ReplacementPVCUID != string(claim.UID) ||
+				live.Annotations[rabbitmqv1.AnnotationRejoinCluster] != recovery.RequestID) {
 			return false, false, nil
 		}
 	}
@@ -439,6 +462,48 @@ func (r *Reconciler) verifyOldQueueReplicasRemoved(ctx context.Context, instance
 		})
 }
 
+func (r *Reconciler) safeSurvivorNodes(
+	ctx context.Context,
+	instance *rabbitmqv1.RabbitMq,
+	targetName string,
+	pods []corev1.Pod,
+	running map[string]bool,
+) (map[string]bool, error) {
+	claims, err := r.rmqDataClaims(ctx, instance, r.safetyReader())
+	if err != nil {
+		return nil, err
+	}
+	stuck := rmqStuckNodes(claims)
+	claimsByName := make(map[string]*corev1.PersistentVolumeClaim, len(claims))
+	for i := range claims {
+		claimsByName[claims[i].Name] = &claims[i]
+	}
+	for name, entry := range instance.Status.PVCRemediation {
+		if !entry.Consented() || entry.StuckNode == "" {
+			continue
+		}
+		claim := claimsByName[name]
+		if claim != nil && claim.UID == types.UID(entry.PVCUID) && claim.DeletionTimestamp == nil &&
+			claim.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] == "" {
+			// The original claim is still governed by its live annotation.
+			continue
+		}
+		// Once the original claim is gone or past its commit boundary, retain
+		// the old node exclusion until replacement recovery completes.
+		stuck[entry.StuckNode] = true
+	}
+	safe := map[string]bool{}
+	for i := range pods {
+		pod := &pods[i]
+		nodeName := rmqNodeName(instance, pod.Name)
+		if pod.Name != targetName && pod.DeletionTimestamp == nil &&
+			podReady(pod) && !stuck[pod.Spec.NodeName] && running[nodeName] {
+			safe[nodeName] = true
+		}
+	}
+	return safe, nil
+}
+
 // removeOldMember runs only while the replacement cannot start RabbitMQ. The
 // original PVC deletion already required the generic controller's SNR fencing
 // barrier. If the old broker is nevertheless online, keep startup blocked.
@@ -481,23 +546,9 @@ func (r *Reconciler) removeOldMember(ctx context.Context, instance *rabbitmqv1.R
 	// in the same reconcile, so a claim annotated since the last status write
 	// has no entry yet. Commit-time validation reads the annotation directly,
 	// and the two must not disagree about who counts as a survivor.
-	claims, err := r.rmqDataClaims(ctx, instance, r.safetyReader())
+	safe, err := r.safeSurvivorNodes(ctx, instance, target.Name, pods, membership.Running)
 	if err != nil {
 		return err
-	}
-	safe := map[string]bool{}
-	stuck := rmqStuckNodes(claims)
-	for _, entry := range instance.Status.PVCRemediation {
-		if entry.StuckNode != "" {
-			stuck[entry.StuckNode] = true
-		}
-	}
-	for i := range pods {
-		p := &pods[i]
-		n := rmqNodeName(instance, p.Name)
-		if p.Name != target.Name && podReady(p) && !stuck[p.Spec.NodeName] && membership.Running[n] {
-			safe[n] = true
-		}
 	}
 	quorum := quorumOf(*instance.Spec.Replicas)
 	if len(safe) < quorum {
@@ -517,6 +568,24 @@ func (r *Reconciler) removeOldMember(ctx context.Context, instance *rabbitmqv1.R
 	queueErr := r.verifyOldQueueReplicasRemoved(ctx, instance, anchor, creds, oldNode)
 	if queueErr != nil && !errors.Is(queueErr, errOldQueueReplicaPresent) {
 		return queueErr
+	}
+	beforePods, err := r.rmqListPods(ctx, instance, r.safetyReader())
+	if err != nil {
+		return err
+	}
+	beforeMembership, err := r.clusterMembership(ctx, instance, anchor)
+	if err != nil {
+		return err
+	}
+	safeBefore, err := r.safeSurvivorNodes(ctx, instance, target.Name, beforePods, beforeMembership.Running)
+	if err != nil {
+		return err
+	}
+	if beforeMembership.Running[oldNode] || len(safeBefore) < quorum {
+		return fmt.Errorf("survivor membership changed before old-member removal")
+	}
+	if err := r.rmqQueuesSafeAfterDeletion(ctx, instance, anchor, creds, oldNode, safeBefore); err != nil {
+		return err
 	}
 	if members[oldNode] || errors.Is(queueErr, errOldQueueReplicaPresent) {
 		if _, err := r.rabbitmqctl(ctx, client.ObjectKeyFromObject(anchor), "forget_cluster_node", oldNode); err != nil {
@@ -541,15 +610,17 @@ func (r *Reconciler) removeOldMember(ctx context.Context, instance *rabbitmqv1.R
 	if err != nil {
 		return err
 	}
-	safeAfter := map[string]bool{}
-	for i := range afterPods {
-		p := &afterPods[i]
-		n := rmqNodeName(instance, p.Name)
-		if p.Name != target.Name && podReady(p) && !stuck[p.Spec.NodeName] && after.Running[n] {
-			safeAfter[n] = true
+	safeAfter, err := r.safeSurvivorNodes(ctx, instance, target.Name, afterPods, after.Running)
+	if err != nil {
+		return err
+	}
+	voters := 0
+	for node := range safeAfter {
+		if members[node] {
+			voters++
 		}
 	}
-	if after.Running[oldNode] || len(safeAfter) < quorum {
+	if after.Running[oldNode] || voters < quorum {
 		return fmt.Errorf("survivor membership changed after removal")
 	}
 	if err := r.rmqQueuesSafeAfterDeletion(ctx, instance, anchor, creds, oldNode, safeAfter); err != nil {

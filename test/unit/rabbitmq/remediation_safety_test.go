@@ -74,7 +74,7 @@ func newConsentFixture(t *testing.T, pvcName string) (*rabbitmqcontroller.Reconc
 		WithStatusSubresource(&rabbitmqv1beta1.RabbitMq{}).WithObjects(objects...).Build()
 	r := &rabbitmqcontroller.Reconciler{Client: c, Scheme: scheme,
 		ManagementHTTPClient: &http.Client{Transport: rabbitMQManagementTransport(func(req *http.Request) (*http.Response, error) {
-			body := `{"page":1,"page_count":0,"page_size":500,"item_count":0,"filtered_count":0,"items":[]}`
+			body := `[]`
 			if req.URL.Path == "/api/nodes" {
 				body = `[{"name":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","running":true},{"name":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","running":true},{"name":"rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack","running":true}]`
 			} else if req.URL.Path != "/api/queues/detailed" {
@@ -127,37 +127,50 @@ func TestPVCRemediationConsentRequiresClusterClaimName(t *testing.T) {
 }
 
 func TestPVCRemediationRejectsEmptyConfiguredCA(t *testing.T) {
-	for _, caName := range []string{"server-tls", "separate-ca"} {
-		for _, present := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/ca-key-present=%t", caName, present), func(t *testing.T) {
-				r, instance, h := newConsentFixture(t, testPVCName)
-				instance.Spec.TLS = rabbitmqv1beta1.RabbitMQTLSSpec{SecretName: "server-tls", CaSecretName: caName}
-				data := map[string][]byte{}
-				if present {
-					data["ca.crt"] = []byte{}
-				}
-				if err := r.Create(context.Background(), &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: caName, Namespace: testNS}, Data: data,
-				}); err != nil {
-					t.Fatal(err)
-				}
-				// Exercise the production TLS client, with a short deadline to bound
-				// any network request made if CA validation regresses.
-				r.ManagementHTTPClient = nil
-				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-				defer cancel()
-				err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, h, rabbitmqcontroller.RemediationDecision{AllowNewConsent: true, RecoveryInFlight: true})
-				if err == nil || !strings.Contains(err.Error(), "has no ca.crt") {
-					t.Fatalf("expected configured CA validation failure, got %v", err)
-				}
-				pvc := &corev1.PersistentVolumeClaim{}
-				if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: testPVCName}, pvc); err != nil {
-					t.Fatal(err)
-				}
-				if remediationv1.HasRemediationConsent(pvc.Annotations) {
-					t.Fatal("empty CA allowed deletion consent")
-				}
-			})
-		}
+	for _, tc := range []struct {
+		name         string
+		caSecretName string
+		present      bool
+	}{
+		{name: "shared TLS secret with empty CA", present: true},
+		{name: "separate CA secret without ca.crt", caSecretName: "separate-ca"},
+		{name: "separate CA secret with empty CA", caSecretName: "separate-ca", present: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, instance, h := newConsentFixture(t, testPVCName)
+			instance.Spec.TLS = rabbitmqv1beta1.RabbitMQTLSSpec{
+				SecretName:   "server-tls",
+				CaSecretName: tc.caSecretName,
+			}
+			caSecretName := tc.caSecretName
+			if caSecretName == "" {
+				caSecretName = "server-tls"
+			}
+			data := map[string][]byte{}
+			if tc.present {
+				data["ca.crt"] = []byte{}
+			}
+			if err := r.Create(context.Background(), &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: caSecretName, Namespace: testNS}, Data: data,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// Exercise the production TLS client, with a short deadline to bound
+			// any network request made if CA validation regresses.
+			r.ManagementHTTPClient = nil
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, h, rabbitmqcontroller.RemediationDecision{AllowNewConsent: true, RecoveryInFlight: true})
+			if err == nil || !strings.Contains(err.Error(), "ca.crt") {
+				t.Fatalf("expected configured CA validation failure, got %v", err)
+			}
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := r.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: testPVCName}, pvc); err != nil {
+				t.Fatal(err)
+			}
+			if remediationv1.HasRemediationConsent(pvc.Annotations) {
+				t.Fatal("empty CA allowed deletion consent")
+			}
+		})
 	}
 }

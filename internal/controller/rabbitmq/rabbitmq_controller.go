@@ -323,6 +323,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return
 		}
 	}()
+	previousObservedGeneration := instance.Status.ObservedGeneration
+	instance.Status.ObservedGeneration = instance.Generation
+	generationChanged := previousObservedGeneration != instance.Generation
 
 	//
 	// initialize status
@@ -346,6 +349,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Otherwise Init() would reset all conditions to Unknown on every reconciliation
 	if len(instance.Status.Conditions) == 0 {
 		instance.Status.Conditions.Init(&cl)
+	}
+	if generationChanged {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "Reconciling", condition.SeverityInfo,
+			"RabbitMQ is reconciling the requested generation"))
 	}
 	// Init Topology condition if there's a reference
 	if instance.Spec.TopologyRef != nil {
@@ -386,6 +394,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.RequestedReason,
 					condition.SeverityInfo,
 					condition.TLSInputReadyWaitingMessage, err.Error()))
+				inFlight, readErr := r.recoveryInFlight(ctx, instance)
+				if readErr != nil {
+					return ctrl.Result{}, readErr
+				}
+				if inFlight {
+					applied, applyErr := r.appliedRemediationInstance(ctx, instance)
+					if applyErr != nil {
+						return ctrl.Result{}, applyErr
+					}
+					requeue, rejoinErr := r.ReconcileNodeRejoin(ctx, applied, true)
+					instance.Status.PVCRemediation = applied.Status.PVCRemediation
+					if rejoinErr != nil {
+						Log.Info("Applied-TLS PVC recovery deferred", "reason", rejoinErr.Error())
+						return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+					}
+					if requeue {
+						return ctrl.Result{RequeueAfter: time.Second * 15}, nil
+					}
+					if bookkeepingErr := r.CheckForStuckPVCRequiringRemediation(ctx, applied, helper,
+						RemediationDecision{RecoveryInFlight: true}); bookkeepingErr != nil {
+						instance.Status.PVCRemediation = applied.Status.PVCRemediation
+						Log.Info("Applied-TLS PVC recovery bookkeeping deferred", "reason", bookkeepingErr.Error())
+						return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+					}
+					instance.Status.PVCRemediation = applied.Status.PVCRemediation
+					return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+				}
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -515,6 +550,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Phase flow: None → DeletingResources → WaitingForCluster → None
 	//
 	if requiresWipe && instance.Status.UpgradePhase == rabbitmqv1beta1.UpgradePhaseNone {
+		inFlight, err := r.recoveryInFlight(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if inFlight {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, "RecoveryWipeDeferred", condition.SeverityInfo,
+				"RabbitMQ storage wipe is deferred until PVC recovery completes"))
+			if err := helper.PatchInstance(ctx, instance); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
 		instance.Status.UpgradePhase = rabbitmqv1beta1.UpgradePhaseDeletingResources
 		Log.Info("Starting storage wipe", "reason", instance.Status.WipeReason)
 		if err := helper.PatchInstance(ctx, instance); err != nil {
@@ -533,6 +581,42 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	remediation, err := r.remediationDecisionFor(ctx, instance)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	deferSpecChange := (!rejoinEnabled(instance) && hasUnrecoveredRemediation(instance)) ||
+		scaleDownRemovesRecovery(instance)
+	if remediation.RecoveryInFlight && deferSpecChange {
+		applied, err := r.appliedRemediationInstance(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		syncRecoveryStatus := func() {
+			instance.Status.PVCRemediation = applied.Status.PVCRemediation
+		}
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "RecoverySpecChangeDeferred", condition.SeverityInfo,
+			"RabbitMQ spec changes that disable or resize active PVC recovery are deferred until recovery completes"))
+		Log.Info("Continuing PVC recovery with the applied StatefulSet spec",
+			"requestedReplicas", instance.Spec.Replicas, "appliedReplicas", applied.Spec.Replicas)
+		if !rejoinEnabled(applied) {
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		requeue, err := r.ReconcileNodeRejoin(ctx, applied, true)
+		syncRecoveryStatus()
+		if err != nil {
+			Log.Info("Applied-spec PVC recovery deferred", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		if requeue {
+			return ctrl.Result{RequeueAfter: time.Second * 15}, nil
+		}
+		err = r.CheckForStuckPVCRequiringRemediation(ctx, applied, helper,
+			RemediationDecision{RecoveryInFlight: true})
+		syncRecoveryStatus()
+		if err != nil {
+			Log.Info("Applied-spec PVC recovery bookkeeping deferred", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
 	keepMachinery := remediation.KeepMachinery()
 
@@ -911,6 +995,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Check StatefulSet readiness
 	instance.Status.ReadyCount = sts.Status.ReadyReplicas
 	clusterReady := common_statefulset.IsReady(*sts)
+	if !clusterReady {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			"RabbitMQ StatefulSet pods are not ready"))
+	}
 
 	// Putting the serving requirement into the per-pod Services cannot wait for
 	// the StatefulSet to be ready, because a remediation is precisely when it is
@@ -918,6 +1009,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// created before the machinery was switched on would keep selecting on pod
 	// name alone, and a held replacement would be one of its endpoints as soon
 	// as it went Ready. Reporting and LoadBalancer requeues stay with that pass.
+	var deferredRequeue ctrl.Result
+	var deferredServiceErr error
 	if !clusterReady && keepMachinery && perPodServicesConfigured(instance) {
 		if _, err := r.reconcilePerPodServices(ctx, instance, helper,
 			rabbitmq.CommonLabels(instance.Name), keepMachinery); err != nil {
@@ -926,7 +1019,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				condition.ErrorReason,
 				condition.SeverityWarning,
 				condition.CreateServiceReadyErrorMessage, err.Error()))
-			return ctrl.Result{}, err
+			deferredServiceErr = err
 		}
 	}
 
@@ -986,14 +1079,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.ErrorReason,
 					condition.SeverityWarning,
 					condition.CreateServiceReadyErrorMessage, err.Error()))
-				return ctrlResult, err
+				deferredRequeue = ctrlResult
+				deferredServiceErr = err
 			} else if (ctrlResult != ctrl.Result{}) {
 				instance.Status.Conditions.Set(condition.FalseCondition(
 					condition.CreateServiceReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
 					condition.CreateServiceReadyRunningMessage))
-				return ctrlResult, nil
+				deferredRequeue = ctrlResult
 			}
 		} else if len(instance.Status.ServiceHostnames) > 0 {
 			// PodOverride was removed, clean up per-pod services
@@ -1003,11 +1097,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.ErrorReason,
 					condition.SeverityWarning,
 					condition.CreateServiceReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
+				deferredServiceErr = err
+			} else {
+				instance.Status.ServiceHostnames = nil
 			}
-			instance.Status.ServiceHostnames = nil
 		}
-		instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+		if deferredServiceErr == nil && deferredRequeue == (ctrl.Result{}) {
+			instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+		}
 
 		// Sync Status.QueueType with Spec.QueueType
 		if instance.Spec.QueueType != nil {
@@ -1078,13 +1175,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 
-	// Mark ObservedGeneration only after the full reconciliation succeeds.
-	// This ensures consumers (e.g., OSCP) can trust that the controller has
-	// fully processed the spec at this generation. The PVC remediation steps
-	// below repair cluster membership; they do not apply spec changes, so
-	// deferring on them must not withhold the generation signal.
-	instance.Status.ObservedGeneration = instance.Generation
-
 	// Repair cluster membership before evaluating whether PVC recovery is complete.
 	// The operation is request-scoped by the pending PVC remediation record.
 	if requeue, err := r.ReconcileNodeRejoin(ctx, instance, remediation.RecoveryInFlight); err != nil {
@@ -1105,12 +1195,67 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Consent is fail-closed: when live quorum cannot be confirmed the check returns an
 	// error. We do not fail the CR, but we requeue so the handshake is retried instead of
 	// stalling until an unrelated watch event fires.
-	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, helper, remediation); err != nil {
+	consentDecision := remediation
+	if deferredServiceErr != nil {
+		consentDecision.AllowNewConsent = false
+	}
+	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, helper, consentDecision); err != nil {
 		Log.Info("PVC remediation consent deferred; requeuing", "reason", err.Error())
 		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
 
+	if deferredServiceErr != nil {
+		return ctrl.Result{}, deferredServiceErr
+	}
+	if deferredRequeue != (ctrl.Result{}) {
+		return deferredRequeue, nil
+	}
 	return ctrl.Result{}, nil
+}
+
+// appliedRemediationInstance describes the StatefulSet currently running, so
+// recovery can finish while a requested scale or version change is deferred.
+func (r *Reconciler) appliedRemediationInstance(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+) (*rabbitmqv1beta1.RabbitMq, error) {
+	applied := instance.DeepCopy()
+	sts := &appsv1.StatefulSet{}
+	key := types.NamespacedName{Name: instance.Name + "-server", Namespace: instance.Namespace}
+	if err := r.Get(ctx, key, sts); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			return applied, nil
+		}
+		return nil, fmt.Errorf("read applied RabbitMq StatefulSet: %w", err)
+	}
+	if sts.Spec.Replicas != nil {
+		applied.Spec.Replicas = ptr.To(*sts.Spec.Replicas)
+	}
+	applied.Spec.TargetVersion = nil
+	applied.Spec.TLS.SecretName = ""
+	applied.Spec.TLS.CaSecretName = ""
+	for _, volume := range sts.Spec.Template.Spec.Volumes {
+		if volume.Name != "rabbitmq-tls" || volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.Secret == nil {
+				continue
+			}
+			if source.Secret.Items == nil {
+				continue
+			}
+			for _, item := range source.Secret.Items {
+				switch item.Key {
+				case "tls.crt":
+					applied.Spec.TLS.SecretName = source.Secret.Name
+				case "ca.crt":
+					applied.Spec.TLS.CaSecretName = source.Secret.Name
+				}
+			}
+		}
+	}
+	return applied, nil
 }
 
 // perPodServicesConfigured reports whether the spec asks for one Service per
@@ -1794,17 +1939,15 @@ func (r *Reconciler) cleanupOldRabbitmqClusterCR(ctx context.Context, instance *
 }
 
 // IsRabbitmqPVC returns true when the object is a PVC belonging to a RabbitMq
-// StatefulSet. StatefulSet propagates only its selector label
-// (app.kubernetes.io/name) to volumeClaimTemplate PVCs, so component/part-of are
-// not available here; we additionally require the PVC name to match the
-// "persistence-<sts>-server-<ordinal>" shape the RabbitMQ volume claim template
-// produces, so unrelated PVCs that merely carry the name label are excluded.
+// StatefulSet. The canonical "persistence-<sts>-server-<ordinal>" name remains
+// authoritative when the editable app.kubernetes.io/name label is missing.
 func IsRabbitmqPVC(obj client.Object) bool {
 	clusterName := obj.GetLabels()[labels.K8sAppName]
-	if clusterName == "" {
-		return false
+	if clusterName != "" {
+		_, ok := rabbitMQClaimOrdinal(clusterName, obj.GetName())
+		return ok
 	}
-	_, ok := rabbitMQClaimOrdinal(clusterName, obj.GetName())
+	_, _, ok := rabbitMQClaimNameIdentity(obj.GetName())
 	return ok
 }
 
@@ -1854,9 +1997,9 @@ func rmqPodUpdatePredicate() predicate.Predicate {
 }
 
 // FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
-// The PVC label app.kubernetes.io/name equals the RabbitMq CR name directly.
+// The canonical claim name is used so a removed app label cannot hide the event.
 func (r *Reconciler) FindRabbitmqForPVC(_ context.Context, pvc client.Object) []reconcile.Request {
-	crName, ok := pvc.GetLabels()["app.kubernetes.io/name"]
+	crName, _, ok := rabbitMQClaimNameIdentity(pvc.GetName())
 	if !ok {
 		return nil
 	}
@@ -1895,14 +2038,21 @@ func rmqPVCOrdinal(name string) (int, bool) {
 	return n, true
 }
 
-// rmqReadyPods returns Running pods with all containers Ready, excluding pods on
-// stuck nodes and explicit pod names. A pod on a partitioned node can keep reporting
-// Ready for the node-monitor grace period, so it cannot count as a healthy survivor.
+// rmqReadyPods returns non-terminating Running pods with all containers Ready,
+// excluding pods on stuck nodes and explicit pod names. A pod on a partitioned
+// node can keep reporting Ready for the node-monitor grace period, so it cannot
+// count as a healthy survivor.
 func rmqReadyPods(pods []corev1.Pod, excludeNodes, excludePodNames map[string]bool) []corev1.Pod {
 	readyPods := make([]corev1.Pod, 0, len(pods))
 	for i := range pods {
 		pod := &pods[i]
 		if pod.Spec.NodeName == "" || excludeNodes[pod.Spec.NodeName] || excludePodNames[pod.Name] {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingFalse {
 			continue
 		}
 		if !podReady(pod) {
@@ -1936,15 +2086,6 @@ type rmqQueueStatus struct {
 	Online  []string `json:"online"`
 }
 
-type rmqQueuePage struct {
-	Page          *int             `json:"page"`
-	PageCount     *int             `json:"page_count"`
-	PageSize      *int             `json:"page_size"`
-	ItemCount     *int             `json:"item_count"`
-	FilteredCount *int             `json:"filtered_count"`
-	Items         []rmqQueueStatus `json:"items"`
-}
-
 // rmqLoadMgmtCreds reads the default-user secret (username/password) and, when TLS is
 // enabled, the CA secret used to verify the RabbitMQ management HTTP API endpoint.
 func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (*rmqMgmtCreds, error) {
@@ -1963,33 +2104,37 @@ func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1b
 	creds := &rmqMgmtCreds{username: user, password: pass}
 	if instance.Spec.TLS.SecretName != "" {
 		creds.tls = true
-		if instance.Spec.TLS.CaSecretName != "" {
-			caSecret := &corev1.Secret{}
-			if err := r.safetyReader().Get(ctx, types.NamespacedName{
-				Name:      instance.Spec.TLS.CaSecretName,
-				Namespace: instance.Namespace,
-			}, caSecret); err != nil {
-				return nil, fmt.Errorf("read CA secret %s: %w", instance.Spec.TLS.CaSecretName, err)
-			}
-			creds.caPEM = caSecret.Data["ca.crt"]
+		caSecretName := instance.Spec.TLS.CaSecretName
+		if caSecretName == "" {
+			caSecretName = instance.Spec.TLS.SecretName
 		}
+		caSecret := &corev1.Secret{}
+		if err := r.safetyReader().Get(ctx, types.NamespacedName{
+			Name:      caSecretName,
+			Namespace: instance.Namespace,
+		}, caSecret); err != nil {
+			return nil, fmt.Errorf("read CA secret %s: %w", caSecretName, err)
+		}
+		caPEM, present := caSecret.Data["ca.crt"]
+		if present && len(caPEM) == 0 {
+			return nil, fmt.Errorf("RabbitMq CA secret %s has an empty ca.crt", caSecretName)
+		}
+		if instance.Spec.TLS.CaSecretName != "" && !present {
+			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt", caSecretName)
+		}
+		creds.caPEM = caPEM
 	}
 	return creds, nil
 }
 
 // rmqManagementClient builds the HTTP client used for a RabbitMQ management-API
-// scan against a single pod. It is built once per scan so paginated reads reuse
-// one connection (and one TLS handshake) instead of dialing per page.
+// scan against a single pod. It is built once per scan so queue and node reads
+// reuse one connection and one TLS handshake.
 //
-// TLS verification policy:
-//   - caPEM present: verify against it.
-//   - caPEM empty but a CA secret was configured (including the TLS secret): fail closed
-//     (the named CA secret is missing ca.crt — a misconfiguration we must not paper
-//     over on a gate that authorizes destructive PVC deletion).
-//   - caPEM empty and no CA secret configured: this is the legitimate
-//     TLS-without-CA deployment. Skip verification for this internal,
-//     cluster-local probe, but log it so it is auditable.
-func (r *Reconciler) rmqManagementClient(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (*http.Client, error) {
+// TLS verification uses the configured CA when present and the system roots
+// otherwise. The management API carries credentials and its response can
+// authorize destructive PVC deletion, so verification failures block consent.
+func (r *Reconciler) rmqManagementClient(_ context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (*http.Client, error) {
 	if r.ManagementHTTPClient != nil {
 		return r.ManagementHTTPClient, nil
 	}
@@ -2009,13 +2154,6 @@ func (r *Reconciler) rmqManagementClient(ctx context.Context, instance *rabbitmq
 			tlsCfg.RootCAs = pool
 		case instance.Spec.TLS.CaSecretName != "":
 			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt; cannot verify the management endpoint", instance.Spec.TLS.CaSecretName)
-		default:
-			// No CA secret configured: nothing to verify against.
-			// Skip verification for this internal probe, but make it auditable.
-			log.FromContext(ctx).Info(
-				"RabbitMq management probe skipping TLS verification (no CA material available); set spec.tls.caSecretName to enable verification",
-				"instance", instance.Name, "pod", pod.Name)
-			tlsCfg.InsecureSkipVerify = true
 		}
 		transport.TLSClientConfig = tlsCfg
 	}
@@ -2092,13 +2230,13 @@ func (r *Reconciler) rmqClusterNodes(ctx context.Context, instance *rabbitmqv1be
 	return nodes, nil
 }
 
-// scanQueues iterates every queue from GET /api/queues/detailed on the given pod,
-// validating the pagination envelope and de-duplicating queues, and invokes
-// perQueue for each one. It builds a single HTTP client so paginated reads reuse
-// one connection. perQueue may return an error to abort the scan; "soft"
-// conditions a caller wants to evaluate only after a complete pass (e.g. a
-// queue still missing a replica) should be recorded in the closure and checked
-// after scanQueues returns nil. An empty cluster returns nil.
+// scanQueues reads every queue from one GET /api/queues/detailed response,
+// de-duplicating the result before invoking perQueue. A single response avoids
+// page-offset races that could omit a queue when the queue set changed between
+// requests. perQueue may return an error to abort the scan; "soft" conditions a
+// caller wants to evaluate only after a complete pass (e.g. a queue still
+// missing a replica) should be recorded in the closure and checked after
+// scanQueues returns nil. An empty cluster returns nil.
 func (r *Reconciler) scanQueues(
 	ctx context.Context,
 	instance *rabbitmqv1beta1.RabbitMq,
@@ -2111,61 +2249,30 @@ func (r *Reconciler) scanQueues(
 	if err != nil {
 		return err
 	}
+	var queues []rmqQueueStatus
+	path := "/api/queues/detailed?columns=" + columns
+	if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, path, &queues); err != nil {
+		return err
+	}
+	if queues == nil {
+		return fmt.Errorf("RabbitMq queue scan did not return an array")
+	}
 	seenQueues := map[string]bool{}
-	expectedPages := 0
-	expectedItems := 0
-	scannedItems := 0
-	for page := 1; page <= 100; page++ {
-		var queues rmqQueuePage
-		path := fmt.Sprintf("/api/queues/detailed?pagination=true&page=%d&page_size=500&columns=%s", page, columns)
-		if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, path, &queues); err != nil {
+	for i := range queues {
+		queue := queues[i]
+		if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
+			return fmt.Errorf("RabbitMq queue scan has a queue without name, vhost, or type")
+		}
+		key := queue.Vhost + "\x00" + queue.Name
+		if seenQueues[key] {
+			return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
+		}
+		seenQueues[key] = true
+		if err := perQueue(queue); err != nil {
 			return err
 		}
-		if queues.Page == nil || *queues.Page != page || queues.PageCount == nil ||
-			queues.PageSize == nil || *queues.PageSize != 500 || queues.ItemCount == nil ||
-			queues.FilteredCount == nil || queues.Items == nil ||
-			*queues.ItemCount != len(queues.Items) || *queues.FilteredCount < 0 {
-			return fmt.Errorf("RabbitMq queue page %d has incomplete pagination data", page)
-		}
-		if *queues.PageCount == 0 && page == 1 && *queues.ItemCount == 0 && *queues.FilteredCount == 0 {
-			return nil
-		}
-		if *queues.PageCount < page || *queues.PageCount > 100 ||
-			*queues.PageCount != (*queues.FilteredCount+499)/500 {
-			return fmt.Errorf("RabbitMq queue page %d has invalid pagination data", page)
-		}
-		if expectedPages == 0 {
-			expectedPages = *queues.PageCount
-			expectedItems = *queues.FilteredCount
-		} else if *queues.PageCount != expectedPages || *queues.FilteredCount != expectedItems {
-			return fmt.Errorf("RabbitMq queue pagination changed during scan")
-		}
-		if page < *queues.PageCount && len(queues.Items) != 500 {
-			return fmt.Errorf("RabbitMq queue page %d is incomplete", page)
-		}
-		scannedItems += len(queues.Items)
-		for i := range queues.Items {
-			queue := queues.Items[i]
-			if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
-				return fmt.Errorf("RabbitMq queue page %d has a queue without name, vhost, or type", page)
-			}
-			key := queue.Vhost + "\x00" + queue.Name
-			if seenQueues[key] {
-				return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
-			}
-			seenQueues[key] = true
-			if err := perQueue(queue); err != nil {
-				return err
-			}
-		}
-		if page == *queues.PageCount {
-			if scannedItems != expectedItems {
-				return fmt.Errorf("RabbitMq queue pagination returned %d of %d queues", scannedItems, expectedItems)
-			}
-			return nil
-		}
 	}
-	return fmt.Errorf("RabbitMq queue pagination exceeds 100 pages")
+	return nil
 }
 
 // quorumQueueMembers validates and returns the configured-member and online-member
@@ -2235,18 +2342,25 @@ func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *r
 				}
 				return nil
 			case "quorum":
-				members, _, err := quorumQueueMembers(queue)
+				members, online, err := quorumQueueMembers(queue)
 				if err != nil {
 					return err
 				}
 				survivors := 0
+				onlineSurvivors := 0
 				for member := range members {
 					if safeNodes[member] {
 						survivors++
 					}
+					if safeNodes[member] && online[member] {
+						onlineSurvivors++
+					}
 				}
 				if survivors < quorumOf(int32(len(members))) {
 					return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe members of %d", queue.Vhost, queue.Name, survivors, len(members))
+				}
+				if onlineSurvivors < quorumOf(int32(len(members))) {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s has too few online safe members: %d of %d", queue.Vhost, queue.Name, onlineSurvivors, len(members))
 				}
 				quorumQueues = append(quorumQueues, queue)
 				return nil
@@ -2341,7 +2455,7 @@ func (r *Reconciler) podRemediatorScopeFor(ctx context.Context, namespace string
 		return scope, fmt.Errorf("checking whether the PodRemediator CRD is installed: %w", err)
 	}
 	list := &remediationv1.PodRemediatorList{}
-	if err := r.Client.List(ctx, list); err != nil {
+	if err := r.List(ctx, list); err != nil {
 		if apimeta.IsNoMatchError(err) {
 			return scope, nil
 		}
@@ -2429,24 +2543,31 @@ func (r *Reconciler) rmqClusterView(
 	if err != nil {
 		return nil, fmt.Errorf("loading RabbitMq management credentials: %w", err)
 	}
-	anchor := &survivors[0]
-	nodes, err := r.rmqClusterNodes(ctx, instance, anchor, creds)
-	if err != nil {
-		return nil, fmt.Errorf("reading live RabbitMq cluster state from %s: %w", anchor.Name, err)
-	}
-	running := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
-		if node.Running {
-			running[node.Name] = true
+	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	var lastErr error
+	for i := range survivors {
+		anchor := &survivors[i]
+		nodes, err := r.rmqClusterNodes(probeCtx, instance, anchor, creds)
+		if err != nil {
+			lastErr = fmt.Errorf("from %s: %w", anchor.Name, err)
+			continue
 		}
+		running := make(map[string]bool, len(nodes))
+		for _, node := range nodes {
+			if node.Running {
+				running[node.Name] = true
+			}
+		}
+		return &clusterView{
+			Survivors:    survivors,
+			Anchor:       anchor,
+			Creds:        creds,
+			Nodes:        nodes,
+			RunningNodes: running,
+		}, nil
 	}
-	return &clusterView{
-		Survivors:    survivors,
-		Anchor:       anchor,
-		Creds:        creds,
-		Nodes:        nodes,
-		RunningNodes: running,
-	}, nil
+	return nil, fmt.Errorf("reading live RabbitMq cluster state from any ready survivor failed: %w", lastErr)
 }
 
 // safeNodes returns the RabbitMQ node names of the survivors that the cluster
@@ -2738,7 +2859,19 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 			recovery := newRemediationStatus[name]
 			replacementClaim := claim != nil && claim.DeletionTimestamp == nil &&
 				recovery.PVCUID != "" && string(claim.UID) != recovery.PVCUID
-			if replacementClaim && pod != nil && podUsesPVC(pod, name) && podReady(pod) && view.RunningNodes[replacementNode] {
+			if recovery.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationMemberRemoved) &&
+				replacementClaim &&
+				recovery.ReplacementPVCUID != string(claim.UID) {
+				Log.Info("Replacement PVC changed after recovery; requiring a fresh rejoin",
+					"pvc", name, "previousPVCUID", recovery.ReplacementPVCUID, "pvcUID", claim.UID)
+				recovery.Phase = rabbitmqv1beta1.PVCRemediationConsented
+				recovery.ReplacementPVCUID = ""
+				newRemediationStatus[name] = recovery
+				stillRecovering = append(stillRecovering, name)
+				continue
+			}
+			if replacementClaim && pod != nil && podUsesPVC(pod, name) &&
+				podReady(pod) && view.RunningNodes[replacementNode] {
 				delete(newRemediationStatus, name)
 				if current, exists := observedRemediationStatus[name]; exists {
 					newRemediationStatus[name] = current

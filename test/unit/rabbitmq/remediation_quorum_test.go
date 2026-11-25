@@ -59,83 +59,85 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 		failStatusPatch bool
 		readFails       bool
 		readOutput      string
+		wantErrorText   string
 	}{
 		{
 			name:      "two-member quorum queue loses majority with candidate",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]}`,
+			queues:    `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]`,
 			wantError: true,
 		},
 		{
 			name:        "three-member quorum queue retains majority",
-			queues:      `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			queues:      `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]`,
 			wantConsent: true,
 		},
 		{
 			name:      "online replicas without a working Ra quorum deny consent",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			queues:    `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]`,
 			readFails: true,
 			wantError: true,
 		},
 		{
 			name:       "an unconfirmed Ra read denies consent",
-			queues:     `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			queues:     `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]`,
 			readOutput: "ok\n",
 			wantError:  true,
 		},
 		{
 			name:        "no queues retains broker quorum",
-			queues:      `{"page":1,"page_count":0,"page_size":500,"item_count":0,"filtered_count":0,"items":[]}`,
+			queues:      `[]`,
 			wantConsent: true,
 		},
 		{
 			name:            "status recovery record is persisted before deletion consent",
-			queues:          `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			queues:          `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]`,
 			wantError:       true,
 			failStatusPatch: true,
 		},
 		{
 			name:      "missing queue membership fails closed",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum"}]}`,
+			queues:    `[{"name":"jobs","vhost":"/","type":"quorum"}]`,
 			wantError: true,
 		},
 		{
-			name:      "truncated queue pagination fails closed",
-			queues:    `{"page":1,"page_count":2,"page_size":500,"item_count":0,"filtered_count":501,"items":[]}`,
+			name:      "null queue response fails closed",
+			queues:    `null`,
 			wantError: true,
 		},
 		{
 			name:      "candidate stream member fails closed",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"events","vhost":"/","type":"stream","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]}`,
+			queues:    `[{"name":"events","vhost":"/","type":"stream","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]`,
 			wantError: true,
 		},
 		{
 			name:      "candidate-hosted durable classic queue denies consent",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","durable":true}]}`,
+			queues:    `[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","durable":true}]`,
 			wantError: true,
 		},
 		{
 			name:        "durable classic queue hosted by survivor permits consent",
-			queues:      `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","durable":true}]}`,
+			queues:      `[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","durable":true}]`,
 			wantConsent: true,
 		},
 		{
 			name:      "durable classic queue with missing host denies consent",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","durable":true}]}`,
+			queues:    `[{"name":"legacy","vhost":"/","type":"classic","durable":true}]`,
 			wantError: true,
 		},
 		{
 			name:      "classic queue with unknown durability denies consent",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"}]}`,
+			queues:    `[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"}]`,
 			wantError: true,
 		},
 		{
-			name:      "missing item count fails closed",
-			queues:    `{"page":1,"page_count":0,"page_size":500,"filtered_count":0,"items":[]}`,
-			wantError: true,
+			name:          "duplicate queue fails closed",
+			queues:        `[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","durable":true},{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","durable":true}]`,
+			wantError:     true,
+			wantErrorText: "appears more than once",
 		},
 		{
-			name:      "incomplete single page fails closed",
-			queues:    `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":2,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`,
+			name:      "queue without identity fails closed",
+			queues:    `[{"type":"classic","durable":false}]`,
 			wantError: true,
 		},
 	}
@@ -236,9 +238,9 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 					body = `[{"name":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","running":true},{"name":"rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","running":true},{"name":"rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack","running":true}]`
 				case "/api/queues/detailed":
 					queueRequests++
-					if request.URL.Query().Get("page") != "1" || request.URL.Query().Get("page_size") != "500" ||
+					if request.URL.Query().Get("page") != "" || request.URL.Query().Get("page_size") != "" ||
 						!strings.Contains(request.URL.Query().Get("columns"), "node,durable") {
-						return nil, fmt.Errorf("unexpected queue pagination %s", request.URL.RawQuery)
+						return nil, fmt.Errorf("unexpected queue query %s", request.URL.RawQuery)
 					}
 					body = tc.queues
 				default:
@@ -262,11 +264,14 @@ func TestPVCRemediationConsentChecksQueueMembership(t *testing.T) {
 			if tc.wantError && err == nil {
 				t.Fatal("expected queue safety failure")
 			}
+			if tc.wantErrorText != "" && !strings.Contains(err.Error(), tc.wantErrorText) {
+				t.Fatalf("queue safety error = %v, want %q", err, tc.wantErrorText)
+			}
 			if !tc.wantError && err != nil {
 				t.Fatalf("unexpected queue safety failure: %v", err)
 			}
-			if queueRequests == 0 {
-				t.Fatal("queue membership was not queried")
+			if queueRequests != 1 {
+				t.Fatalf("queue scan issued %d requests, want exactly one", queueRequests)
 			}
 			if tc.wantConsent && consentPatches != 1 || !tc.wantConsent && consentPatches != 0 {
 				t.Fatalf("consent patch count = %d, want consent %v", consentPatches, tc.wantConsent)
@@ -330,11 +335,21 @@ func TestPVCRemediationConsentRequiresHealthySurvivorQuorum(t *testing.T) {
 		{
 			name:       "survivor with ready containers but held out of serving does not count",
 			replicas:   3,
-			readyCount: 2,
+			readyCount: 3,
 			pods: []corev1.Pod{
 				readyRabbitMQPod("rabbitmq-server-0", "worker-0"),
 				rejoinPendingRabbitMQPod("rabbitmq-server-1", "worker-1"),
-				unavailableRabbitMQPod("rabbitmq-server-2", "worker-2"),
+				readyRabbitMQPod("rabbitmq-server-2", "worker-2"),
+			},
+		},
+		{
+			name:       "terminating survivor does not count",
+			replicas:   3,
+			readyCount: 3,
+			pods: []corev1.Pod{
+				readyRabbitMQPod("rabbitmq-server-0", "worker-0"),
+				readyRabbitMQPod("rabbitmq-server-1", "worker-1"),
+				terminatingRabbitMQPod("rabbitmq-server-2", "worker-2"),
 			},
 		},
 	}
@@ -376,7 +391,10 @@ func TestPVCRemediationConsentRequiresHealthySurvivorQuorum(t *testing.T) {
 			for i := range tc.pods {
 				pod := tc.pods[i].DeepCopy()
 				pod.Namespace = namespace
-				pod.Labels = map[string]string{"app.kubernetes.io/name": instance.Name}
+				if pod.Labels == nil {
+					pod.Labels = map[string]string{}
+				}
+				pod.Labels["app.kubernetes.io/name"] = instance.Name
 				objects = append(objects, pod)
 			}
 			kubeClient := fake.NewClientBuilder().
@@ -407,8 +425,10 @@ func TestPVCRemediationConsentRequiresHealthySurvivorQuorum(t *testing.T) {
 
 func readyRabbitMQPod(name, nodeName string) corev1.Pod {
 	return corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       corev1.PodSpec{NodeName: nodeName},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{
+			rabbitmqv1beta1.RabbitMQServingLabel: rabbitmqv1beta1.RabbitMQServingTrue,
+		}},
+		Spec: corev1.PodSpec{NodeName: nodeName},
 		Status: corev1.PodStatus{
 			Phase:             corev1.PodRunning,
 			Conditions:        []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
@@ -419,12 +439,17 @@ func readyRabbitMQPod(name, nodeName string) corev1.Pod {
 
 func rejoinPendingRabbitMQPod(name, nodeName string) corev1.Pod {
 	pod := readyRabbitMQPod(name, nodeName)
-	// A replacement held out of client traffic (serving=false) is not Ready, so it
-	// must not be counted as a healthy survivor for consent.
+	// A replacement can have a ready broker process while being held out of
+	// client traffic. It must not count as a healthy survivor for consent.
 	pod.Labels = map[string]string{rabbitmqv1beta1.RabbitMQServingLabel: rabbitmqv1beta1.RabbitMQServingFalse}
-	pod.Status.Conditions = []corev1.PodCondition{
-		{Type: corev1.PodReady, Status: corev1.ConditionFalse},
-	}
+	return pod
+}
+
+func terminatingRabbitMQPod(name, nodeName string) corev1.Pod {
+	pod := readyRabbitMQPod(name, nodeName)
+	deletedAt := metav1.Now()
+	pod.DeletionTimestamp = &deletedAt
+	pod.Finalizers = []string{"test.example/hold"}
 	return pod
 }
 

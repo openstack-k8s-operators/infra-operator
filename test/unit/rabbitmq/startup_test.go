@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,8 +30,11 @@ import (
 	"time"
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
+	rabbitmqcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
 	rabbitmqresources "github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -94,26 +98,65 @@ func TestStartupScriptRequiresItsOwnPodUID(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := strings.ReplaceAll(gate.Args[0], "/etc/pod-info/startupApproved", approval)
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	signal := filepath.Join(t.TempDir(), "gate-read")
+	wrapper := "#!/bin/sh\n: > \"$STARTUP_GATE_READ_SIGNAL\"\nexec " + catPath + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "cat"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "sh", "-c", script)
-	command.Env = append(os.Environ(), "POD_UID=current-pod-uid")
+	command.Env = append(os.Environ(),
+		"POD_UID=current-pod-uid",
+		"PATH="+wrapperDir+":"+os.Getenv("PATH"),
+		"STARTUP_GATE_READ_SIGNAL="+signal,
+	)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = command.Process.Kill() }()
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
-	select {
-	case err := <-done:
-		t.Fatalf("an older pod's permission released startup: %v", err)
-	case <-time.After(150 * time.Millisecond):
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("startup exited before reading the stale UID: %v", err)
+		case <-deadline.C:
+			t.Fatal("startup gate did not perform its first approval read")
+		case <-ticker.C:
+			if _, err := os.Stat(signal); err == nil {
+				goto staleRead
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
 	}
+
+staleRead:
+	if !deadline.Stop() {
+		<-deadline.C
+	}
+	deadline.Reset(3 * time.Second)
 	if err := os.WriteFile(approval, []byte("current-pod-uid"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("matching pod UID did not release startup: %v", err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("matching pod UID did not release startup: %v", err)
+		}
+	case <-deadline.C:
+		t.Fatal("matching pod UID did not release startup before the deadline")
 	}
 }
 
@@ -288,7 +331,8 @@ func TestStartupRemovalDoesNotCountCandidateInQueueMajority(t *testing.T) {
 		}
 		queues = append(queues, map[string]interface{}{
 			"vhost": "/", "name": queue, "expected_members": len(members),
-			"acknowledged": 1, "participants": results,
+			"acknowledged": []string{node(testName + "-server-1")},
+			"participants": results,
 		})
 	}
 	encoded, err := json.Marshal(queues)
@@ -323,6 +367,10 @@ func TestQueueConsensusProofCountsOnlySafeVoters(t *testing.T) {
 		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
 		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
 	})
+	fx.consistent = map[string][]string{
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	}
 	instance := rawRecovery()
 	r := newReconciler(t, fx, instance, gatedReplacement(), replacementPVC(newPVCUID),
 		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
@@ -342,33 +390,98 @@ func TestQueueConsensusProofCountsOnlySafeVoters(t *testing.T) {
 	if !strings.Contains(proof, `VoterNodes=[B || #{node:=B,membership:=<<"voter">>,error:=false} <- Participants]`) {
 		t.Fatal("queue consensus proof must select only live voters")
 	}
-	if !strings.Contains(proof, `length([B || B<-VoterNodes,`) {
+	if !strings.Contains(proof, `[B || B<-VoterNodes,`) {
 		t.Fatal("queue consensus acknowledgements must count only the selected voters")
 	}
 }
 
+func TestQueueConsensusProofRequiresAcknowledgingConsistentGroup(t *testing.T) {
+	nodes := make([]string, 0, 5)
+	for ordinal := 0; ordinal < 5; ordinal++ {
+		nodes = append(nodes, node(fmt.Sprintf("%s-server-%d", testName, ordinal)))
+	}
+	running := map[string][]string{}
+	consistent := map[string][]string{}
+	for ordinal := 0; ordinal < 5; ordinal++ {
+		running[fmt.Sprintf("%s-server-%d", testName, ordinal)] = append([]string(nil), nodes[1:]...)
+		consistent[fmt.Sprintf("%s-server-%d", testName, ordinal)] = append([]string(nil), nodes...)
+	}
+	fx := newFakeExecWithQuorumQueues(running)
+	fx.consistent = consistent
+	fx.quorumQueueMembers = map[string]map[string]bool{"jobs": {}}
+	fx.quorumQueueOnline = map[string]map[string]bool{"jobs": {}}
+	for _, member := range nodes {
+		fx.quorumQueueMembers["jobs"][member] = true
+		fx.quorumQueueOnline["jobs"][member] = true
+	}
+	participants := []map[string]interface{}{}
+	for ordinal := 1; ordinal < 5; ordinal++ {
+		state := "follower"
+		term := 1
+		if ordinal == 1 {
+			state = "leader"
+		}
+		if ordinal == 4 {
+			term = 2
+		}
+		participants = append(participants, map[string]interface{}{
+			"node": nodes[ordinal], "error": false, "state": state, "membership": "voter",
+			"term": term, "leader": nodes[1], "members": 5,
+		})
+	}
+	encoded, err := json.Marshal([]map[string]interface{}{{
+		"vhost": "/", "name": "jobs", "expected_members": 5,
+		"acknowledged": []string{nodes[1], nodes[2], nodes[4]}, "participants": participants,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.quorumReadOutput = "QUEUE_CONSENSUS=" + string(encoded) + "\nok\n"
+	instance := instanceWithRecovery(5)
+	r := newReconciler(t, fx, instance, gatedReplacement(), replacementPVC(newPVCUID),
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true),
+		clusterPod(testName+"-server-3", true), clusterPod(testName+"-server-4", true))
+
+	if _, err := r.ReconcileNodeRejoin(context.Background(), instance, true); err == nil ||
+		!strings.Contains(err.Error(), "lacks a safe Ra majority") {
+		t.Fatalf("acknowledgements from a different consistency group must fail: %v", err)
+	}
+}
+
 func TestStartupRemovalRefusesOnlineOldMemberOrUnsafeQueues(t *testing.T) {
-	for _, scenario := range []string{"old member online", "queue below quorum"} {
+	for _, scenario := range []string{"old member online", "queue below quorum", "terminating survivor"} {
 		t.Run(scenario, func(t *testing.T) {
 			fx := newFakeExecWithQuorumQueues(map[string][]string{
 				testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
 				testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
 			})
-			if scenario == "old member online" {
+			switch scenario {
+			case "old member online":
 				for peer := range fx.running {
 					fx.running[peer] = append(fx.running[peer], node(testName+"-server-0"))
 					fx.configured[peer] = append(fx.configured[peer], node(testName+"-server-0"))
 				}
-			} else {
+			case "queue below quorum":
 				fx.quorumQueueMembers["orders"][node(testName+"-server-0")] = true
 				delete(fx.quorumQueueOnline["orders"], node(testName+"-server-2"))
 				fx.quorumReadErr = errors.New("safe queue replica cannot participate")
 			}
 			instance := rawRecovery()
 			target := gatedReplacement()
-			r := newReconciler(t, fx, instance, target, replacementPVC(newPVCUID),
-				clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
-			if _, err := r.ReconcileNodeRejoin(context.Background(), instance, true); err == nil {
+			server1 := clusterPod(testName+"-server-1", true)
+			server2 := clusterPod(testName+"-server-2", true)
+			if scenario == "terminating survivor" {
+				deletedAt := metav1.Now()
+				server2.Finalizers = []string{"test.example/hold"}
+				server2.DeletionTimestamp = &deletedAt
+			}
+			r := newReconciler(t, fx, instance, target, replacementPVC(newPVCUID), server1, server2)
+			requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+			if scenario == "terminating survivor" {
+				if err != nil || !requeue {
+					t.Fatalf("terminating survivor should defer removal, requeue=%v err=%v", requeue, err)
+				}
+			} else if err == nil {
 				t.Fatal("expected unsafe removal to fail closed")
 			}
 			got := &corev1.Pod{}
@@ -377,6 +490,71 @@ func TestStartupRemovalRefusesOnlineOldMemberOrUnsafeQueues(t *testing.T) {
 			}
 			if got.Annotations[startupApproval] != "" || fx.orderOf("forget_cluster_node") >= 0 {
 				t.Fatalf("unsafe recovery opened startup or changed membership: %v", fx.calls)
+			}
+		})
+	}
+}
+
+func TestStartupRemovalRechecksLiveSurvivorState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *rabbitmqcontroller.Reconciler, *corev1.PersistentVolumeClaim, *corev1.Pod)
+	}{
+		{name: "claim marked stuck", mutate: func(t *testing.T, r *rabbitmqcontroller.Reconciler, claim *corev1.PersistentVolumeClaim, _ *corev1.Pod) {
+			live := &corev1.PersistentVolumeClaim{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(claim), live); err != nil {
+				t.Fatal(err)
+			}
+			live.Annotations = map[string]string{remediationv1.PVCStuckOnNodeAnnotation: "worker-2"}
+			if err := r.Update(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "survivor starts terminating", mutate: func(t *testing.T, r *rabbitmqcontroller.Reconciler, _ *corev1.PersistentVolumeClaim, pod *corev1.Pod) {
+			live := &corev1.Pod{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(pod), live); err != nil {
+				t.Fatal(err)
+			}
+			live.Finalizers = []string{"test.example/hold"}
+			if err := r.Update(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFakeExecWithQuorumQueues(map[string][]string{
+				testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+				testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+			})
+			fx.consistent = map[string][]string{
+				testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+				testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+			}
+			for queue := range fx.quorumQueueMembers {
+				fx.quorumQueueMembers[queue][node(testName+"-server-0")] = true
+			}
+			instance := rawRecovery()
+			replacement := replacementPVC(newPVCUID)
+			stuckClaim := replacementPVC("server-2-pvc")
+			stuckClaim.Name = "persistence-" + testName + "-server-2"
+			stuckClaim.Labels = map[string]string{"app.kubernetes.io/name": testName}
+			server1 := clusterPod(testName+"-server-1", true)
+			server1.Spec.NodeName = "worker-1"
+			server2 := clusterPod(testName+"-server-2", true)
+			server2.Spec.NodeName = "worker-2"
+			r := newReconciler(t, fx, instance, gatedReplacement(), replacement, stuckClaim,
+				server1, server2)
+			fx.afterForget = func() { tc.mutate(t, r, stuckClaim, server2) }
+
+			if _, err := r.ReconcileNodeRejoin(context.Background(), instance, true); err == nil ||
+				!strings.Contains(err.Error(), "survivor membership changed") {
+				t.Fatalf("%s during removal must reduce the post-removal survivor set, got %v", tc.name, err)
+			}
+			if instance.Status.PVCRemediation[testPVCName].Phase != rabbitmqv1.PVCRemediationConsented {
+				t.Fatal("removal must not be recorded when the refreshed survivor count is below quorum")
 			}
 		})
 	}
@@ -438,5 +616,29 @@ func TestStartupApprovalRequiresTheDurableRecoveryRequest(t *testing.T) {
 				t.Fatal("a withdrawn or different recovery record authorized startup")
 			}
 		})
+	}
+}
+
+func TestRecoveredReplacementRecreatedPodCanStart(t *testing.T) {
+	instance := instanceAfterRecovery(3)
+	target := gatedReplacement()
+	delete(target.Annotations, rabbitmqv1.AnnotationRejoinCluster)
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	r := newReconciler(t, fx, instance, target, replacementPVC(newPVCUID),
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
+
+	if _, err := r.ReconcileNodeRejoin(context.Background(), instance, true); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(target), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Annotations[startupApproval] != string(current.UID) {
+		t.Fatal("a recreated pod on the recovered replacement PVC must receive UID-scoped startup approval")
 	}
 }

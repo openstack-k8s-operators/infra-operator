@@ -17,6 +17,7 @@ limitations under the License.
 package rabbitmq_test
 
 import (
+	"context"
 	"testing"
 
 	rabbitmqcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
@@ -81,10 +82,10 @@ func TestIsRabbitmqPVC(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "no name label is rejected",
+			name:   "canonical claim without name label is accepted",
 			labels: map[string]string{},
 			objenc: "persistence-rabbitmq-server-0",
-			want:   false,
+			want:   true,
 		},
 		{
 			name:   "persistence prefix without server ordinal is rejected",
@@ -112,5 +113,16 @@ func TestIsRabbitmqPVC(t *testing.T) {
 				t.Fatalf("IsRabbitmqPVC(%q, %v) = %v, want %v", tc.objenc, tc.labels, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFindRabbitmqForPVCDoesNotRequireAppLabel(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name:      "persistence-rabbitmq-server-2",
+		Namespace: "openstack",
+	}}
+	requests := (&rabbitmqcontroller.Reconciler{}).FindRabbitmqForPVC(context.Background(), pvc)
+	if len(requests) != 1 || requests[0].Name != "rabbitmq" || requests[0].Namespace != "openstack" {
+		t.Fatalf("PVC event mapped to %+v", requests)
 	}
 }

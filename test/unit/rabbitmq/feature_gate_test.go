@@ -363,7 +363,7 @@ func TestDisabledPodRemediatorGrantsNoNewConsent(t *testing.T) {
 func TestRecoveryRecordClearsWhileDisabled(t *testing.T) {
 	ctx := context.Background()
 	r, instance, h := newConsentFixture(t, testPVCName)
-	instance.Status.PVCRemediation = instanceWithRecovery(3).Status.PVCRemediation
+	instance.Status.PVCRemediation = instanceAfterRecovery(3).Status.PVCRemediation
 
 	// The replacement claim is in place under a new UID and its pod is back in
 	// the cluster, which is what finishes the recovery.
@@ -413,6 +413,11 @@ func TestPerPodServicesRequireServingBeforeTheClusterIsReady(t *testing.T) {
 		Services: []service.OverrideSpec{{}, {}, {}},
 	}
 	r, c := gateFixture(t, fx, instance, enabledPodRemediator())
+	existing := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: testName + "-server-0", Namespace: testNS},
+		Spec: corev1.ServiceSpec{Selector: map[string]string{appsv1.StatefulSetPodNameLabel: testName + "-server-0"}}}
+	if err := c.Create(context.Background(), existing); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := reconcileOnce(t, r); err != nil {
 		t.Fatalf("reconcile failed: %v", err)
@@ -432,6 +437,9 @@ func TestPerPodServicesRequireServingBeforeTheClusterIsReady(t *testing.T) {
 		}
 		if got := svc.Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
 			t.Errorf("per-pod Service %s must require serving=true, selector value %q", name, got)
+		}
+		if got := svc.Spec.Selector[appsv1.StatefulSetPodNameLabel]; got != name {
+			t.Errorf("per-pod Service %s must select only its own pod, selector value %q", name, got)
 		}
 	}
 }
@@ -583,11 +591,42 @@ func TestRecoverySurvivesPodRemediatorCRRemoval(t *testing.T) {
 	if !hasStartupGateContainer(sts) {
 		t.Error("the startup gate must stay deployed while a consented replacement is unrecovered")
 	}
-	if sts.Spec.Template.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == "" {
-		t.Error("the serving label must stay on the pod template while a replacement is unrecovered")
+	if got := sts.Spec.Template.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingFalse {
+		t.Errorf("pod template serving=%q, want %q while a replacement is unrecovered",
+			got, rabbitmqv1beta1.RabbitMQServingFalse)
 	}
-	if _, ok := clientService(t, c).Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; !ok {
-		t.Error("the client Service must keep requiring serving=true while a replacement is unrecovered")
+	if got := clientService(t, c).Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
+		t.Errorf("client Service serving selector=%q, want %q while a replacement is unrecovered",
+			got, rabbitmqv1beta1.RabbitMQServingTrue)
+	}
+}
+
+func TestLiveDeletionConsentKeepsMachineryWithoutPodRemediator(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceWithRecovery(3)
+	claim := replacementPVC(oldPVCUID)
+	claim.Annotations = map[string]string{
+		remediationv1.RequestIDAnnotation:    testRequestID,
+		remediationv1.SafeToDeleteAnnotation: "true",
+		remediationv1.ConsentIDAnnotation:    testRequestID,
+	}
+	r, c := gateFixture(t, fx, instance, claim)
+
+	if err := reconcileOnce(t, r); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	sts := serverStatefulSet(t, c)
+	if !hasStartupGateContainer(sts) {
+		t.Error("live deletion consent must keep the startup gate deployed")
+	}
+	if got := sts.Spec.Template.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingFalse {
+		t.Errorf("pod template serving=%q, want false", got)
+	}
+	if got := clientService(t, c).Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
+		t.Errorf("client Service serving selector=%q, want true", got)
 	}
 }
 

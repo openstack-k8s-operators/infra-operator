@@ -167,14 +167,14 @@ func (d RemediationDecision) KeepMachinery() bool {
 //
 // A lookup error must not turn into a false: see podRemediatorScopeFor.
 func (r *Reconciler) remediationDecisionFor(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (RemediationDecision, error) {
-	if !rejoinEnabled(instance) {
-		return RemediationDecision{}, nil
-	}
-	scope, err := r.podRemediatorScopeFor(ctx, instance.Namespace)
+	inFlight, err := r.recoveryInFlight(ctx, instance)
 	if err != nil {
 		return RemediationDecision{}, err
 	}
-	inFlight, err := r.recoveryInFlight(ctx, instance)
+	if !rejoinEnabled(instance) {
+		return RemediationDecision{RecoveryInFlight: inFlight}, nil
+	}
+	scope, err := r.podRemediatorScopeFor(ctx, instance.Namespace)
 	if err != nil {
 		return RemediationDecision{}, err
 	}
@@ -230,11 +230,39 @@ func (r *Reconciler) recoveryInFlight(ctx context.Context, instance *rabbitmqv1b
 		}
 		if recovery.PVCUID == "" || string(claim.UID) != recovery.PVCUID ||
 			claim.DeletionTimestamp != nil ||
-			claim.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] != "" {
+			claim.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] != "" ||
+			remediationv1.HasRemediationConsent(claim.Annotations) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// hasUnrecoveredRemediation reports whether a consented record still needs
+// member removal or rejoin. Recovered records only await status release and
+// must not block an otherwise safe spec change forever.
+func hasUnrecoveredRemediation(instance *rabbitmqv1beta1.RabbitMq) bool {
+	for _, recovery := range instance.Status.PVCRemediation {
+		if recovery.Consented() && !recovery.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationRecovered) {
+			return true
+		}
+	}
+	return false
+}
+
+// scaleDownRemovesRecovery reports whether the requested replica count would
+// delete the ordinal currently represented by an unreleased recovery record.
+func scaleDownRemovesRecovery(instance *rabbitmqv1beta1.RabbitMq) bool {
+	if instance.Spec.Replicas == nil {
+		return false
+	}
+	for name, recovery := range instance.Status.PVCRemediation {
+		ordinal, ok := rmqPVCOrdinal(name)
+		if ok && recovery.Consented() && ordinal >= int(*instance.Spec.Replicas) {
+			return true
+		}
+	}
+	return false
 }
 
 // podReady reports whether a pod is Running with its PodReady condition true.
@@ -316,9 +344,9 @@ func (r *Reconciler) heldReplacementPods(
 // controller has admitted it to client traffic: a held replacement is always
 // excluded, and any other pod is admitted once its startup is approved.
 //
-// It reports whether anything changed. A patch conflict counts as a change: the
-// pod moved under us, and because the Pod watch predicate filters out routine
-// kubelet updates the caller must requeue rather than wait for an event.
+// It reports whether anything changed. A patch conflict is returned as an error:
+// the pod changed between the safety checks and admission, so the caller must
+// start a fresh reconcile rather than approving the object it originally read.
 func (r *Reconciler) admitPods(
 	ctx context.Context,
 	instance *rabbitmqv1beta1.RabbitMq,
@@ -378,13 +406,17 @@ func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rab
 // agree on are only two. Admitting on that would put a replacement into client
 // Services on the strength of a membership view no quorum actually shares, so
 // count only the nodes present in both.
-func rejoinAgreed(anchor, target clusterMembership, anchorNode, targetNode string, quorum int) bool {
+//
+// The two cluster_status reads are not atomic. Recounting after targetNode is
+// read narrows the stale-view window, but changes between that final anchor
+// read and the serving-label patch remain possible.
+func rejoinAgreed(anchor, target clusterMembership, anchorNode, targetNode string, safe map[string]bool, quorum int) bool {
 	if !anchor.Running[targetNode] || !target.Running[anchorNode] {
 		return false
 	}
 	common := 0
 	for node := range target.Running {
-		if anchor.Running[node] {
+		if anchor.Running[node] && (node == targetNode || safe[node]) {
 			common++
 		}
 	}
@@ -596,7 +628,8 @@ func (r *Reconciler) ReconcileNodeRejoin(
 			continue
 		}
 		requestID := instance.Status.PVCRemediation[replacement.PVCName].RequestID
-		if requestID == "" || pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != requestID {
+		if replacement.ReplacementUID == "" || requestID == "" ||
+			pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != requestID {
 			continue
 		}
 		target = pod
@@ -608,6 +641,20 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	}
 	quorum := quorumOf(*instance.Spec.Replicas)
 	targetNode := rmqNodeName(instance, target.Name)
+	creds, err := r.rmqLoadMgmtCreds(ctx, instance)
+	if err != nil {
+		return true, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	probeDeadline, hasDeadline := probeCtx.Deadline()
+	eligiblePeers := 0
+	for i := range pods {
+		if pods[i].Name != target.Name && podReady(&pods[i]) {
+			eligiblePeers++
+		}
+	}
+	remediation := instance.Status.PVCRemediation[targetPVCName]
 	var anchor *corev1.Pod
 	var anchorMembership clusterMembership
 	for i := range pods {
@@ -615,15 +662,51 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		if peer.Name == target.Name || !podReady(peer) {
 			continue
 		}
-		membership, err := r.clusterMembership(ctx, instance, peer)
+		if !hasDeadline || eligiblePeers == 0 {
+			break
+		}
+		peerTimeout := min(15*time.Second, time.Until(probeDeadline))
+		eligiblePeers--
+		if peerTimeout <= 0 {
+			break
+		}
+		peerCtx, peerCancel := context.WithTimeout(probeCtx, peerTimeout)
+		membership, err := r.clusterMembership(peerCtx, instance, peer)
 		if err != nil {
+			peerCancel()
 			log.Info("Could not read cluster status from candidate peer", "pod", peer.Name, "error", err.Error())
 			continue
 		}
-		if len(membership.Running) >= quorum {
-			anchor, anchorMembership = peer, membership
-			break
+		if len(membership.Running) < quorum {
+			peerCancel()
+			continue
 		}
+		safePeers, err := r.safeSurvivorNodes(ctx, instance, target.Name, pods, membership.Running)
+		if err != nil {
+			peerCancel()
+			return true, err
+		}
+		sufficient := len(safePeers) >= quorum
+		if !sufficient && remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationMemberRemoved) &&
+			remediation.ReplacementPVCUID != "" && podRabbitMQContainerReady(target) {
+			targetMembership, targetErr := r.clusterMembership(peerCtx, instance, target)
+			if targetErr == nil {
+				sufficient = rejoinAgreed(membership, targetMembership,
+					rmqNodeName(instance, peer.Name), targetNode, safePeers, quorum)
+			}
+		}
+		if !sufficient {
+			peerCancel()
+			continue
+		}
+		if _, err := r.rmqClusterNodes(peerCtx, instance, peer, creds); err != nil {
+			peerCancel()
+			log.Info("Could not reach candidate peer management API", "pod", peer.Name, "error", err.Error())
+			continue
+		}
+		peerCancel()
+		anchor, anchorMembership = peer, membership
+		break
 	}
 	if anchor == nil {
 		log.Info("No ready RabbitMQ peer has quorum; deferring rejoin", "pod", target.Name, "quorum", quorum)
@@ -632,10 +715,25 @@ func (r *Reconciler) ReconcileNodeRejoin(
 
 	targetName := types.NamespacedName{Namespace: target.Namespace, Name: target.Name}
 	anchorNode := rmqNodeName(instance, anchor.Name)
-	remediation := instance.Status.PVCRemediation[targetPVCName]
 	claim := &corev1.PersistentVolumeClaim{}
-	if err := r.safetyReader().Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: targetPVCName}, claim); err != nil {
+	err = r.safetyReader().Get(ctx, client.ObjectKey{Namespace: instance.Namespace, Name: targetPVCName}, claim)
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
 		return true, err
+	}
+	if claim.DeletionTimestamp != nil {
+		return true, nil
+	}
+	if remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationMemberRemoved) &&
+		remediation.ReplacementPVCUID != string(claim.UID) {
+		log.Info("Replacement PVC changed during recovery; requiring fresh member-removal proof",
+			"pod", target.Name, "previousPVCUID", remediation.ReplacementPVCUID, "pvcUID", claim.UID)
+		remediation.Phase = rabbitmqv1beta1.PVCRemediationConsented
+		remediation.ReplacementPVCUID = ""
+		instance.Status.PVCRemediation[targetPVCName] = remediation
+		return true, nil
 	}
 	if !remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationMemberRemoved) ||
 		remediation.ReplacementPVCUID != string(claim.UID) {
@@ -653,8 +751,25 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	if err != nil {
 		return true, fmt.Errorf("reading target cluster status: %w", err)
 	}
-	if rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, quorum) {
-		return true, r.finishNodeRejoin(ctx, instance, target, targetPVCName, remediation.RequestID)
+	anchorMembership, err = r.clusterMembership(ctx, instance, anchor)
+	if err != nil {
+		return true, fmt.Errorf("re-reading anchor cluster status: %w", err)
+	}
+	anchorPods, err := r.rmqListPods(ctx, instance, r.safetyReader())
+	if err != nil {
+		return true, err
+	}
+	safeAnchor, err := r.safeSurvivorNodes(ctx, instance, target.Name, anchorPods, anchorMembership.Running)
+	if err != nil {
+		return true, err
+	}
+	if rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, safeAnchor, quorum) {
+		return true, r.finishNodeRejoin(ctx, instance, target, anchor, targetPVCName,
+			remediation.RequestID, anchorNode, quorum)
+	}
+	if len(safeAnchor) < quorum {
+		log.Info("Anchor lost quorum; deferring rejoin", "pod", target.Name, "anchor", anchor.Name, "quorum", quorum)
+		return true, nil
 	}
 	if anchorMembership.Running[targetNode] {
 		// The anchor sees this node as online, but the target does not report
@@ -674,20 +789,29 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		return true, fmt.Errorf("joining RabbitMQ node %s to %s: %w", target.Name, anchorNode, err)
 	}
 
-	anchorMembership, err = r.clusterMembership(ctx, instance, anchor)
-	if err != nil {
-		return true, fmt.Errorf("verifying rejoin via anchor: %w", err)
-	}
 	targetMembership, err = r.clusterMembership(ctx, instance, target)
 	if err != nil {
 		return true, fmt.Errorf("verifying target cluster status after rejoin: %w", err)
 	}
-	if !rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, quorum) {
+	anchorMembership, err = r.clusterMembership(ctx, instance, anchor)
+	if err != nil {
+		return true, fmt.Errorf("verifying rejoin via anchor: %w", err)
+	}
+	postJoinPods, err := r.rmqListPods(ctx, instance, r.safetyReader())
+	if err != nil {
+		return true, err
+	}
+	safeAfterJoin, err := r.safeSurvivorNodes(ctx, instance, target.Name, postJoinPods, anchorMembership.Running)
+	if err != nil {
+		return true, err
+	}
+	if !rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, safeAfterJoin, quorum) {
 		log.Info("RabbitMQ membership is not yet consistent after join", "target", target.Name)
 		return true, nil
 	}
 	log.Info("RabbitMQ replacement rejoined its cluster", "node", targetNode, "requestID", target.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster])
-	return true, r.finishNodeRejoin(ctx, instance, target, targetPVCName, remediation.RequestID)
+	return true, r.finishNodeRejoin(ctx, instance, target, anchor, targetPVCName,
+		remediation.RequestID, anchorNode, quorum)
 }
 
 // verifyQuorumQueueReplicasOnline keeps the replacement behind its readiness gate
@@ -746,8 +870,11 @@ func (r *Reconciler) finishNodeRejoin(
 	ctx context.Context,
 	instance *rabbitmqv1beta1.RabbitMq,
 	pod *corev1.Pod,
+	anchor *corev1.Pod,
 	pvcName string,
 	requestID string,
+	anchorNode string,
+	quorum int,
 ) error {
 	remediation, ok := instance.Status.PVCRemediation[pvcName]
 	if !ok || !remediation.Consented() || remediation.RequestID != requestID || requestID == "" {
@@ -760,14 +887,39 @@ func (r *Reconciler) finishNodeRejoin(
 	// observes the result: until CMR has added this node to every quorum queue
 	// and those replicas are online, the replacement stays out of client
 	// Services and the caller requeues.
+	targetMembership, err := r.clusterMembership(ctx, instance, pod)
+	if err != nil {
+		return fmt.Errorf("rechecking target membership before admission: %w", err)
+	}
+	if anchor == nil {
+		return fmt.Errorf("RabbitMq anchor disappeared before serving admission")
+	}
+	anchorMembership, err := r.clusterMembership(ctx, instance, anchor)
+	if err != nil {
+		return fmt.Errorf("rechecking anchor membership before admission: %w", err)
+	}
+	anchorPods, err := r.rmqListPods(ctx, instance, r.safetyReader())
+	if err != nil {
+		return err
+	}
+	safe, err := r.safeSurvivorNodes(ctx, instance, pod.Name, anchorPods, anchorMembership.Running)
+	if err != nil {
+		return err
+	}
+	if !rejoinAgreed(anchorMembership, targetMembership, anchorNode, nodeName, safe, quorum) {
+		return fmt.Errorf("RabbitMq membership changed before serving admission")
+	}
+	// Kubernetes, RabbitMQ membership, and the management API cannot be read
+	// atomically. Observe queue replica health after membership and immediately
+	// before the serving patch, leaving only that unavoidable race window.
 	if err := r.verifyQuorumQueueReplicasOnline(ctx, instance, pod, nodeName); err != nil {
 		return fmt.Errorf("verifying quorum queue replicas on %s: %w", pod.Name, err)
 	}
-	remediation.Phase = rabbitmqv1beta1.PVCRemediationRecovered
-	instance.Status.PVCRemediation[pvcName] = remediation
 	if _, err := r.setPodServing(ctx, pod, true); err != nil {
 		return err
 	}
+	remediation.Phase = rabbitmqv1beta1.PVCRemediationRecovered
+	instance.Status.PVCRemediation[pvcName] = remediation
 	return r.clearRejoinAnnotation(ctx, pod)
 }
 
@@ -793,9 +945,7 @@ func (r *Reconciler) setPodServing(ctx context.Context, pod *corev1.Pod, serving
 	// an unchecked pod as serving.
 	err := r.Patch(ctx, pod, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	if apierrors.IsConflict(err) {
-		// The pod moved under us. Report a change so the caller re-reads it,
-		// rather than failing a reconcile over an ordinary kubelet update.
-		return true, nil
+		return false, fmt.Errorf("setting serving label on pod %s: %w", pod.Name, err)
 	}
 	if err != nil {
 		return false, fmt.Errorf("setting serving label on pod %s: %w", pod.Name, err)

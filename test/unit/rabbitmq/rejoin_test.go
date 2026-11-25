@@ -40,6 +40,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -94,6 +95,7 @@ type fakeExec struct {
 	consistent        map[string][]string // optional leader membership, independent of the local cache
 	quorumReadErr     error
 	quorumReadOutput  string
+	afterForget       func()
 }
 
 // applyCMR models Continuous Membership Reconciliation running inside the
@@ -102,7 +104,18 @@ type fakeExec struct {
 func (f *fakeExec) applyCMR() {
 	// CMR only grows queues onto nodes that are part of the cluster, so a
 	// forgotten member is never reconciled back in.
-	if f.cmrNode == "" || !f.isRunningNode(f.cmrNode) {
+	visibleFromSurvivor := false
+	for pod, nodes := range f.running {
+		if node(pod) == f.cmrNode {
+			continue
+		}
+		for _, member := range nodes {
+			if member == f.cmrNode {
+				visibleFromSurvivor = true
+			}
+		}
+	}
+	if f.cmrNode == "" || !visibleFromSurvivor {
 		return
 	}
 	for queue, members := range f.quorumQueueMembers {
@@ -111,19 +124,6 @@ func (f *fakeExec) applyCMR() {
 			f.quorumQueueOnline[queue][f.cmrNode] = true
 		}
 	}
-}
-
-// isRunningNode reports whether any broker still reports nodeName as a running
-// cluster member.
-func (f *fakeExec) isRunningNode(nodeName string) bool {
-	for _, nodes := range f.running {
-		for _, member := range nodes {
-			if member == nodeName {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config, podName types.NamespacedName,
@@ -155,6 +155,9 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 		for queue := range f.quorumQueueMembers {
 			delete(f.quorumQueueMembers[queue], staleNode)
 			delete(f.quorumQueueOnline[queue], staleNode)
+		}
+		if f.afterForget != nil {
+			f.afterForget()
 		}
 	}
 	if command == "rabbitmqctl" && len(args) >= 1 && args[0] == "join_cluster" {
@@ -222,7 +225,7 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 					Vhost           string        `json:"vhost"`
 					Name            string        `json:"name"`
 					ExpectedMembers int           `json:"expected_members"`
-					Acknowledged    int           `json:"acknowledged"`
+					Acknowledged    []string      `json:"acknowledged"`
 					Participants    []participant `json:"participants"`
 				}
 				queuePattern := regexp.MustCompile(`\{base64:decode\(<<"([A-Za-z0-9+/=]*)">>\),base64:decode\(<<"([A-Za-z0-9+/=]*)">>\),([0-9]+),\[((?:base64:decode\(<<"[A-Za-z0-9+/=]*">>\),?)*)\]\}`)
@@ -232,25 +235,50 @@ func (f *fakeExec) run(_ context.Context, _ kubernetes.Interface, _ *rest.Config
 				for _, match := range matches {
 					vhostBytes, _ := base64.StdEncoding.DecodeString(match[1])
 					nameBytes, _ := base64.StdEncoding.DecodeString(match[2])
-					expected, _ := strconv.Atoi(match[3])
+					queueName := string(nameBytes)
+					declaredExpected, _ := strconv.Atoi(match[3])
 					nodeMatches := nodePattern.FindAllStringSubmatch(match[4], -1)
 					nodes := make([]string, 0, len(nodeMatches))
 					for _, nodeMatch := range nodeMatches {
 						decoded, _ := base64.StdEncoding.DecodeString(nodeMatch[1])
 						nodes = append(nodes, string(decoded))
 					}
-					item := result{Vhost: string(vhostBytes), Name: string(nameBytes), ExpectedMembers: expected, Acknowledged: len(nodes)}
-					leader := nodes[len(nodes)-1]
-					for _, current := range nodes {
-						item.Participants = append(item.Participants, participant{
-							Node: current, Membership: "voter", Term: 1,
-							Leader: leader, Members: expected,
-						})
-						if current == leader {
-							item.Participants[len(item.Participants)-1].State = "leader"
-						} else {
-							item.Participants[len(item.Participants)-1].State = "follower"
+					actualMembers := f.quorumQueueMembers[queueName]
+					actualOnline := f.quorumQueueOnline[queueName]
+					if actualMembers == nil {
+						actualMembers = map[string]bool{}
+						actualOnline = map[string]bool{}
+						for _, current := range nodes {
+							actualMembers[current] = true
+							actualOnline[current] = true
 						}
+					}
+					expected := len(actualMembers)
+					if len(actualMembers) == len(nodes) {
+						expected = declaredExpected
+					}
+					leader := node(testName + "-server-1")
+					if !actualOnline[leader] {
+						for candidate := range actualOnline {
+							leader = candidate
+							break
+						}
+					}
+					item := result{Vhost: string(vhostBytes), Name: queueName, ExpectedMembers: expected}
+					for _, current := range nodes {
+						p := participant{
+							Node: current, Membership: "voter", Term: 1, Leader: leader, Members: expected,
+							Error: !actualMembers[current] || !actualOnline[current],
+						}
+						if !p.Error {
+							item.Acknowledged = append(item.Acknowledged, current)
+						}
+						if current == leader && !p.Error {
+							p.State = "leader"
+						} else {
+							p.State = "follower"
+						}
+						item.Participants = append(item.Participants, p)
 					}
 					queues = append(queues, item)
 				}
@@ -391,6 +419,21 @@ func modelRemovedSeed(fx *fakeExec) {
 	}
 }
 
+func TestCMRDoesNotPlaceReplicasOnStandaloneReplacement(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{})
+	modelRemovedSeed(fx)
+	target := node(testName + "-server-0")
+
+	fx.applyCMR()
+	assertQuorumQueueMembership(t, fx, target, false)
+
+	for _, ordinal := range []string{"1", "2"} {
+		fx.running[testName+"-server-"+ordinal] = append(fx.running[testName+"-server-"+ordinal], target)
+	}
+	fx.applyCMR()
+	assertQuorumQueueMembership(t, fx, target, true)
+}
+
 func assertQuorumQueueMembership(t *testing.T, fx *fakeExec, nodeName string, wantMember bool) {
 	t.Helper()
 	for queue, members := range fx.quorumQueueMembers {
@@ -459,8 +502,26 @@ func replacementPVC(uid string) *corev1.PersistentVolumeClaim {
 
 func managementClientFor(fx *fakeExec) *http.Client {
 	return &http.Client{Transport: rabbitMQManagementTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path != "/api/queues/detailed" || request.URL.Query().Get("page") != "1" ||
-			request.URL.Query().Get("page_size") != "500" {
+		if request.URL.Path == "/api/nodes" {
+			seen := map[string]bool{}
+			nodes := []map[string]interface{}{}
+			for _, members := range fx.running {
+				for _, member := range members {
+					if !seen[member] {
+						seen[member] = true
+						nodes = append(nodes, map[string]interface{}{"name": member, "running": true})
+					}
+				}
+			}
+			body, err := json.Marshal(nodes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+				Header: make(http.Header), Request: request}, nil
+		}
+		if request.URL.Path != "/api/queues/detailed" ||
+			request.URL.Query().Get("page") != "" || request.URL.Query().Get("page_size") != "" {
 			return nil, fmt.Errorf("unexpected management request %s", request.URL.String())
 		}
 		type queue struct {
@@ -482,10 +543,7 @@ func managementClientFor(fx *fakeExec) *http.Client {
 			}
 			queues = append(queues, item)
 		}
-		body, err := json.Marshal(map[string]interface{}{
-			"page": 1, "page_count": 1, "page_size": 500, "item_count": len(queues),
-			"filtered_count": len(queues), "items": queues,
-		})
+		body, err := json.Marshal(queues)
 		if err != nil {
 			return nil, err
 		}
@@ -548,6 +606,100 @@ func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
 	return instance
 }
 
+func TestServingPatchConflictDoesNotMarkRejoinRecovered(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceAfterMemberRemoval(3)
+	target := replacementPod(testRequestID)
+	target.UID = types.UID("target-pod-uid")
+	claim := replacementPVC(newPVCUID)
+	server1 := clusterPod(testName+"-server-1", true)
+	server2 := clusterPod(testName+"-server-2", true)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testName + "-default-user", Namespace: testNS},
+		Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("password")},
+	}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := rabbitmqv1beta1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(instance, target, claim, server1, server2, secret).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, delegate client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*corev1.Pod); ok {
+					return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, obj.GetName(), errors.New("changed"))
+				}
+				return delegate.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := &rabbitmqcontroller.Reconciler{
+		Client: kubeClient, APIReader: kubeClient, Scheme: scheme,
+		PodCommandExecutor: fx.run, ManagementHTTPClient: managementClientFor(fx),
+	}
+
+	_, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+	if err == nil || !apierrors.IsConflict(err) {
+		t.Fatalf("expected serving patch conflict, got %v", err)
+	}
+	if instance.Status.PVCRemediation[testPVCName].Phase == rabbitmqv1beta1.PVCRemediationRecovered {
+		t.Fatal("a serving patch conflict must not record a recovered replacement")
+	}
+}
+
+func TestRejoinUsesAnotherPeerWhenManagementProbeFails(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceAfterMemberRemoval(3)
+	target := replacementPod(testRequestID)
+	r := newReconciler(t, fx, instance, replacementPVC(newPVCUID), target,
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
+	baseClient := managementClientFor(fx)
+	probeCount := 0
+	failedPeer := ""
+	successPeer := ""
+	r.ManagementHTTPClient = &http.Client{Transport: rabbitMQManagementTransport(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/nodes" {
+			return baseClient.Transport.RoundTrip(req)
+		}
+		probeCount++
+		if probeCount == 1 {
+			failedPeer = req.URL.Host
+			return nil, io.ErrUnexpectedEOF
+		}
+		successPeer = req.URL.Host
+		return baseClient.Transport.RoundTrip(req)
+	})}
+
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+	if err != nil || !requeue {
+		t.Fatalf("management failover should progress recovery, requeue=%v err=%v", requeue, err)
+	}
+	if failedPeer == "" || successPeer == "" || failedPeer == successPeer {
+		t.Fatalf("expected a failed peer followed by a different peer, failed=%q success=%q", failedPeer, successPeer)
+	}
+	if phase := instance.Status.PVCRemediation[testPVCName].Phase; phase != rabbitmqv1beta1.PVCRemediationRecovered {
+		t.Fatalf("management failover did not complete recovery, phase=%q", phase)
+	}
+	stored := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(target), stored); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
+		t.Fatalf("replacement serving=%q, want true", got)
+	}
+}
+
 // TestRecoveredReplacementStaysInClientServices is about the order the passes
 // run in. The serving backfill runs early in Reconcile and the rejoin step
 // much later, and both ask the same question: is this pod a replacement that
@@ -570,7 +722,9 @@ func TestRecoveredReplacementStaysInClientServices(t *testing.T) {
 	recovered.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 
 	r, c := gateFixture(t, fx, instanceAfterRecovery(3), enabledPodRemediator(), recovered)
-	_ = reconcileOnce(t, r)
+	if err := reconcileOnce(t, r); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
 
 	pod := &corev1.Pod{}
 	if err := c.Get(context.Background(),
@@ -636,12 +790,15 @@ func TestRejoinAcceptsRabbitMQ42ClusterStatus(t *testing.T) {
 	})
 	fx.statusOutput[testName+"-server-0"] = realClusterStatus42
 	fx.statusOutput[testName+"-server-1"] = realClusterStatus42
+	target := replacementPod(testRequestID)
 	r := newReconciler(t, fx,
 		replacementPVC(newPVCUID),
-		replacementPod(testRequestID),
-		clusterPod(testName+"-server-1", true))
+		target,
+		clusterPod(testName+"-server-1", true),
+		clusterPod(testName+"-server-2", true))
 
-	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3), true)
+	instance := instanceAfterMemberRemoval(3)
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
 	if err != nil {
 		t.Fatalf("RabbitMQ 4.2 cluster status was rejected: %v", err)
 	}
@@ -649,6 +806,16 @@ func TestRejoinAcceptsRabbitMQ42ClusterStatus(t *testing.T) {
 		t.Fatal("expected requeue after queue recovery and readiness update")
 	}
 	assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), true)
+	if got := instance.Status.PVCRemediation[testPVCName].Phase; got != rabbitmqv1beta1.PVCRemediationRecovered {
+		t.Fatalf("recovery phase=%q, want Recovered", got)
+	}
+	stored := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(target), stored); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
+		t.Fatalf("replacement serving=%q, want true", got)
+	}
 }
 
 func TestRejoinWithoutConsentDoesNotExec(t *testing.T) {
@@ -675,7 +842,8 @@ func TestRejoinCLICommandsHaveFiniteTimeout(t *testing.T) {
 	r := newReconciler(t, fx,
 		replacementPVC(newPVCUID),
 		replacementPod(testRequestID),
-		clusterPod(testName+"-server-1", true))
+		clusterPod(testName+"-server-1", true),
+		clusterPod(testName+"-server-2", true))
 	started := time.Now()
 	var deadline time.Time
 	r.PodCommandExecutor = func(ctx context.Context, _ kubernetes.Interface, _ *rest.Config,
@@ -1160,14 +1328,32 @@ func TestRejoinWaitsForCMRBeforeAdmitting(t *testing.T) {
 	assertQuorumQueueMembership(t, fx, node(testName+"-server-0"), true)
 }
 
+func TestCMRFakeDoesNotPlaceReplicasForStandaloneTarget(t *testing.T) {
+	targetNode := node(testName + "-server-0")
+	fx := &fakeExec{
+		running: map[string][]string{
+			testName + "-server-0": {targetNode},
+			testName + "-server-1": {node(testName + "-server-1")},
+		},
+		quorumQueueMembers: map[string]map[string]bool{"jobs": {}},
+		quorumQueueOnline:  map[string]map[string]bool{"jobs": {}},
+		cmrNode:            targetNode,
+	}
+	fx.applyCMR()
+	if fx.quorumQueueMembers["jobs"][targetNode] {
+		t.Fatal("CMR fake must not place a replica until a survivor sees the target in its cluster")
+	}
+}
+
 func TestRejoinAlreadyMemberVerifiesAndClears(t *testing.T) {
 	fx := newFakeExecWithQuorumQueues(map[string][]string{
-		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1")},
-		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1")},
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
 	})
 
 	target := replacementPod(testRequestID)
-	r := newReconciler(t, fx, replacementPVC(newPVCUID), target, clusterPod(testName+"-server-1", true))
+	r := newReconciler(t, fx, replacementPVC(newPVCUID), target,
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
 
 	instance := instanceAfterMemberRemoval(3)
 	_, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
@@ -1207,6 +1393,43 @@ func TestRejoinAlreadyMemberVerifiesAndClears(t *testing.T) {
 	}
 }
 
+func TestRejoinWaitsForALiveReplacementClaim(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceAfterMemberRemoval(3)
+	r := newReconciler(t, fx, instance, gatedReplacement(),
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
+
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+	if err != nil || !requeue {
+		t.Fatalf("missing replacement claim should wait, requeue=%v err=%v", requeue, err)
+	}
+	if fx.orderOf("join_cluster") >= 0 || fx.orderOf("forget_cluster_node") >= 0 {
+		t.Fatalf("missing replacement claim changed membership: %v", fx.calls)
+	}
+}
+
+func TestRejoinReclassifiesMemberRemovedOnPVCUIDChange(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceAfterMemberRemoval(3)
+	r := newReconciler(t, fx, instance, replacementPVC("third-pvc-uid"), gatedReplacement(),
+		clusterPod(testName+"-server-1", true), clusterPod(testName+"-server-2", true))
+
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+	if err != nil || !requeue {
+		t.Fatalf("PVC UID change should requeue, requeue=%v err=%v", requeue, err)
+	}
+	record := instance.Status.PVCRemediation[testPVCName]
+	if record.Phase != rabbitmqv1beta1.PVCRemediationConsented || record.ReplacementPVCUID != "" {
+		t.Fatalf("PVC UID change was not reset for member-removal proof: %+v", record)
+	}
+}
+
 func TestRejoinRefusesNonStandaloneTarget(t *testing.T) {
 	// Target reports a multi-node view: it still holds real data, must not reset.
 	fx := newFakeExecWithQuorumQueues(map[string][]string{
@@ -1243,9 +1466,10 @@ func TestRejoinDoesNotForgetTargetThatAnchorReportsRunning(t *testing.T) {
 		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
 	})
 
+	target := replacementPod(testRequestID)
 	r := newReconciler(t, fx,
 		replacementPVC(newPVCUID),
-		replacementPod(testRequestID),
+		target,
 		clusterPod(testName+"-server-1", true),
 		clusterPod(testName+"-server-2", true))
 	requeue, err := r.ReconcileNodeRejoin(context.Background(), instanceAfterMemberRemoval(3), true)
@@ -1261,6 +1485,13 @@ func TestRejoinDoesNotForgetTargetThatAnchorReportsRunning(t *testing.T) {
 	if fx.orderOf("rabbitmq-queues grow") >= 0 {
 		t.Errorf("must not grow queue replicas before membership is verified, calls=%v", fx.calls)
 	}
+	stored := &corev1.Pod{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(target), stored); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Labels[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingFalse {
+		t.Fatalf("replacement serving=%q, want false while membership views disagree", got)
+	}
 }
 
 // TestRejoinRequiresAgreedQuorumNotTwoSeparateMajorities is the five-replica
@@ -1272,7 +1503,7 @@ func TestRejoinDoesNotForgetTargetThatAnchorReportsRunning(t *testing.T) {
 func TestRejoinRequiresAgreedQuorumNotTwoSeparateMajorities(t *testing.T) {
 	fx := newFakeExecWithQuorumQueues(map[string][]string{
 		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-3")},
-		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2"), node(testName + "-server-4")},
 	})
 
 	objects := []client.Object{replacementPVC(newPVCUID), replacementPod(testRequestID)}

@@ -28,6 +28,7 @@ import (
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	rabbitmqcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
 	rabbitmqresources "github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -47,13 +48,26 @@ func managementClientWithMembership(replicas int, offline map[int]bool, queues s
 			body = "[" + strings.Join(nodes, ",") + "]"
 		case "/api/queues/detailed":
 			if body == "" {
-				body = `{"page":1,"page_count":0,"page_size":500,"item_count":0,"filtered_count":0,"items":[]}`
+				body = `[]`
 			}
 		default:
 			return nil, fmt.Errorf("unexpected management endpoint %s", req.URL.Path)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
 	})}
+}
+
+type rabbitMQAPIReader struct {
+	client.Reader
+	instance *rabbitmqv1.RabbitMq
+}
+
+func (r rabbitMQAPIReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if target, ok := obj.(*rabbitmqv1.RabbitMq); ok {
+		*target = *r.instance.DeepCopy()
+		return nil
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 func TestConsentBelowLiveQuorumRequestsRetry(t *testing.T) {
@@ -89,13 +103,14 @@ func TestDeletionValidationRefreshesRabbitMQSafety(t *testing.T) {
 		queues        string
 		missingRecord bool
 		wantError     bool
+		wantErrorText string
 		readFails     bool
 	}{
 		{name: "unchanged healthy survivors"},
 		{name: "survivor fails after consent", offline: map[int]bool{0: true, 2: true}, wantError: true},
-		{name: "queue loses majority after consent", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]}`, readFails: true, wantError: true},
-		{name: "online replicas lose Ra consensus after consent", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]}`, readFails: true, wantError: true},
-		{name: "durable classic queue appears on candidate", queues: `{"page":1,"page_count":1,"page_size":500,"item_count":1,"filtered_count":1,"items":[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","durable":true}]}`, wantError: true},
+		{name: "queue loses majority after consent", queues: `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack"]}]`, wantError: true, wantErrorText: "too few online safe members"},
+		{name: "online replicas lose Ra consensus after consent", queues: `[{"name":"jobs","vhost":"/","type":"quorum","members":["rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"],"online":["rabbit@rabbitmq-server-1.rabbitmq-nodes.openstack","rabbit@rabbitmq-server-2.rabbitmq-nodes.openstack"]}]`, readFails: true, wantError: true},
+		{name: "durable classic queue appears on candidate", queues: `[{"name":"legacy","vhost":"/","type":"classic","node":"rabbit@rabbitmq-server-0.rabbitmq-nodes.openstack","durable":true}]`, wantError: true},
 		{name: "recovery record withdrawn", missingRecord: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,26 +124,88 @@ func TestDeletionValidationRefreshesRabbitMQSafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.missingRecord {
-				if err := r.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
+				current := &rabbitmqv1.RabbitMq{}
+				if err := r.Get(ctx, client.ObjectKeyFromObject(instance), current); err != nil {
 					t.Fatal(err)
 				}
-				instance.Status.PVCRemediation = nil
-				if err := r.Status().Update(ctx, instance); err != nil {
-					t.Fatal(err)
-				}
+				current.Status.PVCRemediation = nil
+				r.APIReader = rabbitMQAPIReader{Reader: r.Client, instance: current}
+			} else {
+				// The ordinary client is no longer trusted for commit-time reads.
+				r.APIReader = r.Client
 			}
-			// The ordinary client is no longer trusted for commit-time reads.
-			r.APIReader = r.Client
 			r.ManagementHTTPClient = managementClientWithMembership(3, tc.offline, tc.queues)
 			executor := &fakeExec{}
 			if tc.readFails {
 				executor.quorumReadErr = fmt.Errorf("Ra group cannot confirm leadership")
 			}
 			r.PodCommandExecutor = executor.run
-			if err := r.ValidatePVCDeletion(ctx, claim); (err != nil) != tc.wantError {
+			err := r.ValidatePVCDeletion(ctx, claim)
+			if (err != nil) != tc.wantError {
 				t.Fatalf("validation error = %v, want error %v", err, tc.wantError)
 			}
+			if tc.wantErrorText != "" && !strings.Contains(err.Error(), tc.wantErrorText) {
+				t.Fatalf("validation error = %v, want %q", err, tc.wantErrorText)
+			}
 		})
+	}
+}
+
+func TestDeletionValidationUsesRecoveryRecordAfterLabelRemoval(t *testing.T) {
+	ctx := context.Background()
+	r, instance, h := newConsentFixture(t, testPVCName)
+	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, h, rabbitmqcontroller.RemediationDecision{AllowNewConsent: true, RecoveryInFlight: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testPVCName}, claim); err != nil {
+		t.Fatal(err)
+	}
+	claim.Labels = nil
+	if err := r.Update(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	r.APIReader = r.Client
+	r.ManagementHTTPClient = managementClientWithMembership(3, map[int]bool{0: true, 2: true}, "")
+	r.PodCommandExecutor = (&fakeExec{}).run
+	if err := r.ValidatePVCDeletion(ctx, claim); err == nil {
+		t.Fatal("removing the editable app label bypassed RabbitMQ deletion validation")
+	}
+}
+
+func TestDeletionValidationLeavesClaimsWithoutRecoveryOnGenericPath(t *testing.T) {
+	r, _, _ := newConsentFixture(t, testPVCName)
+	for _, claimName := range []string{testPVCName, "persistence-unrelated-server-0"} {
+		claim := replacementPVC(oldPVCUID)
+		claim.Name = claimName
+		if err := r.ValidatePVCDeletion(context.Background(), claim); err != nil {
+			t.Fatalf("claim %s without a RabbitMQ recovery record must remain on the generic path: %v", claimName, err)
+		}
+	}
+}
+
+func TestRecoveredReplacementUIDChangeRequiresFreshRejoin(t *testing.T) {
+	ctx := context.Background()
+	r, instance, h := newConsentFixture(t, testPVCName)
+	instance.Status.PVCRemediation = instanceAfterRecovery(3).Status.PVCRemediation
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: testNS, Name: testPVCName}, claim); err != nil {
+		t.Fatal(err)
+	}
+	claim.UID = "third-pvc-uid"
+	if err := r.Update(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, h,
+		rabbitmqcontroller.RemediationDecision{AllowNewConsent: true, RecoveryInFlight: true})
+	if err == nil {
+		t.Fatal("a changed replacement PVC must keep the recovery slot occupied")
+	}
+	record := instance.Status.PVCRemediation[testPVCName]
+	if record.Phase != rabbitmqv1.PVCRemediationConsented || record.ReplacementPVCUID != "" {
+		t.Fatalf("changed replacement was not reclassified for rejoin: %+v", record)
 	}
 }
 
@@ -268,14 +345,9 @@ func TestWithoutRemediationNothingWaitsForTheOperator(t *testing.T) {
 	}
 }
 
-// ObservedGeneration means "this spec has been fully applied", which the
-// openstack-operator relies on to tell whether a change it injected (e.g. a new
-// ContainerImage) has been processed. A reconcile that defers on a missing
-// input has not applied anything, so it must not claim the generation.
-// TestReconcilePersistsQuorumQueueGrowthStatus covers the opposite case: the
-// PVC remediation steps run after the spec is applied, so deferring there does
-// advance it.
-func TestObservedGenerationNotClaimedWhileInputsAreMissing(t *testing.T) {
+// ObservedGeneration records that the controller saw the current spec.
+// Readiness remains governed by the individual input and child conditions.
+func TestObservedGenerationUpdatedWhileInputsAreMissing(t *testing.T) {
 	ctx := context.Background()
 	r, instance, _ := newConsentFixture(t, testPVCName)
 	if err := r.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
@@ -293,7 +365,11 @@ func TestObservedGenerationNotClaimedWhileInputsAreMissing(t *testing.T) {
 	if err := r.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
 		t.Fatal(err)
 	}
-	if instance.Status.ObservedGeneration == instance.Generation {
-		t.Fatalf("generation %d must not be reported as observed while TLS input is missing", instance.Generation)
+	if instance.Status.ObservedGeneration != instance.Generation {
+		t.Fatalf("observedGeneration=%d, want current generation %d",
+			instance.Status.ObservedGeneration, instance.Generation)
+	}
+	if ready := instance.Status.Conditions.Get(condition.ReadyCondition); ready == nil || ready.Status != corev1.ConditionFalse {
+		t.Fatalf("Ready condition=%+v, want False while TLS input is missing", ready)
 	}
 }

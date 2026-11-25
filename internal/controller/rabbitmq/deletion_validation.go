@@ -24,8 +24,8 @@ import (
 
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
-	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -51,21 +51,35 @@ func rabbitMQClaimOrdinal(clusterName, claimName string) (int, bool) {
 	return ordinal, err == nil && ordinal >= 0 && strconv.Itoa(ordinal) == suffix
 }
 
+// rabbitMQClaimNameIdentity derives the cluster and ordinal from the claim name
+// without trusting the editable app label. The caller still requires a matching
+// recovery record before treating the claim as RabbitMQ-owned.
+func rabbitMQClaimNameIdentity(claimName string) (string, int, bool) {
+	rest, ok := strings.CutPrefix(claimName, "persistence-")
+	if !ok {
+		return "", 0, false
+	}
+	separator := strings.LastIndex(rest, "-server-")
+	if separator <= 0 {
+		return "", 0, false
+	}
+	clusterName := rest[:separator]
+	ordinal, ok := rabbitMQClaimOrdinal(clusterName, claimName)
+	return clusterName, ordinal, ok
+}
+
 // rmqDataClaims lists this cluster's own data PVCs using the given reader.
 //
-// Selecting on the app label alone is not sufficient, because any claim can
-// carry that label. Claims whose names do not follow the StatefulSet's
-// volumeClaimTemplate naming are therefore dropped.
+// Claims whose names do not follow the StatefulSet's volumeClaimTemplate naming
+// are dropped. The name, rather than the editable app label, is the identity:
+// a label removal must not hide a RabbitMQ claim from these safety checks.
 func (r *Reconciler) rmqDataClaims(
 	ctx context.Context,
 	instance *rabbitmqv1.RabbitMq,
 	reader client.Reader,
 ) ([]corev1.PersistentVolumeClaim, error) {
 	claimList := &corev1.PersistentVolumeClaimList{}
-	if err := reader.List(ctx, claimList,
-		client.InNamespace(instance.Namespace),
-		client.MatchingLabels(rabbitmq.SelectorLabels(instance.Name)),
-	); err != nil {
+	if err := reader.List(ctx, claimList, client.InNamespace(instance.Namespace)); err != nil {
 		return nil, fmt.Errorf("listing RabbitMq data claims: %w", err)
 	}
 	claims := make([]corev1.PersistentVolumeClaim, 0, len(claimList.Items))
@@ -104,28 +118,47 @@ func rmqStuckNodes(claims []corev1.PersistentVolumeClaim) map[string]bool {
 // the finalized token is written the deletion cannot be rolled back: there is
 // no atomic transaction spanning RabbitMQ membership and the Kubernetes API.
 func (r *Reconciler) ValidatePVCDeletion(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
-	// Other applications keep their own request-scoped consent policy.
-	if !IsRabbitmqPVC(pvc) {
+	clusterName, ordinal, ok := rabbitMQClaimNameIdentity(pvc.Name)
+	if !ok {
+		// Other applications keep their own request-scoped consent policy.
 		return nil
-	}
-	clusterName := pvc.Labels["app.kubernetes.io/name"]
-	ordinal, ok := rabbitMQClaimOrdinal(clusterName, pvc.Name)
-	if clusterName == "" || !ok || !remediationv1.HasRemediationConsent(pvc.Annotations) {
-		return fmt.Errorf("PVC %s lacks RabbitMQ claim identity or current consent", pvc.Name)
 	}
 	reader := r.safetyReader()
 	instance := &rabbitmqv1.RabbitMq{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: pvc.Namespace, Name: clusterName}, instance); err != nil {
-		return fmt.Errorf("read RabbitMq for deletion validation: %w", err)
+	instanceErr := reader.Get(ctx, client.ObjectKey{Namespace: pvc.Namespace, Name: clusterName}, instance)
+	if instanceErr != nil && !apierrors.IsNotFound(instanceErr) {
+		return fmt.Errorf("read RabbitMq for deletion validation: %w", instanceErr)
+	}
+	if instanceErr != nil {
+		// With no live RabbitMq there is no broker or queue safety view for this
+		// validator to apply. Treat the name match as advisory and let the
+		// generic PodRemediator checks handle the claim.
+		return nil
+	}
+	recovery, exists := instance.Status.PVCRemediation[pvc.Name]
+	if !exists {
+		cached := &rabbitmqv1.RabbitMq{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(instance), cached); err != nil &&
+			!apierrors.IsNotFound(err) {
+			return fmt.Errorf("read cached RabbitMq recovery state: %w", err)
+		} else if err == nil {
+			if _, withdrawn := cached.Status.PVCRemediation[pvc.Name]; withdrawn {
+				return fmt.Errorf("PVC %s RabbitMQ recovery record was withdrawn from the API", pvc.Name)
+			}
+		}
+		// The status record is RabbitMQ-specific ownership evidence that does
+		// not depend on an editable label. Without it, keep generic claims on
+		// the generic PodRemediator validation path.
+		return nil
 	}
 	if !instance.DeletionTimestamp.IsZero() || instance.Labels[pauseReconciliationLabel] == "true" ||
 		instance.Spec.Replicas == nil || !canRetainQuorumAfterLosingOneReplica(*instance.Spec.Replicas) {
 		return fmt.Errorf("RabbitMq %s cannot authorize PVC deletion in its current state", clusterName)
 	}
-	recovery, exists := instance.Status.PVCRemediation[pvc.Name]
-	if !exists || recovery.PVCUID != string(pvc.UID) ||
-		recovery.RequestID != pvc.Annotations[remediationv1.RequestIDAnnotation] || !recovery.Consented() {
-		return fmt.Errorf("PVC %s has no matching RabbitMQ recovery record", pvc.Name)
+	if recovery.PVCUID != string(pvc.UID) ||
+		recovery.RequestID != pvc.Annotations[remediationv1.RequestIDAnnotation] ||
+		!recovery.Consented() || !remediationv1.HasRemediationConsent(pvc.Annotations) {
+		return fmt.Errorf("PVC %s has no matching RabbitMQ recovery record and consent", pvc.Name)
 	}
 	claims, err := r.rmqDataClaims(ctx, instance, reader)
 	if err != nil {

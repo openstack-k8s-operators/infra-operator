@@ -222,8 +222,23 @@ var _ = Describe("RabbitMQ Controller", func() {
 			claim.Labels = map[string]string{"app.kubernetes.io/name": rabbitmqName.Name}
 			Expect(k8sClient.Update(ctx, claim)).To(Succeed())
 			sts := GetRabbitMQStatefulSet(rabbitmqName)
+			startupGate := *sts.Spec.Template.Spec.InitContainers[0].DeepCopy()
+			startupGate.Image = "rabbitmq:4.2"
+			volumes := []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName}}}}
+			for _, volume := range sts.Spec.Template.Spec.Volumes {
+				if volume.Name == "pod-info" {
+					volumes = append(volumes, volume)
+					break
+				}
+			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: rabbitmqName.Name + "-server-0", Namespace: namespace, Labels: sts.Spec.Template.Labels},
-				Spec: corev1.PodSpec{TerminationGracePeriodSeconds: ptr.To(int64(0)), Containers: []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}}, Volumes: []corev1.Volume{{Name: "persistence", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName}}}}},
+				Spec: corev1.PodSpec{
+					TerminationGracePeriodSeconds: ptr.To(int64(0)),
+					ServiceAccountName:            sts.Spec.Template.Spec.ServiceAccountName,
+					InitContainers:                []corev1.Container{startupGate},
+					Containers:                    []corev1.Container{{Name: "rabbitmq", Image: "rabbitmq:4.2"}},
+					Volumes:                       volumes,
+				},
 			}
 			Expect(pod.Labels).To(HaveKeyWithValue(rabbitmqv1.RabbitMQServingLabel, rabbitmqv1.RabbitMQServingFalse))
 			Expect(k8sClient.Create(ctx, pod)).To(Succeed())
@@ -450,9 +465,10 @@ var _ = Describe("RabbitMQ Controller", func() {
 
 			Eventually(func(g Gomega) {
 				instance := GetRabbitMQ(rabbitmqName)
-				// ObservedGeneration means the spec was fully applied, so it must
-				// not advance while a required input is missing.
-				g.Expect(instance.Status.ObservedGeneration).NotTo(Equal(instance.Generation))
+				g.Expect(instance.Status.ObservedGeneration).To(Equal(instance.Generation))
+				readyCondition := instance.Status.Conditions.Get(condition.ReadyCondition)
+				g.Expect(readyCondition).NotTo(BeNil())
+				g.Expect(readyCondition.Status).To(Equal(corev1.ConditionFalse))
 				g.Expect(instance.Status.Conditions.Has(condition.TLSInputReadyCondition)).To(BeTrue())
 				tlsCondition := instance.Status.Conditions.Get(condition.TLSInputReadyCondition)
 				g.Expect(tlsCondition.Status).To(Equal(corev1.ConditionFalse))
@@ -732,11 +748,35 @@ var _ = Describe("RabbitMQ Controller", func() {
 					},
 				},
 			}
+			existing := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("%s-server-0", rabbitmqDefaultName),
+					Namespace: namespace,
+				},
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{
+						appsv1.StatefulSetPodNameLabel: fmt.Sprintf("%s-server-0", rabbitmqDefaultName),
+					},
+					Ports: []corev1.ServicePort{{Name: "amqp", Port: 5672, Protocol: corev1.ProtocolTCP}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, existing)).To(Succeed())
+			DeferCleanup(th.DeleteInstance, existing)
 			rabbitmq := CreateRabbitMQ(rabbitmqName, spec)
 			DeferCleanup(th.DeleteInstance, rabbitmq)
 		})
 
 		It("should create per-pod services with specified IPs", func() {
+			Eventually(func(g Gomega) {
+				sts := GetRabbitMQStatefulSet(rabbitmqName)
+				g.Expect(sts).NotTo(BeNil())
+				g.Expect(sts.Status.ReadyReplicas).To(BeZero())
+				svc := &corev1.Service{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name: fmt.Sprintf("%s-server-0", rabbitmqDefaultName), Namespace: namespace,
+				}, svc)).To(Succeed())
+				g.Expect(svc.Spec.Selector).To(HaveKeyWithValue("rabbitmq.openstack.org/serving", "true"))
+			}, timeout, interval).Should(Succeed())
 			SimulateRabbitMQClusterReady(rabbitmqName)
 			Eventually(func(g Gomega) {
 				// Check per-pod services have the specified IPs
