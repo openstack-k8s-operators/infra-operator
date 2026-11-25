@@ -26,6 +26,7 @@ import (
 	"time"
 
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	corev1 "k8s.io/api/core/v1"
@@ -133,11 +134,13 @@ func rejoinEnabled(instance *rabbitmqv1beta1.RabbitMq) bool {
 //     directly. Disabling or deleting the CR has to stop it right away.
 //   - Must the safety machinery stay deployed? That is not the same question.
 //     Once PodRemediator has committed to deleting a PVC it goes through with
-//     it even if its CR is disabled or deleted in the meantime. Taking the
-//     startup gate and the Services' serving requirement away at that moment
-//     would let the replacement broker, whose data directory is empty, start
-//     up and serve clients while the member it is replacing is still in the
-//     cluster. That is the failure this whole feature exists to prevent.
+//     it even if its CR is disabled or deleted in the meantime, and its own
+//     finalizer is released as soon as the claim is gone - well before the
+//     replacement has rejoined. Taking the startup gate and the Services'
+//     serving requirement away at that moment would let the replacement
+//     broker, whose data directory is empty, start up and serve clients while
+//     the member it is replacing is still in the cluster. That is the failure
+//     this whole feature exists to prevent.
 type RemediationDecision struct {
 	// AllowNewConsent permits marking a stuck PVC safe to delete.
 	AllowNewConsent bool
@@ -158,13 +161,9 @@ func (d RemediationDecision) KeepMachinery() bool {
 // remediationDecisionFor answers both questions once per reconcile.
 //
 // A cluster that can never need replacement recovery is out of scope. For the
-// rest, recovery counts as in progress when status still holds a consented
-// record *and* a PodRemediator for this namespace is still there, in any
-// state. The CR is the proof: PodRemediator holds its own finalizer until
-// every deletion it committed to has finished, so once the CR is really gone,
-// nothing can still be running and a record left in status is stale. Acting on
-// a stale record would aim forget_cluster_node and join_cluster at a healthy
-// cluster.
+// rest, whether a new consent may be granted follows the PodRemediator CR,
+// while whether a recovery is still in flight follows the claim - see
+// recoveryInFlight for why the CR cannot answer the second question.
 //
 // A lookup error must not turn into a false: see podRemediatorScopeFor.
 func (r *Reconciler) remediationDecisionFor(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (RemediationDecision, error) {
@@ -175,23 +174,67 @@ func (r *Reconciler) remediationDecisionFor(ctx context.Context, instance *rabbi
 	if err != nil {
 		return RemediationDecision{}, err
 	}
+	inFlight, err := r.recoveryInFlight(ctx, instance)
+	if err != nil {
+		return RemediationDecision{}, err
+	}
 	return RemediationDecision{
 		AllowNewConsent:  scope.Accepting,
-		RecoveryInFlight: scope.Present && hasConsentedRecovery(instance),
+		RecoveryInFlight: inFlight,
 	}, nil
 }
 
-// hasConsentedRecovery reports whether status holds a PVC whose deletion this
-// operator already agreed to. From that point PodRemediator can delete the
-// claim at any moment, so recovery counts as started even while the claim is
-// still there.
-func hasConsentedRecovery(instance *rabbitmqv1beta1.RabbitMq) bool {
-	for _, recovery := range instance.Status.PVCRemediation {
-		if recovery.Consented() {
-			return true
+// recoveryInFlight reports whether a PVC deletion this operator agreed to may
+// still be unfinished, which is what keeps the safety machinery deployed and
+// authorizes the destructive rejoin commands.
+//
+// The question is answered from the claim, not from the PodRemediator CR.
+// PodRemediator releases its finalizer once the claim is gone, so the CR can
+// disappear while the replacement broker still has an empty data directory and
+// has not rejoined - exactly the window the machinery exists to cover.
+// Deleting the CR therefore stops new consents but does not abandon a recovery
+// already under way.
+//
+// What it must not do is act on a record left behind by a remediation that
+// never happened: pointing forget_cluster_node and join_cluster at a healthy
+// cluster. The claim tells the two apart. Recovery is under way only when the
+// claim this operator consented to is gone or has already been replaced, or
+// when it is still there carrying PodRemediator's finalized commit token,
+// which means the deletion is past its point of no return. A record whose
+// original claim is still sitting there untouched is stale.
+//
+// Reads are uncached: a lagging PVC watch could still show the consented claim
+// after it was deleted, which would read as "stale" and drop the protection at
+// the worst possible moment.
+//
+// A record that reached Recovered still counts. The broker is verified by
+// then, but the record is what holds the one remediation slot, and the pass
+// that releases it - CheckForStuckPVCRequiringRemediation - runs only while
+// one of the two decisions is true. Answering false here while a PodRemediator
+// CR is disabled would leave the record in status with nothing left to clear
+// it.
+func (r *Reconciler) recoveryInFlight(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (bool, error) {
+	for pvcName, recovery := range instance.Status.PVCRemediation {
+		if !recovery.Consented() {
+			continue
+		}
+		claim := &corev1.PersistentVolumeClaim{}
+		err := r.safetyReader().Get(ctx,
+			types.NamespacedName{Namespace: instance.Namespace, Name: pvcName}, claim)
+		if apierrors.IsNotFound(err) {
+			// The consented claim is gone; its replacement still has to rejoin.
+			return true, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("reading remediated PVC %s: %w", pvcName, err)
+		}
+		if recovery.PVCUID == "" || string(claim.UID) != recovery.PVCUID ||
+			claim.DeletionTimestamp != nil ||
+			claim.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] != "" {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // podReady reports whether a pod is Running with its PodReady condition true.
@@ -226,6 +269,12 @@ type heldReplacement struct {
 // Recovery records are persisted before deletion consent is published, so a
 // replacement is recognizable on its very first reconcile.
 //
+// A record that reached Recovered holds nothing back any more: the broker was
+// verified and admitted, and the record only lingers until
+// CheckForStuckPVCRequiringRemediation releases the remediation slot. Every
+// caller has to agree on that, or the one that runs first pulls the verified
+// broker straight back out of client Services.
+//
 // The claim reads are uncached: a lagging PVC watch could still show the
 // original UID while the replacement pod is already up, which would admit an
 // unverified replacement to client traffic.
@@ -239,7 +288,8 @@ func (r *Reconciler) heldReplacementPods(
 	}
 	for pvcName, remediation := range instance.Status.PVCRemediation {
 		ordinal, ok := rmqPVCOrdinal(pvcName)
-		if !ok || !remediation.Consented() {
+		if !ok || !remediation.Consented() ||
+			remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationRecovered) {
 			continue
 		}
 		claim := &corev1.PersistentVolumeClaim{}
@@ -319,9 +369,26 @@ func (r *Reconciler) ensurePodsServingLabeled(ctx context.Context, instance *rab
 	return err
 }
 
-// podServing reports whether the controller has admitted a pod to client Services.
-func podServing(pod *corev1.Pod) bool {
-	return pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingTrue
+// rejoinAgreed reports whether the surviving cluster and the replacement agree
+// that the replacement is back, on a quorum they both see.
+//
+// Counting each side's running list on its own is not enough. With five
+// replicas the anchor can report {A,B,replacement} while the replacement
+// reports {A,C,replacement}: both lists reach a majority, yet the brokers they
+// agree on are only two. Admitting on that would put a replacement into client
+// Services on the strength of a membership view no quorum actually shares, so
+// count only the nodes present in both.
+func rejoinAgreed(anchor, target clusterMembership, anchorNode, targetNode string, quorum int) bool {
+	if !anchor.Running[targetNode] || !target.Running[anchorNode] {
+		return false
+	}
+	common := 0
+	for node := range target.Running {
+		if anchor.Running[node] {
+			common++
+		}
+	}
+	return common >= quorum
 }
 
 // podRabbitMQContainerReady reports whether the pod's RabbitMQ container is
@@ -455,27 +522,27 @@ func (r *Reconciler) ReconcileNodeRejoin(
 		return true, err
 	}
 
-	// Release replacements that already finished recovery, so the admission
-	// pass below does not pull a verified broker back out of client Services.
-	for _, podName := range sortedKeys(held) {
-		pod := podsByName[podName]
-		remediation := instance.Status.PVCRemediation[held[podName].PVCName]
-		if pod == nil || !remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationRecovered) || !podServing(pod) {
+	// A recovered replacement is no longer held, so all that can be left over
+	// is its rejoin authorization. finishNodeRejoin clears that as its last
+	// step, which means it only survives if that patch failed after the
+	// Recovered phase was already persisted. Clear it now: the annotation is
+	// what authorizes destructive commands inside the pod, so it must not
+	// outlive the recovery that granted it.
+	for _, pvcName := range sortedKeys(instance.Status.PVCRemediation) {
+		remediation := instance.Status.PVCRemediation[pvcName]
+		ordinal, ok := rmqPVCOrdinal(pvcName)
+		if !ok || remediation.RequestID == "" ||
+			!remediation.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationRecovered) {
 			continue
 		}
-		switch pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] {
-		case "":
-			// Recovery is complete; let the PVC handshake release the slot.
-			delete(held, podName)
-		case remediation.RequestID:
-			if remediation.RequestID == "" {
-				continue
-			}
-			if err := r.clearRejoinAnnotation(ctx, pod); err != nil {
-				return true, err
-			}
-			return true, nil
+		pod := podsByName[rmqPodName(instance, ordinal)]
+		if pod == nil || pod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != remediation.RequestID {
+			continue
 		}
+		if err := r.clearRejoinAnnotation(ctx, pod); err != nil {
+			return true, err
+		}
+		return true, nil
 	}
 
 	// Admit ordinary pods, including pods that start with serving=false. Held
@@ -586,7 +653,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	if err != nil {
 		return true, fmt.Errorf("reading target cluster status: %w", err)
 	}
-	if anchorMembership.Running[targetNode] && len(targetMembership.Running) >= quorum && targetMembership.Running[anchorNode] {
+	if rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, quorum) {
 		return true, r.finishNodeRejoin(ctx, instance, target, targetPVCName, remediation.RequestID)
 	}
 	if anchorMembership.Running[targetNode] {
@@ -615,7 +682,7 @@ func (r *Reconciler) ReconcileNodeRejoin(
 	if err != nil {
 		return true, fmt.Errorf("verifying target cluster status after rejoin: %w", err)
 	}
-	if !anchorMembership.Running[targetNode] || !targetMembership.Running[anchorNode] || len(targetMembership.Running) < quorum {
+	if !rejoinAgreed(anchorMembership, targetMembership, anchorNode, targetNode, quorum) {
 		log.Info("RabbitMQ membership is not yet consistent after join", "target", target.Name)
 		return true, nil
 	}

@@ -476,8 +476,17 @@ func (r *Reconciler) removeOldMember(ctx context.Context, instance *rabbitmqv1.R
 	if membership.Running[oldNode] {
 		return fmt.Errorf("old RabbitMQ member is still running; keeping replacement blocked")
 	}
+	// Seed the stuck set from the live claims, not only from status: status is
+	// refreshed by CheckForStuckPVCRequiringRemediation, which runs after this
+	// in the same reconcile, so a claim annotated since the last status write
+	// has no entry yet. Commit-time validation reads the annotation directly,
+	// and the two must not disagree about who counts as a survivor.
+	claims, err := r.rmqDataClaims(ctx, instance, r.safetyReader())
+	if err != nil {
+		return err
+	}
 	safe := map[string]bool{}
-	stuck := map[string]bool{}
+	stuck := rmqStuckNodes(claims)
 	for _, entry := range instance.Status.PVCRemediation {
 		if entry.StuckNode != "" {
 			stuck[entry.StuckNode] = true
@@ -525,10 +534,25 @@ func (r *Reconciler) removeOldMember(ctx context.Context, instance *rabbitmqv1.R
 	if err != nil {
 		return err
 	}
-	if after.Running[oldNode] || len(after.Running) < quorum {
+	// Recount survivors by the pre-removal rule rather than trusting the raw
+	// running list: a broker that is running but not PodReady, or that sits on
+	// a node PodRemediator has marked stuck, is not an established survivor.
+	afterPods, err := r.rmqListPods(ctx, instance, r.safetyReader())
+	if err != nil {
+		return err
+	}
+	safeAfter := map[string]bool{}
+	for i := range afterPods {
+		p := &afterPods[i]
+		n := rmqNodeName(instance, p.Name)
+		if p.Name != target.Name && podReady(p) && !stuck[p.Spec.NodeName] && after.Running[n] {
+			safeAfter[n] = true
+		}
+	}
+	if after.Running[oldNode] || len(safeAfter) < quorum {
 		return fmt.Errorf("survivor membership changed after removal")
 	}
-	if err := r.rmqQueuesSafeAfterDeletion(ctx, instance, anchor, creds, oldNode, safe); err != nil {
+	if err := r.rmqQueuesSafeAfterDeletion(ctx, instance, anchor, creds, oldNode, safeAfter); err != nil {
 		return err
 	}
 	if err := r.verifyOldQueueReplicasRemoved(ctx, instance, anchor, creds, oldNode); err != nil {

@@ -912,6 +912,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	instance.Status.ReadyCount = sts.Status.ReadyReplicas
 	clusterReady := common_statefulset.IsReady(*sts)
 
+	// Putting the serving requirement into the per-pod Services cannot wait for
+	// the StatefulSet to be ready, because a remediation is precisely when it is
+	// not: the pass further down runs only in the ready branch, so a Service
+	// created before the machinery was switched on would keep selecting on pod
+	// name alone, and a held replacement would be one of its endpoints as soon
+	// as it went Ready. Reporting and LoadBalancer requeues stay with that pass.
+	if !clusterReady && keepMachinery && perPodServicesConfigured(instance) {
+		if _, err := r.reconcilePerPodServices(ctx, instance, helper,
+			rabbitmq.CommonLabels(instance.Name), keepMachinery); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.CreateServiceReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.CreateServiceReadyErrorMessage, err.Error()))
+			return ctrl.Result{}, err
+		}
+	}
+
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
 
@@ -960,8 +978,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions.MarkTrue(condition.PDBReadyCondition, condition.PDBReadyMessage)
 
 		// Create per-pod services when podOverride is configured
-		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 0 &&
-			instance.Spec.PodOverride != nil && len(instance.Spec.PodOverride.Services) > 0 {
+		if perPodServicesConfigured(instance) {
 			ctrlResult, err := r.reconcilePerPodServices(ctx, instance, helper, labelMap, keepMachinery)
 			if err != nil {
 				instance.Status.Conditions.Set(condition.FalseCondition(
@@ -1094,6 +1111,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// perPodServicesConfigured reports whether the spec asks for one Service per
+// pod, which is how a deployment gives each broker its own client endpoint.
+func perPodServicesConfigured(instance *rabbitmqv1beta1.RabbitMq) bool {
+	return instance.Spec.Replicas != nil && *instance.Spec.Replicas > 0 &&
+		instance.Spec.PodOverride != nil && len(instance.Spec.PodOverride.Services) > 0
 }
 
 func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper, labelMap map[string]string, keepMachinery bool) (ctrl.Result, error) {
@@ -2575,6 +2599,16 @@ func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, i
 					newRemediationStatus[name] = previous
 					continue
 				}
+				if live.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] != "" {
+					// The deletion is past PodRemediator's point of no return: it
+					// happens even though the handshake annotations are gone, which
+					// is what disabling the PodRemediator CR does to every claim it
+					// owns. Dropping the record here would lose the original claim's
+					// UID and request ID, and the replacement would come up
+					// unrecognized and unheld.
+					newRemediationStatus[name] = previous
+					continue
+				}
 				// PodRemediator can abort a prepared deletion and clear the PVC handshake
 				// when its Pod-user snapshot changes. The same claim is still present, so
 				// this is a fresh-consent retry, not replacement recovery.
@@ -2848,7 +2882,23 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	// The PodRemediator CRD is optional: podRemediatorScopeFor treats a missing
+	// kind as "feature not installed". A watch on a kind the cluster does not
+	// have would contradict that - its informer never syncs, the controller
+	// never finishes its cache wait, and RabbitMq reconciliation stops
+	// altogether. Resolve the kind first and only watch what exists.
+	podRemediatorInstalled := true
+	if _, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{
+		Group: "remediation.openstack.org",
+		Kind:  "PodRemediator",
+	}); err != nil {
+		if !apimeta.IsNoMatchError(err) {
+			return fmt.Errorf("checking whether the PodRemediator CRD is installed: %w", err)
+		}
+		podRemediatorInstalled = false
+	}
+
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1beta1.RabbitMq{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
@@ -2884,19 +2934,20 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 				rmqPodUpdatePredicate(),
 				predicate.NewPredicateFuncs(IsRabbitmqPod),
 			)),
-		).
-		// A PodRemediator CR is what switches PVC remediation on or off for a
-		// namespace, and whether it exists at all is also what tells a
-		// recovery still in progress apart from a stale record. Creating,
-		// enabling, disabling or deleting one therefore changes what this
-		// controller deploys. Without this watch that would only be
-		// reconsidered when some unrelated event happened to trigger a
-		// reconcile.
-		Watches(
+		)
+
+	// A PodRemediator CR is what switches PVC remediation on or off for a
+	// namespace. Creating, enabling, disabling or deleting one changes what
+	// this controller deploys, which without this watch would only be
+	// reconsidered when some unrelated event happened to trigger a reconcile.
+	if podRemediatorInstalled {
+		controllerBuilder = controllerBuilder.Watches(
 			&remediationv1.PodRemediator{},
 			handler.EnqueueRequestsFromMapFunc(r.findRabbitmqForPodRemediator),
-		).
-		Complete(r)
+		)
+	}
+
+	return controllerBuilder.Complete(r)
 }
 
 // findRabbitmqForPodRemediator enqueues every RabbitMq this PodRemediator

@@ -637,4 +637,7 @@ granting consent, the `ValidatePVCDeletion` hook that runs immediately before
 deletion commits, and old-member removal. All three call the same code. A
 single helper reads the surviving brokers and the cluster's own node list from
 a survivor's management API, and a single check decides whether the candidate
-can be lost, so the three callers cannot reach different verdicts.
+can be lost, so the three callers apply the same rules rather than three
+hand-written variations of them. They can still reach different verdicts, and
+that is the point of rechecking: a survivor that goes down between consent and
+the commit hook turns the same rules into a veto.

@@ -68,6 +68,19 @@ func TestNewRabbitMQPodsWaitForStartupApproval(t *testing.T) {
 	if sts.Spec.Template.Annotations[startupApproval] != "" {
 		t.Fatal("the template must not approve future pod UIDs")
 	}
+	// A ResourceQuota that tracks cpu or memory rejects a pod when any of its
+	// containers leaves that resource unset, init containers included, so an
+	// unset gate would make turning remediation on break deployment in a
+	// quota'd namespace.
+	gate := sts.Spec.Template.Spec.InitContainers[0]
+	for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		if _, ok := gate.Resources.Requests[resourceName]; !ok {
+			t.Errorf("the startup gate must request %s", resourceName)
+		}
+		if _, ok := gate.Resources.Limits[resourceName]; !ok {
+			t.Errorf("the startup gate must limit %s", resourceName)
+		}
+	}
 }
 
 func TestStartupScriptRequiresItsOwnPodUID(t *testing.T) {

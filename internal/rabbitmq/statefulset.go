@@ -140,6 +140,20 @@ while [ "$(cat /etc/pod-info/startupApproved 2>/dev/null || true)" != "$POD_UID"
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 			}}},
 			VolumeMounts: []corev1.VolumeMount{{Name: "pod-info", MountPath: "/etc/pod-info", ReadOnly: true}},
+			// A ResourceQuota that tracks cpu or memory rejects a pod when any
+			// container, init containers included, leaves that resource
+			// unset. Match the other init containers so turning remediation on
+			// cannot make a quota'd namespace refuse the StatefulSet.
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("20m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("20m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
 		})
 	}
 

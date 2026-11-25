@@ -19,6 +19,8 @@ package rabbitmq_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	rabbitmqcontroller "github.com/openstack-k8s-operators/infra-operator/internal/controller/rabbitmq"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -73,8 +76,11 @@ func gateFixture(t *testing.T, fx *fakeExec, instance *rabbitmqv1beta1.RabbitMq,
 	instance.Finalizers = []string{"openstack.org/rabbitmq"}
 	instance.Status.OldCRCleaned = "True"
 
-	objects := append([]client.Object{
-		instance,
+	// The defaults describe a recovery in progress: the data claim is already
+	// a replacement (new UID) and its pod is held out of client traffic. A
+	// test that needs a different state, such as the original claim still
+	// sitting there untouched, passes its own object and that one wins.
+	defaults := []client.Object{
 		replacementPVC(newPVCUID),
 		replacementPod(testRequestID),
 		clusterPod(testName+"-server-1", true),
@@ -93,7 +99,9 @@ func gateFixture(t *testing.T, fx *fakeExec, instance *rabbitmqv1beta1.RabbitMq,
 			ObjectMeta: metav1.ObjectMeta{Name: testName + "-default-user", Namespace: testNS},
 			Data:       map[string][]byte{"username": []byte("operator"), "password": []byte("test-password")},
 		},
-	}, extra...)
+	}
+	objects := append(notOverridden(defaults, extra), instance)
+	objects = append(objects, extra...)
 
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -108,6 +116,28 @@ func gateFixture(t *testing.T, fx *fakeExec, instance *rabbitmqv1beta1.RabbitMq,
 		PodCommandExecutor:   fx.run,
 		ManagementHTTPClient: managementClientFor(fx),
 	}, c
+}
+
+// notOverridden drops the fixture defaults a test replaced by passing its own
+// object of the same kind and name, so the fake client is never handed two
+// copies of one object.
+func notOverridden(defaults, extra []client.Object) []client.Object {
+	kept := make([]client.Object, 0, len(defaults))
+	for _, object := range defaults {
+		replaced := false
+		for _, override := range extra {
+			if reflect.TypeOf(object) == reflect.TypeOf(override) &&
+				object.GetName() == override.GetName() &&
+				object.GetNamespace() == override.GetNamespace() {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			kept = append(kept, object)
+		}
+	}
+	return kept
 }
 
 func reconcileOnce(t *testing.T, r *rabbitmqcontroller.Reconciler) error {
@@ -367,6 +397,83 @@ func TestRecoveryRecordClearsWhileDisabled(t *testing.T) {
 	}
 }
 
+// TestPerPodServicesRequireServingBeforeTheClusterIsReady covers the window
+// the per-pod Services used to miss. They were reconciled only once the
+// StatefulSet reported ready, which during a remediation it is not, so a
+// Service created before the feature was switched on kept selecting on pod
+// name alone and a held replacement became one of its endpoints - and those
+// Services are what transport URLs point at.
+func TestPerPodServicesRequireServingBeforeTheClusterIsReady(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	instance := instanceWith(3)
+	instance.Spec.PodOverride = &rabbitmqv1beta1.PodOverride{
+		Services: []service.OverrideSpec{{}, {}, {}},
+	}
+	r, c := gateFixture(t, fx, instance, enabledPodRemediator())
+
+	if err := reconcileOnce(t, r); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	// The fake client never reports the StatefulSet as ready, which is the
+	// state this test is about.
+	if sts := serverStatefulSet(t, c); sts.Status.ReadyReplicas != 0 {
+		t.Fatalf("fixture precondition: the StatefulSet should not be ready, got %d ready replicas",
+			sts.Status.ReadyReplicas)
+	}
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		name := fmt.Sprintf("%s-server-%d", testName, ordinal)
+		svc := &corev1.Service{}
+		if err := c.Get(context.Background(),
+			types.NamespacedName{Namespace: testNS, Name: name}, svc); err != nil {
+			t.Fatalf("reading per-pod Service %s: %v", name, err)
+		}
+		if got := svc.Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; got != rabbitmqv1beta1.RabbitMQServingTrue {
+			t.Errorf("per-pod Service %s must require serving=true, selector value %q", name, got)
+		}
+	}
+}
+
+// TestCommittedDeletionKeepsRecordWhenConsentIsCleared covers the handover
+// gap between the two operators. Disabling a PodRemediator CR clears the
+// handshake annotations from every claim it owns - including one whose
+// deletion it has already committed to and carries out regardless. Reading
+// that cleared claim as "consent withdrawn" would drop the record, and with it
+// the consented claim's UID and request ID, so the replacement would come up
+// unrecognized and would not be held out of client traffic. The commit token
+// survives the cleanup precisely so this can be told apart.
+func TestCommittedDeletionKeepsRecordWhenConsentIsCleared(t *testing.T) {
+	ctx := context.Background()
+	r, instance, h := newConsentFixture(t, testPVCName)
+	instance.Status.PVCRemediation = instanceWithRecovery(3).Status.PVCRemediation
+
+	claim := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: testNS, Name: testPVCName}, claim); err != nil {
+		t.Fatal(err)
+	}
+	claim.Annotations = map[string]string{
+		remediationv1.PVCDeletionCommitFinalizedAnnotation: "commit-token",
+	}
+	if err := r.Update(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, h,
+		rabbitmqcontroller.RemediationDecision{AllowNewConsent: false, RecoveryInFlight: true}); err != nil {
+		t.Fatalf("tracking a committed deletion should not defer: %v", err)
+	}
+
+	record, kept := instance.Status.PVCRemediation[testPVCName]
+	if !kept {
+		t.Fatal("a deletion past its point of no return must keep its recovery record")
+	}
+	if record.PVCUID != oldPVCUID || record.RequestID != testRequestID {
+		t.Errorf("the record must keep the consented claim's identity, got %+v", record)
+	}
+}
+
 // TestDisablingWithNoRecoveryRestoresPlainStartup is the way back. With no
 // remediation under way, switching PodRemediator off has to return the cluster
 // to broker startup and client admission that need no running operator.
@@ -410,9 +517,13 @@ func TestDisablingWithNoRecoveryRestoresPlainStartup(t *testing.T) {
 }
 
 // TestStaleRecoveryStatusDoesNotRejoinWhenInactive covers the destructive
-// path. A recovery record left behind by a remediation that cannot still be
-// running - its PodRemediator is gone outright, finalizer and all - must not
-// drive forget_cluster_node, join_cluster or any exec.
+// path. A record can outlive the remediation it describes - consent withdrawn,
+// a deletion aborted, a status restored from a backup - and acting on one of
+// those would point forget_cluster_node and join_cluster at a healthy cluster.
+//
+// The claim is what gives it away: the one this operator consented to is still
+// there, same UID, with neither consent nor a committed-deletion token on it,
+// so nothing was ever deleted and there is no replacement to bring back.
 func TestStaleRecoveryStatusDoesNotRejoinWhenInactive(t *testing.T) {
 	fx := newFakeExecWithQuorumQueues(map[string][]string{
 		testName + "-server-0": {node(testName + "-server-0")},
@@ -421,9 +532,8 @@ func TestStaleRecoveryStatusDoesNotRejoinWhenInactive(t *testing.T) {
 	})
 	modelRemovedSeed(fx)
 
-	// Status says a remediation is mid-flight, but no PodRemediator CR exists.
 	stale := instanceAfterMemberRemoval(3)
-	r, c := gateFixture(t, fx, stale)
+	r, c := gateFixture(t, fx, stale, replacementPVC(oldPVCUID))
 
 	if err := reconcileOnce(t, r); err != nil {
 		t.Fatalf("reconcile failed: %v", err)
@@ -439,6 +549,45 @@ func TestStaleRecoveryStatusDoesNotRejoinWhenInactive(t *testing.T) {
 	}
 	if persisted.Status.PVCRemediation[testPVCName].Phase == rabbitmqv1beta1.PVCRemediationRecovered {
 		t.Error("an inactive feature must not advance a recovery to Recovered")
+	}
+}
+
+// TestRecoverySurvivesPodRemediatorCRRemoval is the other half of the stale
+// check. PodRemediator releases its finalizer once the claim is gone, which is
+// well before the replacement has rejoined, so the CR can disappear in the
+// middle of a recovery this operator consented to. Abandoning the recovery
+// there would take away the startup gate and the Services' serving
+// requirement, and the replacement - an empty data directory - would start up
+// and serve clients while the member it replaces is still in the cluster.
+func TestRecoverySurvivesPodRemediatorCRRemoval(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0")},
+		testName + "-server-1": {node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+	modelRemovedSeed(fx)
+
+	// No PodRemediator CR, but the consented claim was replaced: the recovery
+	// it started is still unfinished. gateFixture's default claim carries the
+	// replacement UID.
+	inFlight := instanceAfterMemberRemoval(3)
+	r, c := gateFixture(t, fx, inFlight)
+
+	if err := reconcileOnce(t, r); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if len(fx.calls) == 0 {
+		t.Error("an unfinished recovery must keep running after its PodRemediator CR is gone")
+	}
+	sts := serverStatefulSet(t, c)
+	if !hasStartupGateContainer(sts) {
+		t.Error("the startup gate must stay deployed while a consented replacement is unrecovered")
+	}
+	if sts.Spec.Template.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == "" {
+		t.Error("the serving label must stay on the pod template while a replacement is unrecovered")
+	}
+	if _, ok := clientService(t, c).Spec.Selector[rabbitmqv1beta1.RabbitMQServingLabel]; !ok {
+		t.Error("the client Service must keep requiring serving=true while a replacement is unrecovered")
 	}
 }
 

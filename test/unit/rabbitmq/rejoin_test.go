@@ -548,6 +548,52 @@ func instanceWithRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
 	return instance
 }
 
+// TestRecoveredReplacementStaysInClientServices is about the order the passes
+// run in. The serving backfill runs early in Reconcile and the rejoin step
+// much later, and both ask the same question: is this pod a replacement that
+// must be held out of client traffic? While a finished recovery still had a
+// record in status, the backfill answered yes for a broker the rejoin had
+// already verified and admitted, and patched it straight back out of the
+// client Services - so the verified broker flapped, and the pass that clears
+// the record never ran, because the rejoin step kept requeueing.
+func TestRecoveredReplacementStaysInClientServices(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+		testName + "-server-2": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+
+	// The replacement is back: admitted to client traffic, Ready, and carrying
+	// no rejoin authorization because finishNodeRejoin cleared it.
+	recovered := replacementPod("")
+	recovered.Labels[rabbitmqv1beta1.RabbitMQServingLabel] = rabbitmqv1beta1.RabbitMQServingTrue
+	recovered.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+
+	r, c := gateFixture(t, fx, instanceAfterRecovery(3), enabledPodRemediator(), recovered)
+	_ = reconcileOnce(t, r)
+
+	pod := &corev1.Pod{}
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: testNS, Name: testName + "-server-0"}, pod); err != nil {
+		t.Fatal(err)
+	}
+	if !podRejoinReady(pod) {
+		t.Errorf("a verified replacement must stay in client Services, serving=%q",
+			pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel])
+	}
+}
+
+// instanceAfterRecovery is the state right after finishNodeRejoin verified a
+// replacement: the phase says Recovered, and the record itself is cleared
+// later, by the PVC handshake pass.
+func instanceAfterRecovery(replicas int32) *rabbitmqv1beta1.RabbitMq {
+	instance := instanceAfterMemberRemoval(replicas)
+	entry := instance.Status.PVCRemediation[testPVCName]
+	entry.Phase = rabbitmqv1beta1.PVCRemediationRecovered
+	instance.Status.PVCRemediation[testPVCName] = entry
+	return instance
+}
+
 // Post-start rejoin/queue tests begin after the separate pre-start removal
 // phase. startup_test.go exercises that phase and its durable boundary.
 func instanceAfterMemberRemoval(replicas int32) *rabbitmqv1beta1.RabbitMq {
@@ -1214,6 +1260,40 @@ func TestRejoinDoesNotForgetTargetThatAnchorReportsRunning(t *testing.T) {
 	}
 	if fx.orderOf("rabbitmq-queues grow") >= 0 {
 		t.Errorf("must not grow queue replicas before membership is verified, calls=%v", fx.calls)
+	}
+}
+
+// TestRejoinRequiresAgreedQuorumNotTwoSeparateMajorities is the five-replica
+// case where each side reaches a majority on its own but they are not the
+// same majority. The anchor sees {0,1,2} and the replacement sees {0,1,3}:
+// three running brokers each, yet only two they agree on. Admitting on that
+// would put the replacement into client Services on the strength of a
+// membership view no quorum actually shares.
+func TestRejoinRequiresAgreedQuorumNotTwoSeparateMajorities(t *testing.T) {
+	fx := newFakeExecWithQuorumQueues(map[string][]string{
+		testName + "-server-0": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-3")},
+		testName + "-server-1": {node(testName + "-server-0"), node(testName + "-server-1"), node(testName + "-server-2")},
+	})
+
+	objects := []client.Object{replacementPVC(newPVCUID), replacementPod(testRequestID)}
+	for ordinal := 1; ordinal < 5; ordinal++ {
+		objects = append(objects, clusterPod(fmt.Sprintf("%s-server-%d", testName, ordinal), true))
+	}
+	r := newReconciler(t, fx, objects...)
+
+	instance := instanceAfterMemberRemoval(5)
+	requeue, err := r.ReconcileNodeRejoin(context.Background(), instance, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !requeue {
+		t.Fatal("expected requeue while the two views do not share a quorum")
+	}
+	if got := instance.Status.PVCRemediation[testPVCName].Phase; got == rabbitmqv1beta1.PVCRemediationRecovered {
+		t.Error("a replacement must not be recovered on two disjoint majorities")
+	}
+	if fx.orderOf("join_cluster") >= 0 || fx.orderOf("forget_cluster_node") >= 0 {
+		t.Errorf("must not mutate membership while the views disagree, calls=%v", fx.calls)
 	}
 }
 

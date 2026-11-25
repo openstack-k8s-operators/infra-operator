@@ -41,7 +41,7 @@ import (
 const deletionCommitPrefix = "podremediator-deletion-"
 const deletionCommitAnnotation = "remediation.openstack.org/deletion-commit-state"
 const deletionCommitTokenAnnotation = "remediation.openstack.org/pvc-deletion-commit-token"
-const deletionCommitFinalizedAnnotation = "remediation.openstack.org/pvc-deletion-commit-finalized"
+const deletionCommitFinalizedAnnotation = remediationv1.PVCDeletionCommitFinalizedAnnotation
 
 var errPreparedCommitRejected = errors.New("prepared PVC deletion commit rejected")
 var errPVCRemediationPaused = errors.New("PVC remediation is paused")
