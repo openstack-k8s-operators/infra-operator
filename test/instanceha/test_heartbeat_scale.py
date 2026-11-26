@@ -31,6 +31,15 @@ NODE_COUNT = 1000
 _TEST_HMAC_KEY = b'\x01' * 32
 
 
+def _rmem_max():
+    """Return net.core.rmem_max, or 0 where the kernel does not expose it."""
+    try:
+        with open('/proc/sys/net/core/rmem_max') as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
 class TestHeartbeatUDPThroughput(unittest.TestCase):
     """Test UDP listener can handle 1000 nodes sending heartbeats."""
 
@@ -131,14 +140,25 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         self.assertEqual(recorded, NODE_COUNT,
                          f"Expected {NODE_COUNT} hostnames recorded, got {recorded}")
 
+    @unittest.skipUnless(
+        _rmem_max() >= instanceha.UDP_SOCKET_RCVBUF,
+        "needs net.core.rmem_max >= %d so the listener's SO_RCVBUF request is "
+        "granted in full; a smaller queue cannot hold a 1000-packet burst if "
+        "the listener is descheduled while it arrives (see "
+        "docs/instanceha_heartbeat_performance.md)"
+        % instanceha.UDP_SOCKET_RCVBUF
+    )
     def test_burst_packet_handling(self):
         """Send 1000 packets as fast as possible from a single thread.
 
-        HMAC verification holds the GIL longer per packet, so the listener
-        may not drain the kernel UDP buffer before it overflows during an
-        artificial tight-loop burst.  We require >= 80% delivery — production
-        sends at ~33 pkt/s with RandomizedDelaySec, so this scenario never
-        occurs outside the test harness.
+        This is the worst-case arrival pattern for the listener: packets
+        reach the kernel as fast as one sender can produce them, standing in
+        for a cluster where every compute fires at the same instant.  The
+        listener drains concurrently, so the queue only has to absorb the
+        backlog that builds while the listener is off CPU.  The test demands
+        lossless delivery, which needs the full 4 MiB SO_RCVBUF request to be
+        granted; on an untuned node the kernel clamps it to a queue too small
+        to guarantee that.
         """
         port = self._find_free_port()
         self.service.config.get_heartbeat_port = Mock(return_value=port)
@@ -184,13 +204,14 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         finally:
             sock.close()
 
-        deadline = time.monotonic() + 10
+        # Allow a slow worker to drain the whole burst before checking.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             with self.service.heartbeat_lock:
                 count = len(self.service.heartbeat_hosts_timestamp)
             if count >= NODE_COUNT:
                 break
-            time.sleep(0.1)
+            time.sleep(0.01)
 
         self.service.heartbeat_listener_stop_event.set()
         listener_thread.join(timeout=5)
@@ -198,9 +219,8 @@ class TestHeartbeatUDPThroughput(unittest.TestCase):
         with self.service.heartbeat_lock:
             recorded = len(self.service.heartbeat_hosts_timestamp)
 
-        min_expected = int(NODE_COUNT * 0.8)
-        self.assertGreaterEqual(recorded, min_expected,
-                                f"Burst test: expected >= {min_expected} hostnames, got {recorded}")
+        self.assertEqual(recorded, NODE_COUNT,
+                         f"Burst test: expected {NODE_COUNT} hostnames, got {recorded}")
 
 
 class TestHeartbeatFilterPerformance(unittest.TestCase):

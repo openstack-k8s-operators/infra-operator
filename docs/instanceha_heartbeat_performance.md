@@ -95,21 +95,71 @@ over the 1000-node steady-state rate.
 
 ### Packet Loss
 
-Zero packet loss was observed across all realistic test scenarios. The
-Linux kernel's default UDP receive buffer (~212 KiB) can hold
-approximately 2,400 HBV2 heartbeat packets (~56 bytes each plus kernel
-per-packet overhead), providing sufficient buffering for any realistic
-arrival pattern.
+At the steady-state rate (~33 packets/second for 1000 nodes) the listener
+drops no packets: compute-side sends are spread by `RandomizedDelaySec`,
+and the listener drains far faster than packets arrive.
+
+A simultaneous burst is limited by the kernel receive queue. An HBV2 packet
+is 45-108 bytes on the wire (4 magic + 8 timestamp + 1-64 hostname + 32
+HMAC; about 56 bytes for a typical `compute-0000` name). The socket buffer
+is charged for each datagram's `sk_buff` memory (`truesize`), not just the
+payload; at heartbeat sizes that is about 1.25 KiB per datagram and stays
+flat up to a ~256-byte payload. A socket left at the stock
+`net.core.rmem_default` of 212992 bytes therefore queues about 166
+heartbeat packets. The listener requests 4 MiB, which on an untuned node
+the kernel clamps to `net.core.rmem_max` (212992) and then doubles,
+yielding a 425984-byte queue -- about 332 packets. If 1000 computes send at
+the same instant while the listener is not scheduled, the excess is dropped
+in the kernel. Those heartbeats are retried on the next 30-second interval,
+and `HEARTBEAT_TIMEOUT=120` tolerates up to three lost rounds, so failure
+detection is unaffected. To size the queue for a full-cluster burst, see
+[Node Tuning for 1000 Nodes](#node-tuning-for-1000-nodes).
 
 The `RandomizedDelaySec` added to the systemd timer on compute nodes
 further prevents thundering herd behavior at boot time.
 
-**Note on burst testing:** Under extreme synthetic burst conditions
-(1000 packets sent in a tight loop from a single thread), occasional
-packet loss may be observed due to Python GIL contention between sender
-and listener threads in the benchmark harness. This is a benchmark
-artifact and does not occur in production, where packets arrive from
-separate hosts at the steady-state rate of ~33 packets/second.
+---
+
+## Node Tuning for 1000 Nodes
+
+To absorb a simultaneous burst from 1000 computes, raise the node's
+`net.core.rmem_max`. The listener requests 4 MiB, so a value of at least
+4194304 bytes lets the kernel queue a full burst regardless of when the
+listener thread is scheduled:
+
+```ini
+# Tuned profile applied to nodes that run the InstanceHA pod
+[sysctl]
+net.core.rmem_max = 4194304
+```
+
+`net.core.rmem_max` is kernel-global, not per network namespace, so it must
+be set on the node -- for example through a `Tuned` resource or a
+`MachineConfig` -- rather than inside the pod. The kernel stores twice the
+requested value, and `getsockopt(SO_RCVBUF)` reports that doubled figure,
+so a socket requesting 4 MiB reads back 8388608 when the tuning is in
+effect; that queue holds about 6,500 heartbeat datagrams. Without the
+tuning the listener still works, with a 416 KiB queue (~332 datagrams).
+
+Measured effect, sending a 1000-packet burst with the listener and three
+busy-loop processes pinned to a single CPU, so the listener is descheduled
+while the burst arrives:
+
+| Socket | Queue | Packets delivered (3 runs) |
+|--------|-------|----------------------------|
+| No `SO_RCVBUF` request | 212992 | 385, 326, 320 |
+| 4 MiB requested, untuned node | 425984 | 930, 732, 818 |
+| 4 MiB requested, `rmem_max` 4 MiB | 8388608 | 1000, 1000, 1000 |
+
+CI runs of this test on untuned nodes, before the `SO_RCVBUF` request was
+added, recorded 702 and 779 delivered out of 1000 -- the same failure mode
+as the first row, at the lighter CPU contention of a build pod.
+
+The `test_burst_packet_handling` case in
+`test/instanceha/test_heartbeat_scale.py` asserts lossless delivery of such
+a burst. It runs only where `net.core.rmem_max` is at least 4194304 and
+skips itself elsewhere, since a smaller queue cannot hold the whole burst
+when the listener is descheduled.
 
 ---
 
