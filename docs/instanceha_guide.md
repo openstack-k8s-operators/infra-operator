@@ -1369,6 +1369,29 @@ spec:
 
 **`EVACUATION_RETRIES: 3`** -- At large scale, 5 retries per VM across 10 hosts with dozens of VMs each can create a long tail of retry traffic against the Nova API. 3 retries catches transient errors without piling up.
 
+#### Node Tuning (Kernel UDP Receive Buffer)
+
+Heartbeats are spread over the 30-second interval, so steady-state delivery
+does not depend on kernel tuning. If all computes can send at the same
+instant (boot storm, network partition recovery), the kernel receive queue
+on the InstanceHA pod's node must be large enough to hold one burst. The
+listener requests a 4 MiB `SO_RCVBUF`, but Linux clamps the request to
+`net.core.rmem_max` and then doubles it: with the stock 212992 bytes that
+leaves room for ~332 heartbeats, short of a 1000-node burst. Raise it on
+the nodes that run the InstanceHA pod:
+
+```ini
+[sysctl]
+net.core.rmem_max = 4194304
+```
+
+Apply it through a `Tuned` resource or a `MachineConfig`. `net.core.rmem_max`
+is kernel-global, so it must be set on the node, not inside the pod. Dropped
+heartbeats are retried on the next interval, and `HEARTBEAT_TIMEOUT` (120s)
+tolerates three lost rounds, so failure detection is unaffected even without
+the tuning. See
+[instanceha_heartbeat_performance.md](instanceha_heartbeat_performance.md#node-tuning-for-1000-nodes).
+
 #### Per-Aggregate Thresholds
 
 At 1000 nodes across 3 cells, use Nova host aggregates to model your failure domains (racks, rows, or cells). Set per-aggregate failure limits using aggregate metadata:
