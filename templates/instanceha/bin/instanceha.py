@@ -78,6 +78,14 @@ HEARTBEAT_HMAC_DIGEST_SIZE = 32
 HEARTBEAT_MIN_PACKET_SIZE = 4 + 8 + 1 + 32  # magic + timestamp + min hostname + HMAC
 DEFAULT_HEARTBEAT_PORT = 7411
 HEARTBEAT_CLEANUP_AGE_SECONDS = 600
+# Requested SO_RCVBUF for UDP listeners.  A socket left at the Linux default
+# (net.core.rmem_default, 212 KiB) queues only ~166 minimum-size heartbeat
+# packets, so a burst from many computes arriving at once overflows the
+# kernel queue before the listener can drain it.  The kernel clamps this
+# request to net.core.rmem_max and then stores twice the clamped value, so
+# 4 MiB holds a full 1000-node burst on a node tuned to rmem_max >= 4 MiB,
+# and still doubles the queue (~332 packets) on an untuned one.
+UDP_SOCKET_RCVBUF = 4 * 1024 * 1024
 _ALLOWED_HTTP_METHODS = frozenset({'get', 'post', 'patch', 'put', 'delete'})
 
 
@@ -1482,10 +1490,16 @@ class UDPSocketManager:
         self.socket = socket.socket(info[0], info[1])
         if info[0] == socket.AF_INET6:
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_SOCKET_RCVBUF)
         self.socket.settimeout(1.0)
         self.socket.bind(info[4])
         host = '[%s]' % info[4][0] if info[0] == socket.AF_INET6 else info[4][0]
-        logging.info('%s listener started on %s:%s', self.label, host, info[4][1])
+        # getsockopt reports twice the value the kernel granted, so halve it
+        # to log a figure comparable with net.core.rmem_max.
+        granted = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF) // 2
+        logging.info(
+            '%s listener started on %s:%s (SO_RCVBUF requested %d, granted %d)',
+            self.label, host, info[4][1], UDP_SOCKET_RCVBUF, granted)
         return self.socket
 
     def __exit__(self, exc_type, exc_val, exc_tb):
