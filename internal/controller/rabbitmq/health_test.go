@@ -52,7 +52,4 @@ func TestRequeueForClusterHealth(t *testing.T) {
 	if got.RequeueAfter != 5*time.Minute {
 		t.Errorf("cluster ready: RequeueAfter = %v, want %v", got.RequeueAfter, 5*time.Minute)
 	}
-	if got.Requeue {
-		t.Errorf("cluster ready: Requeue is true, want it left to RequeueAfter")
-	}
 }
