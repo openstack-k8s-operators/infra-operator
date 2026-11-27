@@ -364,10 +364,16 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "PodRemediator")
 		os.Exit(1)
 	}
+	clusterHealthRefresh := getEnvDuration(
+		"RABBITMQ_CLUSTER_HEALTH_REFRESH_INTERVAL",
+		rabbitmqcontroller.DefaultClusterHealthRefreshInterval)
+	setupLog.Info("Rabbitmq controller configured",
+		"clusterHealthRefreshInterval", clusterHealthRefresh)
 	if err := (&rabbitmqcontroller.Reconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Kclient: kclient,
+		Client:                       mgr.GetClient(),
+		Scheme:                       mgr.GetScheme(),
+		Kclient:                      kclient,
+		ClusterHealthRefreshInterval: clusterHealthRefresh,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "RabbitMq")
 		os.Exit(1)

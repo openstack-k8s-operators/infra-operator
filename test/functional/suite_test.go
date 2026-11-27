@@ -311,10 +311,17 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	// No RabbitMQ runs in envtest, so the controller's reads of a broker's
+	// management API are answered by a stub.
+	rabbitMQMgmt = newRabbitMQManagementStub()
+	DeferCleanup(rabbitMQMgmt.Close)
+
 	err = (&rabbitmq_ctrl.Reconciler{
-		Client:  k8sManager.GetClient(),
-		Scheme:  k8sManager.GetScheme(),
-		Kclient: kclient,
+		Client:                       k8sManager.GetClient(),
+		Scheme:                       k8sManager.GetScheme(),
+		Kclient:                      kclient,
+		ManagementHTTPClient:         rabbitMQMgmt.HTTPClient(),
+		ClusterHealthRefreshInterval: rabbitmq_ctrl.DefaultClusterHealthRefreshInterval,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
