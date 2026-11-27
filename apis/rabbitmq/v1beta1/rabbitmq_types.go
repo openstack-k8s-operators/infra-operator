@@ -49,6 +49,53 @@ const (
 	// AnnotationClientsReconfigured - set to "true" when dataplane clients have been
 	// reconfigured for quorum queues, allowing the proxy sidecar to be removed
 	AnnotationClientsReconfigured = "rabbitmq.openstack.org/clients-reconfigured"
+
+	// AnnotationRejoinCluster marks a pod whose cluster membership the
+	// controller is allowed to repair, and carries the PodRemediator request ID
+	// that authorized it.
+	//
+	// It is needed because of how RabbitMQ 4.1+ bootstraps: the lowest-ordinal
+	// pod (server-0) is the peer-discovery seed node. Recreated with an empty
+	// data directory after a consented PVC replacement, it does not rejoin the
+	// existing cluster but forms a standalone one. The controller therefore
+	// removes the old member from a surviving peer first, then approves
+	// startup, so the pod joins as a new member.
+	//
+	// Repairing membership is destructive, so the request ID scopes it to the
+	// single PVC deletion that was consented to. The controller clears the
+	// annotation after verifying the pod is a member again.
+	AnnotationRejoinCluster = "rabbitmq.openstack.org/rejoin-cluster"
+
+	// AnnotationStartupApproved holds the UID of the pod that is allowed to
+	// start RabbitMQ. An init container waits for it to match the pod's own UID
+	// before the broker may open any cluster connection.
+	//
+	// The StatefulSet template never sets it, so approval can only come from
+	// the operator and only for one specific pod. This is what allows a
+	// replacement to be held before it joins.
+	//
+	// It also means that, like RabbitMQServingLabel, this annotation makes a
+	// pod depend on a running operator in order to start. The StatefulSet
+	// therefore only carries the startup gate where the PodRemediator CRD is
+	// installed and the gate can be needed; elsewhere brokers start
+	// independently.
+	AnnotationStartupApproved = "rabbitmq.openstack.org/startup-approved"
+
+	// RabbitMQServingLabel controls whether a pod is included in the
+	// client-facing Service.
+	//
+	// Where remediation is active, every new pod is created with serving=false
+	// and must be admitted: an ordinary pod once live claim and recovery checks
+	// pass, a replacement only after it has rejoined the cluster and its queue
+	// replicas are back online. Pods already admitted keep the label through
+	// container and operator restarts, so only newly created pods depend on the
+	// operator. Where remediation is not active, the client Service does not
+	// select on this label.
+	RabbitMQServingLabel = "rabbitmq.openstack.org/serving"
+
+	// RabbitMQServingTrue / RabbitMQServingFalse are the two values of RabbitMQServingLabel.
+	RabbitMQServingTrue  = "true"
+	RabbitMQServingFalse = "false"
 )
 
 // QueueType represents a RabbitMQ queue type
@@ -301,6 +348,75 @@ type RabbitmqClusterDefaultUser struct {
 	ServiceReference *RabbitmqClusterServiceReference `json:"serviceReference,omitempty"`
 }
 
+// PVCRemediationPhase is how far the RabbitMQ side of one PVC remediation has
+// progressed. The phases are strictly ordered and only ever move forward for a
+// given (PVCUID, RequestID) pair; a new request starts again at Pending.
+type PVCRemediationPhase string
+
+const (
+	// PVCRemediationPending - a stuck PVC was observed but safe-to-delete
+	// consent has not been granted for it.
+	PVCRemediationPending PVCRemediationPhase = "Pending"
+	// PVCRemediationConsented - safe-to-delete consent was persisted for this
+	// RequestID and PVCUID. The claim may be deleted and replaced.
+	PVCRemediationConsented PVCRemediationPhase = "Consented"
+	// PVCRemediationMemberRemoved - the old broker and its queue replicas were
+	// removed from the surviving cluster, so the replacement RabbitMQ process
+	// recorded in ReplacementPVCUID is allowed to start and join afresh.
+	PVCRemediationMemberRemoved PVCRemediationPhase = "MemberRemoved"
+	// PVCRemediationRecovered - the replacement rejoined the cluster and holds
+	// an online replica of every quorum queue. It may serve client traffic.
+	PVCRemediationRecovered PVCRemediationPhase = "Recovered"
+)
+
+// pvcRemediationPhaseOrder ranks the phases so they can be compared. A phase
+// that is unset, or one written by a newer version we do not recognize, is
+// missing from this map and so ranks 0 -- below every named phase.
+var pvcRemediationPhaseOrder = map[PVCRemediationPhase]int{
+	PVCRemediationPending:       1,
+	PVCRemediationConsented:     2,
+	PVCRemediationMemberRemoved: 3,
+	PVCRemediationRecovered:     4,
+}
+
+// AtLeast reports whether this phase has reached want.
+//
+// Gates on destructive work ask whether the record is at least some phase, for
+// example MemberRemoved. An unset or unrecognized phase ranks below every
+// named phase, so those comparisons return false and the caller waits rather
+// than acting: the comparison fails closed.
+func (p PVCRemediationPhase) AtLeast(want PVCRemediationPhase) bool {
+	return pvcRemediationPhaseOrder[p] >= pvcRemediationPhaseOrder[want]
+}
+
+// PVCRemediationStatus captures the in-progress PVC remediation handshake
+// state for a single PVC as seen by the RabbitMq controller.
+type PVCRemediationStatus struct {
+	// PVCUID identifies the claim tracked by this status entry. A replacement
+	// PVC can reuse the same name, so the UID distinguishes recovery from an
+	// aborted deletion that left the original claim in place.
+	PVCUID string `json:"pvcUID,omitempty"`
+	// RequestID is the PodRemediator request whose consent authorized deletion
+	// of PVCUID. It scopes the replacement pod's destructive rejoin action.
+	RequestID string `json:"requestID,omitempty"`
+	// ReplacementPVCUID is the UID of the empty claim created in place of the
+	// deleted one. It is recorded together with phase MemberRemoved, binding
+	// that removal to one specific replacement volume: a pod backed by any
+	// other claim is not covered by the record and is not allowed to start.
+	ReplacementPVCUID string `json:"replacementPVCUID,omitempty"`
+	// StuckNode is the Kubernetes node name set by PodRemediator on the PVC.
+	StuckNode string `json:"stuckNode,omitempty"`
+	// Phase is how far this remediation has progressed.
+	// +kubebuilder:validation:Enum=Pending;Consented;MemberRemoved;Recovered
+	Phase PVCRemediationPhase `json:"phase,omitempty"`
+}
+
+// Consented reports whether this controller has granted safe-to-delete consent
+// for the recorded request.
+func (s PVCRemediationStatus) Consented() bool {
+	return s.Phase.AtLeast(PVCRemediationConsented)
+}
+
 // RabbitMqStatus defines the observed state of RabbitMq
 type RabbitMqStatus struct {
 	// Conditions
@@ -359,6 +475,11 @@ type RabbitMqStatus struct {
 	// The proxy allows non-durable clients to work with quorum queues during the upgrade window.
 	// Only cleared when the AnnotationClientsReconfigured annotation is set to "true".
 	ProxyRequired string `json:"proxyRequired,omitempty"`
+
+	// PVCRemediation tracks in-flight PVC remediation and replacement recovery,
+	// keyed by PVC name.
+	// +kubebuilder:validation:Optional
+	PVCRemediation map[string]PVCRemediationStatus `json:"pvcRemediation,omitempty"`
 }
 
 //+kubebuilder:object:root=true

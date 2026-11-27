@@ -47,6 +47,13 @@ const (
 	// written provisionally and is not authority by itself: a matching
 	// controller-owned ConfigMap and finalized PVC token are required.
 	PVCDeletionCommittedAnnotation = "remediation.openstack.org/pvc-deletion-committed"
+	// PVCDeletionCommitFinalizedAnnotation marks the point of no return: from
+	// here PodRemediator deletes the claim even if its CR is disabled or
+	// deleted in the meantime, and even though disabling clears every
+	// handshake annotation above. An application operator that holds state
+	// across the deletion reads this to tell "the deletion is still coming"
+	// apart from "consent was withdrawn".
+	PVCDeletionCommitFinalizedAnnotation = "remediation.openstack.org/pvc-deletion-commit-finalized"
 )
 
 // HasRemediationConsent accepts only an acknowledgment of the current request.

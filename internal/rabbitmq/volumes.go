@@ -82,6 +82,13 @@ func getVolumes(r *rabbitmqv1.RabbitMq) []corev1.Volume {
 					DefaultMode: ptr.To[int32](0o644),
 					Items: []corev1.DownwardAPIVolumeFile{
 						{
+							Path: "startupApproved",
+							FieldRef: &corev1.ObjectFieldSelector{
+								APIVersion: "v1",
+								FieldPath:  "metadata.annotations['" + rabbitmqv1.AnnotationStartupApproved + "']",
+							},
+						},
+						{
 							Path: "skipPreStopChecks",
 							FieldRef: &corev1.ObjectFieldSelector{
 								APIVersion: "v1",

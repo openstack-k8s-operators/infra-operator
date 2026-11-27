@@ -1686,6 +1686,18 @@ func GetTopologyRef(name string, namespace string) []types.NamespacedName {
 	}
 }
 
+// EnablePVCRemediation creates a PodRemediator covering namespace, which is
+// what turns the RabbitMQ remediation integration on: the startup gate, the
+// serving label and the client Services' serving requirement. The CRD alone
+// does not, since it ships with this operator and is always installed.
+func EnablePVCRemediation(namespace string) client.Object {
+	instance := &remediationv1.PodRemediator{
+		ObjectMeta: metav1.ObjectMeta{Name: "podremediator", Namespace: namespace},
+	}
+	Expect(th.K8sClient.Create(th.Ctx, instance)).Should(Succeed())
+	return instance
+}
+
 func CreateRabbitMQ(rabbitmq types.NamespacedName, spec map[string]any) client.Object {
 	// Ensure the cluster-config-v1 ConfigMap exists in kube-system namespace
 	// so the RabbitMq controller can check FIPS configuration

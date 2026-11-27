@@ -33,6 +33,8 @@ type ProxyConfig struct {
 // is prepended to clear persistent data before the main setup container runs.
 // If proxy is enabled, a proxy sidecar container is added and RabbitMQ's readiness
 // probe is adjusted to check the backend port on localhost.
+// If remediation is true, pods also carry the PVC-remediation startup gate and
+// start outside client Services; see RemediationGated.
 func StatefulSet(
 	r *rabbitmqv1.RabbitMq,
 	configHash string,
@@ -41,9 +43,22 @@ func StatefulSet(
 	targetVersion string,
 	needsDataWipe bool,
 	proxy ProxyConfig,
+	remediation bool,
 ) *appsv1.StatefulSet {
 	matchls := SelectorLabels(r.Name)
 	ls := CommonLabels(r.Name)
+
+	// Under remediation every new pod starts outside client Services: the
+	// controller admits ordinary pods and releases recorded replacements only
+	// after rejoin and queue recovery. Existing pods retain their serving label
+	// across container and operator restarts.
+	podLabels := make(map[string]string, len(ls)+1)
+	for k, v := range ls {
+		podLabels[k] = v
+	}
+	if remediation {
+		podLabels[rabbitmqv1.RabbitMQServingLabel] = rabbitmqv1.RabbitMQServingFalse
+	}
 
 	// Default replica count
 	replicas := ptr.To(int32(1))
@@ -108,6 +123,40 @@ func StatefulSet(
 	// Build init containers
 	var initContainers []corev1.Container
 
+	// Client-Service exclusion does not isolate Erlang/Raft peer traffic, so a
+	// replacement broker has to be stopped before it starts. This gate makes
+	// broker startup depend on a running operator, which is why it is only
+	// deployed where PVC remediation can actually happen - see RemediationGated.
+	if remediation {
+		initContainers = append(initContainers, corev1.Container{
+			Name:    "startup-gate",
+			Image:   r.Spec.ContainerImage,
+			Command: []string{"sh", "-c"},
+			Args: []string{`set -eu
+test -n "$POD_UID"
+echo "Waiting for RabbitMQ startup approval"
+while [ "$(cat /etc/pod-info/startupApproved 2>/dev/null || true)" != "$POD_UID" ]; do sleep 2; done`},
+			Env: []corev1.EnvVar{{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
+			}}},
+			VolumeMounts: []corev1.VolumeMount{{Name: "pod-info", MountPath: "/etc/pod-info", ReadOnly: true}},
+			// A ResourceQuota that tracks cpu or memory rejects a pod when any
+			// container, init containers included, leaves that resource
+			// unset. Match the other init containers so turning remediation on
+			// cannot make a quota'd namespace refuse the StatefulSet.
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("20m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("20m"),
+					corev1.ResourceMemory: resource.MustParse("64Mi"),
+				},
+			},
+		})
+	}
+
 	// Add data-wipe init container for storage upgrades.
 	// Runs BEFORE setup-container and clears /var/lib/rabbitmq.
 	// Version-specific marker files prevent duplicate wipes across pod restarts.
@@ -160,7 +209,7 @@ func StatefulSet(
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls,
+					Labels: podLabels,
 					Annotations: map[string]string{
 						"config-hash": configHash,
 					},

@@ -242,6 +242,41 @@ flowchart TD
     D -->|"consent or fencing no longer valid"| X
 ```
 
+#### Last-moment recheck by the workload operator
+
+Consent may have been granted seconds or minutes earlier, and a cluster can
+degrade in that time. A workload operator can therefore register a *validator*
+that runs immediately before the finalized token is written. RabbitMQ, which
+runs in this same operator process, registers one.
+
+The validator ignores cached state: it reads from the Kubernetes API directly
+and queries the RabbitMQ management API live, then rechecks that enough brokers
+are ready and running and that every queue survives losing this one.
+
+For each quorum queue it requires evidence of a working majority. A queue
+passes only if more than half of its full configured membership consists of
+brokers that are alive at that moment, agree on the same Raft term, and
+acknowledge a heartbeat issued during the check. Brokers failing any of those,
+the deletion candidate, and anything else outside the known-safe set are
+excluded from the count. The cheaper signals are not sufficient: a queue's
+cached `online`, `leader` or `state=running` fields report healthy values for a
+Raft group that has restarted and has no elected leader yet.
+
+Anything that prevents the validator from establishing safety — missing
+credentials, an unreachable management endpoint, or membership that does not
+add up — rejects the deletion.
+
+The recheck also covers consent granted before the operator was upgraded,
+because it is driven by the operator's own code rather than by any new PVC
+annotation. Workload operators other than RabbitMQ are unaffected and continue
+to use the plain annotation contract.
+
+The validator's checks and the PVC write are separate operations, so this
+narrows the window rather than closing it. The optimistic lock rejects a
+consent withdrawal that lands during validation, and fencing is re-confirmed
+afterwards, but a broker can still fail after the last live check. There is no
+atomic transaction spanning RabbitMQ and the Kubernetes API.
+
 Until the finalized token is written to the PVC, consent withdrawal or lost
 fencing rejects the prepared record and cleanup does not start. The finalized
 token write is the transaction's commit boundary: after it, reconciliation
@@ -380,3 +415,229 @@ The in-repository tests cover this controller at three levels: unit tests in
 KUTTL integration test in `test/kuttl/tests/podremediator-deletion-commit/`.
 A real node-failure scenario must be validated on a cluster with NHC and SNR
 installed.
+
+## RabbitMQ replacement recovery
+
+### Why RabbitMQ needs more than consent
+
+For most workloads, deleting the PVC is the end of the process: a fresh pod
+starts with empty storage and catches up. A clustered RabbitMQ broker cannot,
+for two reasons.
+
+**The RabbitMQ cluster remembers the dead broker.** The surviving brokers
+still list it as a member, and every quorum queue still counts it when
+determining whether it has a majority. A queue with three replicas tolerates
+one loss, and while the cluster treats the dead member as potentially
+returning, it continues to reserve a place for it.
+
+**A replacement pod has the same name but none of the data.** Kubernetes
+recreates `rabbitmq-server-0` with the same hostname and a new empty volume. If
+that broker starts and connects before the cluster has been told the old member
+is gone, the cluster sees a node it already knows reappear with no data, which
+can corrupt queue membership and lose messages.
+
+The replacement therefore has to be held — not only kept away from clients, but
+prevented from starting its Erlang/Raft networking — until the operator has
+removed the old member from the cluster. It can then start, join as a new
+member, and receive client traffic afterwards.
+
+### Terms used in this section
+
+| Term | Meaning |
+|------|---------|
+| **Broker** | One RabbitMQ server process — one pod of the StatefulSet. |
+| **Member** | A broker the cluster knows about, whether or not it is currently running. |
+| **Quorum queue** | A queue replicated across several brokers that stays available while a majority of its replicas are alive. |
+| **Quorum** | That majority: more than half. Three of five, two of three. |
+| **Raft / Ra** | The consensus protocol behind quorum queues, and its Erlang implementation. Brokers talk Raft to each other directly, independently of any Kubernetes Service. |
+| **Startup gate** | An init container that holds a pod before the broker starts, until the operator approves it. |
+| **Serving label** | `rabbitmq.openstack.org/serving` — whether a pod is in the client-facing Service. Set to `false` on new pods. |
+| **Slot** | The single in-flight remediation this cluster allows. One PVC is remediated at a time. |
+| **CMR** | Continuous Membership Reconciliation — RabbitMQ's own feature for placing quorum queue replicas on new members. |
+
+### Where this applies
+
+A cluster is in scope for any of this only if it is a **multi-replica RabbitMQ
+4.1+ cluster**. A single broker has no quorum to protect, and the seed-node
+behaviour that strands a wiped `server-0` arrived in 4.1. Everything below
+applies to those clusters only; the rest skip every remediation code path.
+
+For a cluster in scope, the operator answers two separate questions on each
+reconcile, and they do not always agree.
+
+**May a new PVC deletion be authorized?** Only while a PodRemediator applies
+to the cluster's namespace — one that is enabled, not being deleted, and that
+either lists that namespace in `spec.namespaces` or lives in it with an empty
+list. The deciding evidence is the CR, not the CRD: the PodRemediator CRD
+ships as part of infra-operator, so it is installed in every deployment and
+says nothing about whether anyone turned the feature on.
+
+**Must the startup gate, the serving label and the client Service's serving
+requirement stay deployed?** Those are needed both to accept a future
+remediation and to finish one already under way, so they stay while either
+holds:
+
+- new deletions may be authorized, as above; or
+- a PVC deletion this operator already consented to may still be running —
+  `status.pvcRemediation` holds a consented record *and* a PodRemediator for
+  the namespace is still present in any state, including disabled or being
+  deleted.
+
+The second case matters because PodRemediator goes through with a deletion it
+has already committed to even after its CR is switched off or deleted. If
+RabbitMQ read either state as "feature off" it would withdraw the gate and the
+serving requirement at exactly the wrong moment, and the replacement broker —
+whose data directory is empty — could start and take client traffic while the
+member it replaces is still in the cluster.
+
+The CR's presence is what separates "still running" from "stale leftover":
+PodRemediator holds its own finalizer until every committed deletion has
+finished, so once the CR is really gone, nothing can still be in progress and
+a record left in `status.pvcRemediation` must not be allowed to drive a
+rejoin.
+
+Switching a PodRemediator off therefore stops new consent immediately, lets
+any remediation already in progress finish, and returns the cluster to startup
+and client admission that need no running operator as soon as the last
+recovery record clears.
+
+A failure to determine any of this — an API or RESTMapper error — fails the
+reconcile. It is not read as "disabled", which would strip the startup gate
+from a cluster using it and roll the StatefulSet.
+
+### The lifecycle
+
+1. **A pod is held at startup.** New pods wait in a `startup-gate` init
+   container before RabbitMQ can open any Erlang/Raft connection. The gate waits
+   for the `rabbitmq.openstack.org/startup-approved` annotation to match the
+   pod's own UID. The StatefulSet template never sets it, so approval can only
+   come from the operator, and only for that exact pod.
+
+   An ordinary pod (nothing being remediated) is approved once the operator has
+   checked its claim and found no recovery record against it. This has a cost:
+   while the operator is down, a newly created pod cannot start its broker.
+   That is the trade-off for being able to stop a replacement before it joins.
+
+2. **The old member is removed.** By the time a replacement exists, the original
+   PVC deletion has already passed PodRemediator's fencing check, so the old
+   broker is gone. With the replacement still held, the controller confirms
+   there are enough healthy survivors and that every queue keeps its majority,
+   then asks a surviving broker to forget the old member. It verifies against
+   authoritative cluster metadata that the member and its queue replicas are
+   gone, and records `phase: MemberRemoved` in status together with the UID of
+   the replacement claim it applies to.
+
+   If the old broker is still reported as online, the removal does not happen.
+
+3. **The replacement starts and joins.** Startup approval re-reads that status
+   record directly from the API, so a controller restart on either side of the
+   status write can neither release an unchecked pod nor trigger a second,
+   unsafe membership removal. Once approved, the broker starts and explicitly
+   joins the cluster as a new member.
+
+4. **Queue replicas come back.** Placing them is RabbitMQ's responsibility
+   rather than the operator's. CMR is enabled on exactly these clusters and
+   grows quorum queues onto a member when it joins, so the operator observes
+   the result and never runs `rabbitmq-queues grow` itself. Until every quorum
+   queue includes the new broker and those replicas are online, the recovery
+   does not advance and the reconcile retries.
+
+5. **The pod is admitted to client traffic.** The serving label is set to
+   `true`, the pod enters the client-facing Service, and the remediation
+   reaches `phase: Recovered`.
+
+Steps 1 and 5 are separate gates because they stop different traffic. Removing
+a pod from a Service prevents clients reaching it, but has no effect on Raft
+traffic between brokers; only the startup gate prevents that.
+
+### Step 4 depends on CMR being enabled
+
+Step 4 is the one step the operator does not perform itself, so it is worth
+being explicit about what it relies on.
+
+The operator enables Continuous Membership Reconciliation for every 4.x
+multi-replica cluster in `internal/rabbitmq/configmap.go`, setting
+`quorum_queue.continuous_membership_reconciliation.enabled`, a
+`target_group_size` equal to the replica count, and `auto_remove = false`. The
+trigger that matters here is CMR's own: it reconciles queue membership when a
+node joins, which is exactly when a replacement rejoins. A periodic background
+sweep is the safety net behind that.
+
+The operator only reads the result. It does not run `rabbitmq-queues grow`,
+which avoids two processes writing the same queue membership concurrently.
+
+**This can be overridden.** The generated configuration is mounted as
+`conf.d/10-operatorDefaults.conf` and `spec.rabbitmq.additionalConfig` as
+`conf.d/90-userDefinedConfiguration.conf`. RabbitMQ reads `conf.d` in order, so
+the user-supplied file wins: setting
+`quorum_queue.continuous_membership_reconciliation.enabled = false` there
+disables CMR despite the operator's default.
+
+If CMR is disabled on a cluster that then goes through PVC remediation,
+recovery stops at step 4 and does not complete on its own. The remaining
+brokers keep serving, and the replacement is not admitted to client traffic
+until recovery completes, but it will not clear without intervention. The
+RabbitMq reports `Ready=False` with reason `NodeRejoinInProgress`, and the
+operator log names the queue still missing the replica. Re-enabling CMR, or
+growing the queue manually with `rabbitmq-queues grow <node> all`, lets the
+next reconcile finish the recovery.
+
+Do not disable CMR on a cluster that takes part in PVC remediation.
+
+### One remediation at a time
+
+RabbitMQ grants consent for one data PVC at a time, and the recovery record
+holds the original PVC UID and request ID so the slot is tied to one specific
+fault. The slot stays occupied while the old claim is terminating, while its
+replacement claim does not exist yet, and until a pod using the new claim is
+Ready with its broker running in the live cluster view.
+
+Release follows that one recovered replacement and does not wait for the full
+configured replica count, so an unrelated offline broker cannot hold the slot
+indefinitely. The next PVC still has to pass every gate on its own: configured
+capacity, ready and running survivors, and per-queue safety. In a five-broker
+cluster that means at least three healthy survivors once the next candidate
+and any stuck nodes are excluded.
+
+### How the serving label is managed
+
+New pods are created with `rabbitmq.openstack.org/serving=false`. Before
+applying the client Service selector, the controller reads recovery records and
+claim identity directly from the API rather than from its cache, and admits the
+pods entitled to serve, including backfilling older pods that predate the
+label. A pod recorded as a replacement stays excluded until its rejoin and
+queue checks pass.
+
+Pods already admitted keep their label through container restarts and operator
+downtime; only a newly created pod requires the operator to admit it. The
+headless Service used for clustering does not select on this label, so brokers
+can always reach each other.
+
+### Status: one ordered phase
+
+`RabbitMq.status.pvcRemediation[<claim>]` records one remediation per claim,
+with a single `phase` that only ever moves forward:
+
+| Phase | Meaning |
+|-------|---------|
+| `Pending` | A stuck claim has been noticed; no consent yet. |
+| `Consented` | Safe-to-delete has been published for this `requestID`/`pvcUID`. |
+| `MemberRemoved` | The old broker and its queue replicas are gone; the replacement recorded in `replacementPVCUID` may start. |
+| `Recovered` | The replacement rejoined and holds an online replica of every quorum queue. |
+
+A phase advances only for one `(pvcUID, requestID)` pair, so a record cannot be
+carried over to a different fault. Anything unset or unrecognized ranks below
+`Pending`, so every gate reading it fails closed: an unexpected value withholds
+permission rather than granting it.
+
+### One safety check, three callers
+
+Three places evaluate whether the cluster can afford to lose a given broker:
+granting consent, the `ValidatePVCDeletion` hook that runs immediately before
+deletion commits, and old-member removal. All three call the same code. A
+single helper reads the surviving brokers and the cluster's own node list from
+a survivor's management API, and a single check decides whether the candidate
+can be lost, so the three callers apply the same rules rather than three
+hand-written variations of them. They can still reach different verdicts, and
+that is the point of rechecking: a survivor that goes down between consent and
+the commit hook turns the same rules into a veto.

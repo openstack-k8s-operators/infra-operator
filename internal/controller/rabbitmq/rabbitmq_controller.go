@@ -18,10 +18,16 @@ limitations under the License.
 package rabbitmq
 
 import (
+	"bytes"
 	"context"
+	cryptotls "crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -49,6 +56,7 @@ import (
 
 	"github.com/go-logr/logr"
 	rabbitmqv1beta1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
+	remediationv1 "github.com/openstack-k8s-operators/infra-operator/apis/remediation/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/backup"
@@ -58,6 +66,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/ocp"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/pdb"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/rsh"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	common_statefulset "github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
@@ -96,12 +105,28 @@ var rmqAllWatchFields = []string{
 	topologyField,
 }
 
-// Reconciler reconciles a RabbitMq object
+// PodCommandExecutor executes a command in a RabbitMQ pod and captures both output streams.
+type PodCommandExecutor func(
+	ctx context.Context,
+	client kubernetes.Interface,
+	config *rest.Config,
+	podName types.NamespacedName,
+	container string,
+	command []string,
+	callback func(*bytes.Buffer, *bytes.Buffer) error,
+) error
+
+// Reconciler reconciles a RabbitMq object.
 type Reconciler struct {
 	client.Client
-	Kclient kubernetes.Interface
-	config  *rest.Config
-	Scheme  *runtime.Scheme
+	APIReader          client.Reader
+	Kclient            kubernetes.Interface
+	config             *rest.Config
+	Scheme             *runtime.Scheme
+	PodCommandExecutor PodCommandExecutor
+	// ManagementHTTPClient allows callers to supply the transport used for
+	// RabbitMQ management probes. Nil uses a client configured from the CR TLS settings.
+	ManagementHTTPClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch;create;update;patch;delete
@@ -132,8 +157,13 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=config.openshift.io,resources=networks,verbs=get;list;watch;
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list
 
-// Required to label and delete pods during CR deletion
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=list;watch;update;delete
+// Required to label and delete pods during CR deletion, and to set the
+// serving label that holds a replacement out of client traffic during rejoin
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;update;patch;delete
+
+// Required to run rabbitmqctl (forget_cluster_node/join_cluster) when
+// repairing cluster membership of a pod recreated with a blank data directory
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 
 // Required to manage PodDisruptionBudgets for multi-replica deployments
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -148,9 +178,10 @@ type Reconciler struct {
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, _err error) {
 	Log := r.GetLogger(ctx)
 
-	// Fetch the RabbitMq instance
+	// Recovery records authorize pod admission. A pod-create watch may overtake
+	// the cached status update that recorded consent, so read the CR directly.
 	instance := &rabbitmqv1beta1.RabbitMq{}
-	err := r.Get(ctx, req.NamespacedName, instance)
+	err := r.safetyReader().Get(ctx, req.NamespacedName, instance)
 	if err != nil {
 		if k8s_errors.IsNotFound(err) {
 			// Request object not found, could have been deleted after reconcile request.
@@ -292,6 +323,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			return
 		}
 	}()
+	previousObservedGeneration := instance.Status.ObservedGeneration
+	instance.Status.ObservedGeneration = instance.Generation
+	generationChanged := previousObservedGeneration != instance.Generation
 
 	//
 	// initialize status
@@ -315,6 +349,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Otherwise Init() would reset all conditions to Unknown on every reconciliation
 	if len(instance.Status.Conditions) == 0 {
 		instance.Status.Conditions.Init(&cl)
+	}
+	if generationChanged {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "Reconciling", condition.SeverityInfo,
+			"RabbitMQ is reconciling the requested generation"))
 	}
 	// Init Topology condition if there's a reference
 	if instance.Spec.TopologyRef != nil {
@@ -355,6 +394,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.RequestedReason,
 					condition.SeverityInfo,
 					condition.TLSInputReadyWaitingMessage, err.Error()))
+				inFlight, readErr := r.recoveryInFlight(ctx, instance)
+				if readErr != nil {
+					return ctrl.Result{}, readErr
+				}
+				if inFlight {
+					applied, applyErr := r.appliedRemediationInstance(ctx, instance)
+					if applyErr != nil {
+						return ctrl.Result{}, applyErr
+					}
+					requeue, rejoinErr := r.ReconcileNodeRejoin(ctx, applied, true)
+					instance.Status.PVCRemediation = applied.Status.PVCRemediation
+					if rejoinErr != nil {
+						Log.Info("Applied-TLS PVC recovery deferred", "reason", rejoinErr.Error())
+						return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+					}
+					if requeue {
+						return ctrl.Result{RequeueAfter: time.Second * 15}, nil
+					}
+					if bookkeepingErr := r.CheckForStuckPVCRequiringRemediation(ctx, applied, helper,
+						RemediationDecision{RecoveryInFlight: true}); bookkeepingErr != nil {
+						instance.Status.PVCRemediation = applied.Status.PVCRemediation
+						Log.Info("Applied-TLS PVC recovery bookkeeping deferred", "reason", bookkeepingErr.Error())
+						return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+					}
+					instance.Status.PVCRemediation = applied.Status.PVCRemediation
+					return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+				}
 				return ctrl.Result{}, nil
 			}
 			instance.Status.Conditions.Set(condition.FalseCondition(
@@ -484,6 +550,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Phase flow: None → DeletingResources → WaitingForCluster → None
 	//
 	if requiresWipe && instance.Status.UpgradePhase == rabbitmqv1beta1.UpgradePhaseNone {
+		inFlight, err := r.recoveryInFlight(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if inFlight {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ReadyCondition, "RecoveryWipeDeferred", condition.SeverityInfo,
+				"RabbitMQ storage wipe is deferred until PVC recovery completes"))
+			if err := helper.PatchInstance(ctx, instance); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
 		instance.Status.UpgradePhase = rabbitmqv1beta1.UpgradePhaseDeletingResources
 		Log.Info("Starting storage wipe", "reason", instance.Status.WipeReason)
 		if err := helper.PatchInstance(ctx, instance); err != nil {
@@ -492,18 +571,54 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Determine the config version: use TargetVersion during upgrade,
-	// otherwise use CurrentVersion.
-	configVersion := ""
-	if instance.Spec.TargetVersion != nil && *instance.Spec.TargetVersion != "" {
-		configVersion = *instance.Spec.TargetVersion
+	configVersion := rmqConfigVersion(instance)
+
+	// Worked out once: the PodRemediator lookup should not be repeated for
+	// every resource this reconcile builds, and the StatefulSet, the Services,
+	// pod admission and node rejoin must all agree on the answer. A failed
+	// lookup aborts the reconcile instead of falling back to "off", which
+	// would strip the startup gate from a cluster that is using it.
+	remediation, err := r.remediationDecisionFor(ctx, instance)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	if configVersion == "" {
-		configVersion = instance.Status.CurrentVersion
-		if configVersion == "" {
-			configVersion = DefaultRabbitMQVersion
+	deferSpecChange := (!rejoinEnabled(instance) && hasUnrecoveredRemediation(instance)) ||
+		scaleDownRemovesRecovery(instance)
+	if remediation.RecoveryInFlight && deferSpecChange {
+		applied, err := r.appliedRemediationInstance(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
+		syncRecoveryStatus := func() {
+			instance.Status.PVCRemediation = applied.Status.PVCRemediation
+		}
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "RecoverySpecChangeDeferred", condition.SeverityInfo,
+			"RabbitMQ spec changes that disable or resize active PVC recovery are deferred until recovery completes"))
+		Log.Info("Continuing PVC recovery with the applied StatefulSet spec",
+			"requestedReplicas", instance.Spec.Replicas, "appliedReplicas", applied.Spec.Replicas)
+		if !rejoinEnabled(applied) {
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		requeue, err := r.ReconcileNodeRejoin(ctx, applied, true)
+		syncRecoveryStatus()
+		if err != nil {
+			Log.Info("Applied-spec PVC recovery deferred", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		if requeue {
+			return ctrl.Result{RequeueAfter: time.Second * 15}, nil
+		}
+		err = r.CheckForStuckPVCRequiringRemediation(ctx, applied, helper,
+			RemediationDecision{RecoveryInFlight: true})
+		syncRecoveryStatus()
+		if err != nil {
+			Log.Info("Applied-spec PVC recovery bookkeeping deferred", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+		}
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
+	keepMachinery := remediation.KeepMachinery()
 
 	// Determine if we need to add data-wipe init container
 	needsDataWipe := instance.Status.UpgradePhase == rabbitmqv1beta1.UpgradePhaseDeletingResources ||
@@ -655,6 +770,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		Log.Info(fmt.Sprintf("Headless Service %s - %s", headlessSvc.Name, hsop))
 	}
 
+	// Before applying the client Service (whose selector requires serving=true),
+	// backfill the serving label on any pre-existing pod that lacks it. New pods
+	// get the label from the StatefulSet template; this only matters on operator
+	// upgrade, where an unlabeled running pod would otherwise be dropped from the
+	// Service until the StatefulSet finished rolling.
+	if err := r.ensurePodsServingLabeled(ctx, instance, keepMachinery); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Create client service
 	clientSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -663,7 +787,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		},
 	}
 	csop, err := controllerutil.CreateOrPatch(ctx, r.Client, clientSvc, func() error {
-		desired, err := rabbitmq.ClientService(instance)
+		desired, err := rabbitmq.ClientService(instance, keepMachinery)
 		if err != nil {
 			return err
 		}
@@ -807,7 +931,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 				return BuildProxySidecarContainer(inst, ipv6)
 			},
 		}
-		desired := rabbitmq.StatefulSet(instance, configMapHash, topology, envVars, configVersion, needsDataWipe, proxyCfg)
+		desired := rabbitmq.StatefulSet(instance, configMapHash, topology, envVars, configVersion, needsDataWipe, proxyCfg, keepMachinery)
 		isCreate := sts.CreationTimestamp.IsZero()
 
 		if isCreate {
@@ -871,6 +995,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Check StatefulSet readiness
 	instance.Status.ReadyCount = sts.Status.ReadyReplicas
 	clusterReady := common_statefulset.IsReady(*sts)
+	if !clusterReady {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			"RabbitMQ StatefulSet pods are not ready"))
+	}
+
+	// Putting the serving requirement into the per-pod Services cannot wait for
+	// the StatefulSet to be ready, because a remediation is precisely when it is
+	// not: the pass further down runs only in the ready branch, so a Service
+	// created before the machinery was switched on would keep selecting on pod
+	// name alone, and a held replacement would be one of its endpoints as soon
+	// as it went Ready. Reporting and LoadBalancer requeues stay with that pass.
+	var deferredRequeue ctrl.Result
+	var deferredServiceErr error
+	if !clusterReady && keepMachinery && perPodServicesConfigured(instance) {
+		if _, err := r.reconcilePerPodServices(ctx, instance, helper,
+			rabbitmq.CommonLabels(instance.Name), keepMachinery); err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.CreateServiceReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.CreateServiceReadyErrorMessage, err.Error()))
+			deferredServiceErr = err
+		}
+	}
 
 	if clusterReady {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
@@ -920,23 +1071,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		instance.Status.Conditions.MarkTrue(condition.PDBReadyCondition, condition.PDBReadyMessage)
 
 		// Create per-pod services when podOverride is configured
-		if instance.Spec.Replicas != nil && *instance.Spec.Replicas > 0 &&
-			instance.Spec.PodOverride != nil && len(instance.Spec.PodOverride.Services) > 0 {
-			ctrlResult, err := r.reconcilePerPodServices(ctx, instance, helper, labelMap)
+		if perPodServicesConfigured(instance) {
+			ctrlResult, err := r.reconcilePerPodServices(ctx, instance, helper, labelMap, keepMachinery)
 			if err != nil {
 				instance.Status.Conditions.Set(condition.FalseCondition(
 					condition.CreateServiceReadyCondition,
 					condition.ErrorReason,
 					condition.SeverityWarning,
 					condition.CreateServiceReadyErrorMessage, err.Error()))
-				return ctrlResult, err
+				deferredRequeue = ctrlResult
+				deferredServiceErr = err
 			} else if (ctrlResult != ctrl.Result{}) {
 				instance.Status.Conditions.Set(condition.FalseCondition(
 					condition.CreateServiceReadyCondition,
 					condition.RequestedReason,
 					condition.SeverityInfo,
 					condition.CreateServiceReadyRunningMessage))
-				return ctrlResult, nil
+				deferredRequeue = ctrlResult
 			}
 		} else if len(instance.Status.ServiceHostnames) > 0 {
 			// PodOverride was removed, clean up per-pod services
@@ -946,11 +1097,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 					condition.ErrorReason,
 					condition.SeverityWarning,
 					condition.CreateServiceReadyErrorMessage, err.Error()))
-				return ctrl.Result{}, err
+				deferredServiceErr = err
+			} else {
+				instance.Status.ServiceHostnames = nil
 			}
-			instance.Status.ServiceHostnames = nil
 		}
-		instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+		if deferredServiceErr == nil && deferredRequeue == (ctrl.Result{}) {
+			instance.Status.Conditions.MarkTrue(condition.CreateServiceReadyCondition, condition.CreateServiceReadyMessage)
+		}
 
 		// Sync Status.QueueType with Spec.QueueType
 		if instance.Spec.QueueType != nil {
@@ -1021,15 +1175,97 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
 
-	// Mark ObservedGeneration only after the full reconciliation succeeds.
-	// This ensures consumers (e.g., OSCP) can trust that the controller has
-	// fully processed the spec at this generation.
-	instance.Status.ObservedGeneration = instance.Generation
+	// Repair cluster membership before evaluating whether PVC recovery is complete.
+	// The operation is request-scoped by the pending PVC remediation record.
+	if requeue, err := r.ReconcileNodeRejoin(ctx, instance, remediation.RecoveryInFlight); err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "NodeRejoinInProgress", condition.SeverityInfo,
+			"RabbitMQ node rejoin is waiting to complete"))
+		Log.Info("Node rejoin deferred; requeuing", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	} else if requeue {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ReadyCondition, "NodeRejoinInProgress", condition.SeverityInfo,
+			"RabbitMQ node rejoin is waiting to complete"))
+		return ctrl.Result{RequeueAfter: time.Second * 15}, nil
+	}
 
+	// PVC remediation handshake with PodRemediator (optional feature), skipped
+	// entirely unless a PodRemediator CR covers this namespace.
+	// Consent is fail-closed: when live quorum cannot be confirmed the check returns an
+	// error. We do not fail the CR, but we requeue so the handshake is retried instead of
+	// stalling until an unrelated watch event fires.
+	consentDecision := remediation
+	if deferredServiceErr != nil {
+		consentDecision.AllowNewConsent = false
+	}
+	if err := r.CheckForStuckPVCRequiringRemediation(ctx, instance, helper, consentDecision); err != nil {
+		Log.Info("PVC remediation consent deferred; requeuing", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
+	}
+
+	if deferredServiceErr != nil {
+		return ctrl.Result{}, deferredServiceErr
+	}
+	if deferredRequeue != (ctrl.Result{}) {
+		return deferredRequeue, nil
+	}
 	return ctrl.Result{}, nil
 }
 
-func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper, labelMap map[string]string) (ctrl.Result, error) {
+// appliedRemediationInstance describes the StatefulSet currently running, so
+// recovery can finish while a requested scale or version change is deferred.
+func (r *Reconciler) appliedRemediationInstance(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+) (*rabbitmqv1beta1.RabbitMq, error) {
+	applied := instance.DeepCopy()
+	sts := &appsv1.StatefulSet{}
+	key := types.NamespacedName{Name: instance.Name + "-server", Namespace: instance.Namespace}
+	if err := r.Get(ctx, key, sts); err != nil {
+		if k8s_errors.IsNotFound(err) {
+			return applied, nil
+		}
+		return nil, fmt.Errorf("read applied RabbitMq StatefulSet: %w", err)
+	}
+	if sts.Spec.Replicas != nil {
+		applied.Spec.Replicas = ptr.To(*sts.Spec.Replicas)
+	}
+	applied.Spec.TargetVersion = nil
+	applied.Spec.TLS.SecretName = ""
+	applied.Spec.TLS.CaSecretName = ""
+	for _, volume := range sts.Spec.Template.Spec.Volumes {
+		if volume.Name != "rabbitmq-tls" || volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.Secret == nil {
+				continue
+			}
+			if source.Secret.Items == nil {
+				continue
+			}
+			for _, item := range source.Secret.Items {
+				switch item.Key {
+				case "tls.crt":
+					applied.Spec.TLS.SecretName = source.Secret.Name
+				case "ca.crt":
+					applied.Spec.TLS.CaSecretName = source.Secret.Name
+				}
+			}
+		}
+	}
+	return applied, nil
+}
+
+// perPodServicesConfigured reports whether the spec asks for one Service per
+// pod, which is how a deployment gives each broker its own client endpoint.
+func perPodServicesConfigured(instance *rabbitmqv1beta1.RabbitMq) bool {
+	return instance.Spec.Replicas != nil && *instance.Spec.Replicas > 0 &&
+		instance.Spec.PodOverride != nil && len(instance.Spec.PodOverride.Services) > 0
+}
+
+func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper, labelMap map[string]string, keepMachinery bool) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 
 	if instance.Spec.PodOverride == nil || len(instance.Spec.PodOverride.Services) == 0 {
@@ -1062,17 +1298,24 @@ func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabb
 	var serviceHostnames []string
 	var requeueNeeded bool
 	for i := 0; i < replicas; i++ {
-		podName := fmt.Sprintf("%s-server-%d", instance.Name, i)
+		podName := rmqPodName(instance, i)
 		svcName := podName
+
+		// Select the pod by name and, where the serving label is in use, also
+		// require serving=true so that a replacement the controller is holding
+		// out of client traffic is removed from its per-pod Service too, which
+		// feeds transport URLs.
+		selector := map[string]string{appsv1.StatefulSetPodNameLabel: podName}
+		if keepMachinery {
+			selector[rabbitmqv1beta1.RabbitMQServingLabel] = rabbitmqv1beta1.RabbitMQServingTrue
+		}
 
 		svc, err := service.NewService(
 			service.GenericService(&service.GenericServiceDetails{
 				Name:      svcName,
 				Namespace: instance.Namespace,
 				Labels:    labelMap,
-				Selector: map[string]string{
-					appsv1.StatefulSetPodNameLabel: podName,
-				},
+				Selector:  selector,
 				Ports: []corev1.ServicePort{
 					{Name: "amqp", Port: 5672, TargetPort: intstr.FromInt(5672)},
 					{Name: "amqps", Port: 5671, TargetPort: intstr.FromInt(5671)},
@@ -1695,9 +1938,1042 @@ func (r *Reconciler) cleanupOldRabbitmqClusterCR(ctx context.Context, instance *
 	return nil
 }
 
+// IsRabbitmqPVC returns true when the object is a PVC belonging to a RabbitMq
+// StatefulSet. The canonical "persistence-<sts>-server-<ordinal>" name remains
+// authoritative when the editable app.kubernetes.io/name label is missing.
+func IsRabbitmqPVC(obj client.Object) bool {
+	clusterName := obj.GetLabels()[labels.K8sAppName]
+	if clusterName != "" {
+		_, ok := rabbitMQClaimOrdinal(clusterName, obj.GetName())
+		return ok
+	}
+	_, _, ok := rabbitMQClaimNameIdentity(obj.GetName())
+	return ok
+}
+
+// IsRabbitmqPod returns true for pods managed by a RabbitMq StatefulSet. Pods
+// carry the full common label set, so we match on the component label rather than
+// the generic name label alone to avoid reacting to unrelated pods.
+func IsRabbitmqPod(obj client.Object) bool {
+	l := obj.GetLabels()
+	return l[labels.K8sAppComponent] == "rabbitmq" &&
+		l[labels.K8sAppName] != "" &&
+		strings.Contains(obj.GetName(), "-server-")
+}
+
+// rmqPodReadyStatus returns the pod's PodReady condition status, or Unknown if
+// the condition is absent.
+func rmqPodReadyStatus(pod *corev1.Pod) corev1.ConditionStatus {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status
+		}
+	}
+	return corev1.ConditionUnknown
+}
+
+// rmqPodUpdatePredicate limits Pod update events that enqueue a RabbitMq reconcile
+// to the changes the controller actually acts on: readiness transitions, the
+// serving label, the rejoin annotation, phase, and (dis)appearance of a deletion
+// timestamp. Routine kubelet status heartbeats bump resourceVersion without
+// changing any of these, so this avoids a reconcile storm. Create/Delete/Generic
+// events are left to pass (nil funcs default to true).
+func rmqPodUpdatePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldPod, ok1 := e.ObjectOld.(*corev1.Pod)
+			newPod, ok2 := e.ObjectNew.(*corev1.Pod)
+			if !ok1 || !ok2 {
+				return true
+			}
+			return rmqPodReadyStatus(oldPod) != rmqPodReadyStatus(newPod) ||
+				oldPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] != newPod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] ||
+				oldPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] != newPod.Annotations[rabbitmqv1beta1.AnnotationRejoinCluster] ||
+				oldPod.Annotations[rabbitmqv1beta1.AnnotationStartupApproved] != newPod.Annotations[rabbitmqv1beta1.AnnotationStartupApproved] ||
+				oldPod.Status.Phase != newPod.Status.Phase ||
+				(oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil)
+		},
+	}
+}
+
+// FindRabbitmqForPVC maps a PVC annotation-change event to the owning RabbitMq CR.
+// The canonical claim name is used so a removed app label cannot hide the event.
+func (r *Reconciler) FindRabbitmqForPVC(_ context.Context, pvc client.Object) []reconcile.Request {
+	crName, _, ok := rabbitMQClaimNameIdentity(pvc.GetName())
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      crName,
+			Namespace: pvc.GetNamespace(),
+		},
+	}}
+}
+
+// FindRabbitmqForPod maps a RabbitMq pod event to its owning RabbitMq CR.
+func (r *Reconciler) FindRabbitmqForPod(_ context.Context, pod client.Object) []reconcile.Request {
+	crName, ok := pod.GetLabels()["app.kubernetes.io/name"]
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: crName, Namespace: pod.GetNamespace()},
+	}}
+}
+
+// rmqPVCOrdinal extracts the numeric ordinal suffix from a RabbitMQ StatefulSet PVC name.
+// PVC names follow the pattern "persistence-<sts-name>-<ordinal>".
+// Returns (ordinal, true) when the suffix is a valid integer; (0, false) otherwise so
+// callers can exclude malformed names rather than silently treating them as ordinal 0.
+func rmqPVCOrdinal(name string) (int, bool) {
+	idx := strings.LastIndex(name, "-")
+	if idx < 0 || idx == len(name)-1 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[idx+1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// rmqReadyPods returns non-terminating Running pods with all containers Ready,
+// excluding pods on stuck nodes and explicit pod names. A pod on a partitioned
+// node can keep reporting Ready for the node-monitor grace period, so it cannot
+// count as a healthy survivor.
+func rmqReadyPods(pods []corev1.Pod, excludeNodes, excludePodNames map[string]bool) []corev1.Pod {
+	readyPods := make([]corev1.Pod, 0, len(pods))
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Spec.NodeName == "" || excludeNodes[pod.Spec.NodeName] || excludePodNames[pod.Name] {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if pod.Labels[rabbitmqv1beta1.RabbitMQServingLabel] == rabbitmqv1beta1.RabbitMQServingFalse {
+			continue
+		}
+		if !podReady(pod) {
+			continue
+		}
+		readyPods = append(readyPods, *pod)
+	}
+	return readyPods
+}
+
+// rmqMgmtCreds holds what is needed to reach the RabbitMQ management HTTP API.
+type rmqMgmtCreds struct {
+	username string
+	password string
+	tls      bool   // management endpoint is TLS (spec.tls.secretName set)
+	caPEM    []byte // CA bundle to verify the endpoint (spec.tls.caSecretName), may be empty
+}
+
+type rmqNodeStatus struct {
+	Name    string `json:"name"`
+	Running bool   `json:"running"`
+}
+
+type rmqQueueStatus struct {
+	Name    string   `json:"name"`
+	Vhost   string   `json:"vhost"`
+	Type    string   `json:"type"`
+	Node    string   `json:"node"`
+	Durable *bool    `json:"durable"`
+	Members []string `json:"members"`
+	Online  []string `json:"online"`
+}
+
+// rmqLoadMgmtCreds reads the default-user secret (username/password) and, when TLS is
+// enabled, the CA secret used to verify the RabbitMQ management HTTP API endpoint.
+func (r *Reconciler) rmqLoadMgmtCreds(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq) (*rmqMgmtCreds, error) {
+	secret := &corev1.Secret{}
+	if err := r.safetyReader().Get(ctx, types.NamespacedName{
+		Name:      fmt.Sprintf("%s-default-user", instance.Name),
+		Namespace: instance.Namespace,
+	}, secret); err != nil {
+		return nil, fmt.Errorf("read default-user secret: %w", err)
+	}
+	user := string(secret.Data["username"])
+	pass := string(secret.Data["password"])
+	if user == "" || pass == "" {
+		return nil, fmt.Errorf("default-user secret %s-default-user missing username/password", instance.Name)
+	}
+	creds := &rmqMgmtCreds{username: user, password: pass}
+	if instance.Spec.TLS.SecretName != "" {
+		creds.tls = true
+		caSecretName := instance.Spec.TLS.CaSecretName
+		if caSecretName == "" {
+			caSecretName = instance.Spec.TLS.SecretName
+		}
+		caSecret := &corev1.Secret{}
+		if err := r.safetyReader().Get(ctx, types.NamespacedName{
+			Name:      caSecretName,
+			Namespace: instance.Namespace,
+		}, caSecret); err != nil {
+			return nil, fmt.Errorf("read CA secret %s: %w", caSecretName, err)
+		}
+		caPEM, present := caSecret.Data["ca.crt"]
+		if present && len(caPEM) == 0 {
+			return nil, fmt.Errorf("RabbitMq CA secret %s has an empty ca.crt", caSecretName)
+		}
+		if instance.Spec.TLS.CaSecretName != "" && !present {
+			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt", caSecretName)
+		}
+		creds.caPEM = caPEM
+	}
+	return creds, nil
+}
+
+// rmqManagementClient builds the HTTP client used for a RabbitMQ management-API
+// scan against a single pod. It is built once per scan so queue and node reads
+// reuse one connection and one TLS handshake.
+//
+// TLS verification uses the configured CA when present and the system roots
+// otherwise. The management API carries credentials and its response can
+// authorize destructive PVC deletion, so verification failures block consent.
+func (r *Reconciler) rmqManagementClient(_ context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) (*http.Client, error) {
+	if r.ManagementHTTPClient != nil {
+		return r.ManagementHTTPClient, nil
+	}
+	transport := &http.Transport{
+		IdleConnTimeout:     30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	if creds.tls {
+		serverName := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace)
+		tlsCfg := &cryptotls.Config{MinVersion: cryptotls.VersionTLS12, ServerName: serverName}
+		switch {
+		case len(creds.caPEM) > 0:
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(creds.caPEM) {
+				return nil, fmt.Errorf("failed to parse RabbitMQ CA certificate")
+			}
+			tlsCfg.RootCAs = pool
+		case instance.Spec.TLS.CaSecretName != "":
+			return nil, fmt.Errorf("RabbitMq CA secret %s has no ca.crt; cannot verify the management endpoint", instance.Spec.TLS.CaSecretName)
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
+}
+
+// rmqManagementGet performs a bounded read from a ready broker's management API
+// using a caller-provided client (built once per scan by rmqManagementClient).
+func (r *Reconciler) rmqManagementGet(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, httpClient *http.Client, creds *rmqMgmtCreds, path string, result interface{}) (retErr error) {
+	scheme, port := "http", rabbitmq.ManagementPort
+	if creds.tls {
+		scheme, port = "https", rabbitmq.ManagementTLSPort
+	}
+
+	// Use the .svc hostname for DNS, while TLS verifies the certificate's SAN without that suffix.
+	host := rabbitmq.ManagementPodServerName(pod.Name, instance.Name, instance.Namespace) + ".svc"
+	url := fmt.Sprintf("%s://%s:%d%s", scheme, host, port, path)
+
+	// Bound the request so a stalled endpoint cannot pin a reconcile worker indefinitely.
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(creds.username, creds.password)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("close management API response body: %w", closeErr)
+			} else {
+				log.FromContext(ctx).V(1).Info("Failed to close RabbitMQ management API response body", "error", closeErr)
+			}
+		}
+	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("management API %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(result); err != nil {
+		return fmt.Errorf("parse management API %s: %w", path, err)
+	}
+	return nil
+}
+
+// rmqClusterNodes queries the RabbitMQ management API (GET /api/nodes) on the given pod.
+// It returns node names as well as their running state so PVC consent can count only
+// ready Kubernetes pods that are confirmed as running RabbitMQ cluster members.
+// The separate replacement-rejoin workflow executes RabbitMQ CLI commands in pods.
+func (r *Reconciler) rmqClusterNodes(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds) ([]rmqNodeStatus, error) {
+	httpClient, err := r.rmqManagementClient(ctx, instance, pod, creds)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []rmqNodeStatus
+	if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, "/api/nodes?columns=name,running", &nodes); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		if node.Name == "" {
+			return nil, fmt.Errorf("management API returned a node without a name")
+		}
+		if seen[node.Name] {
+			return nil, fmt.Errorf("management API returned duplicate node %q", node.Name)
+		}
+		seen[node.Name] = true
+	}
+	return nodes, nil
+}
+
+// scanQueues reads every queue from one GET /api/queues/detailed response,
+// de-duplicating the result before invoking perQueue. A single response avoids
+// page-offset races that could omit a queue when the queue set changed between
+// requests. perQueue may return an error to abort the scan; "soft" conditions a
+// caller wants to evaluate only after a complete pass (e.g. a queue still
+// missing a replica) should be recorded in the closure and checked after
+// scanQueues returns nil. An empty cluster returns nil.
+func (r *Reconciler) scanQueues(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	pod *corev1.Pod,
+	creds *rmqMgmtCreds,
+	columns string,
+	perQueue func(rmqQueueStatus) error,
+) error {
+	httpClient, err := r.rmqManagementClient(ctx, instance, pod, creds)
+	if err != nil {
+		return err
+	}
+	var queues []rmqQueueStatus
+	path := "/api/queues/detailed?columns=" + columns
+	if err := r.rmqManagementGet(ctx, instance, pod, httpClient, creds, path, &queues); err != nil {
+		return err
+	}
+	if queues == nil {
+		return fmt.Errorf("RabbitMq queue scan did not return an array")
+	}
+	seenQueues := map[string]bool{}
+	for i := range queues {
+		queue := queues[i]
+		if queue.Name == "" || queue.Vhost == "" || queue.Type == "" {
+			return fmt.Errorf("RabbitMq queue scan has a queue without name, vhost, or type")
+		}
+		key := queue.Vhost + "\x00" + queue.Name
+		if seenQueues[key] {
+			return fmt.Errorf("RabbitMq queue %s/%s appears more than once", queue.Vhost, queue.Name)
+		}
+		seenQueues[key] = true
+		if err := perQueue(queue); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// quorumQueueMembers validates and returns the configured-member and online-member
+// sets of a quorum queue from a management-API queue entry.
+func quorumQueueMembers(queue rmqQueueStatus) (members, online map[string]bool, err error) {
+	if len(queue.Members) == 0 || queue.Online == nil {
+		return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has unknown membership", queue.Vhost, queue.Name)
+	}
+	members = make(map[string]bool, len(queue.Members))
+	for _, member := range queue.Members {
+		if member == "" || members[member] {
+			return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous membership", queue.Vhost, queue.Name)
+		}
+		members[member] = true
+	}
+	online = make(map[string]bool, len(queue.Online))
+	for _, member := range queue.Online {
+		if !members[member] || online[member] {
+			return nil, nil, fmt.Errorf("RabbitMq quorum queue %s/%s has ambiguous online members", queue.Vhost, queue.Name)
+		}
+		online[member] = true
+	}
+	return members, online, nil
+}
+
+// rmqQueuesSafeAfterDeletion checks each quorum queue's own replica majority.
+// Cluster membership alone cannot prove queue availability: a quorum queue can
+// have fewer members than the broker cluster, including only two members.
+func (r *Reconciler) rmqQueuesSafeAfterDeletion(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, pod *corev1.Pod, creds *rmqMgmtCreds, candidateNode string, safeNodes map[string]bool) error {
+	// A management scan plus several bounded Ra proof batches can legitimately
+	// exceed 30 seconds on a large queue set. Keep a finite outer bound while
+	// leaving each HTTP request and CLI command independently bounded.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	quorumQueues := []rmqQueueStatus{}
+	err := r.scanQueues(ctx, instance, pod, creds,
+		"name,vhost,type,node,durable,members,online",
+		func(queue rmqQueueStatus) error {
+			switch queue.Type {
+			case "stream":
+				// A stream can carry data on the candidate PVC, but RabbitMQ does
+				// not expose the same queue-majority guarantee for streams.
+				if len(queue.Members) == 0 {
+					return fmt.Errorf("RabbitMq stream %s/%s has unknown members", queue.Vhost, queue.Name)
+				}
+				streamMembers := make(map[string]bool, len(queue.Members))
+				for _, member := range queue.Members {
+					if member == "" || streamMembers[member] {
+						return fmt.Errorf("RabbitMq stream %s/%s has ambiguous members", queue.Vhost, queue.Name)
+					}
+					streamMembers[member] = true
+					if member == candidateNode {
+						return fmt.Errorf("RabbitMq stream %s/%s has a replica on the candidate", queue.Vhost, queue.Name)
+					}
+				}
+				return nil
+			case "classic":
+				// Classic queues are single-replica: losing their hosting PVC can
+				// lose durable queue data despite healthy broker cluster quorum.
+				if queue.Durable == nil {
+					return fmt.Errorf("RabbitMq classic queue %s/%s has unknown durability", queue.Vhost, queue.Name)
+				}
+				if *queue.Durable {
+					if queue.Node == "" || queue.Node == candidateNode || !safeNodes[queue.Node] {
+						return fmt.Errorf("RabbitMq durable classic queue %s/%s has unsafe or unknown hosting node %q", queue.Vhost, queue.Name, queue.Node)
+					}
+				}
+				return nil
+			case "quorum":
+				members, online, err := quorumQueueMembers(queue)
+				if err != nil {
+					return err
+				}
+				survivors := 0
+				onlineSurvivors := 0
+				for member := range members {
+					if safeNodes[member] {
+						survivors++
+					}
+					if safeNodes[member] && online[member] {
+						onlineSurvivors++
+					}
+				}
+				if survivors < quorumOf(int32(len(members))) {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s would lose quorum: %d safe members of %d", queue.Vhost, queue.Name, survivors, len(members))
+				}
+				if onlineSurvivors < quorumOf(int32(len(members))) {
+					return fmt.Errorf("RabbitMq quorum queue %s/%s has too few online safe members: %d of %d", queue.Vhost, queue.Name, onlineSurvivors, len(members))
+				}
+				quorumQueues = append(quorumQueues, queue)
+				return nil
+			default:
+				return fmt.Errorf("RabbitMq queue %s/%s has unknown type %s", queue.Vhost, queue.Name, queue.Type)
+			}
+		})
+	if err != nil {
+		return err
+	}
+	return r.verifyQueueQuorumReads(ctx, pod, quorumQueues, safeNodes)
+}
+
+// rmqRunningSurvivorCount verifies each ready survivor pod maps unambiguously to a
+// named node in RabbitMQ's live cluster view, then counts only running members.
+func rmqRunningSurvivorCount(
+	instance *rabbitmqv1beta1.RabbitMq,
+	readySurvivors []corev1.Pod,
+	nodes []rmqNodeStatus,
+) (int, error) {
+	nodesByName := make(map[string]rmqNodeStatus, len(nodes))
+	for _, node := range nodes {
+		if node.Name == "" {
+			return 0, fmt.Errorf("management API returned a node without a name")
+		}
+		if _, exists := nodesByName[node.Name]; exists {
+			return 0, fmt.Errorf("management API returned duplicate node %q", node.Name)
+		}
+		nodesByName[node.Name] = node
+	}
+
+	seenPodNames := make(map[string]bool, len(readySurvivors))
+	running := 0
+	for i := range readySurvivors {
+		pod := &readySurvivors[i]
+		if seenPodNames[pod.Name] {
+			return 0, fmt.Errorf("multiple ready RabbitMq pods named %q", pod.Name)
+		}
+		seenPodNames[pod.Name] = true
+		nodeName := rmqNodeName(instance, pod.Name)
+		node, exists := nodesByName[nodeName]
+		if !exists {
+			return 0, fmt.Errorf("ready RabbitMq pod %s has no matching management API node %s", pod.Name, nodeName)
+		}
+		if node.Running {
+			running++
+		}
+	}
+	return running, nil
+}
+
+// podRemediatorScope says what the PodRemediator CRs in the cluster mean for
+// one namespace. It answers two questions, because they can differ.
+type podRemediatorScope struct {
+	// Accepting is true when a PodRemediator that applies to this namespace is
+	// enabled and is not being deleted. Only then will PodRemediator start
+	// remediating a new PVC.
+	Accepting bool
+	// Present is true when a PodRemediator applies to this namespace at all,
+	// even a disabled one or one that is being deleted. In both of those
+	// states PodRemediator still finishes a PVC deletion it had already
+	// committed to: resumeCommittedPVCDeletions runs before the spec.disabled
+	// check, and reconcileDelete keeps the CR's finalizer until every
+	// committed deletion is done. So as long as the CR is there, a remediation
+	// that already started can still be running.
+	Present bool
+}
+
+// podRemediatorScopeFor looks up how PVC remediation applies to namespace.
+// That decides whether this operator deploys the parts that make a broker
+// depend on it: the startup gate, the serving label and the client Services'
+// serving requirement.
+//
+// What decides it is a PodRemediator CR, not the CRD. The CRD ships with
+// infra-operator itself, so it is installed everywhere and says nothing about
+// whether anyone turned the feature on. A PodRemediator applies to a namespace
+// when its spec.namespaces lists that namespace, or when that list is empty
+// and the CR itself lives there.
+//
+// Lookup failures are returned, not reported as "not configured". Treating a
+// short-lived RESTMapper or API error as "turned off" would take the startup
+// gate away from a cluster that needs it, and restart every broker to do so.
+func (r *Reconciler) podRemediatorScopeFor(ctx context.Context, namespace string) (podRemediatorScope, error) {
+	scope := podRemediatorScope{}
+	if _, err := r.RESTMapper().RESTMapping(schema.GroupKind{
+		Group: "remediation.openstack.org",
+		Kind:  "PodRemediator",
+	}); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return scope, nil
+		}
+		return scope, fmt.Errorf("checking whether the PodRemediator CRD is installed: %w", err)
+	}
+	list := &remediationv1.PodRemediatorList{}
+	if err := r.List(ctx, list); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return scope, nil
+		}
+		return scope, fmt.Errorf("listing PodRemediators: %w", err)
+	}
+	for i := range list.Items {
+		pr := &list.Items[i]
+		if !podRemediatorAppliesTo(pr, namespace) {
+			continue
+		}
+		scope.Present = true
+		if !pr.Spec.Disabled && pr.DeletionTimestamp == nil {
+			scope.Accepting = true
+			break
+		}
+	}
+	return scope, nil
+}
+
+// podRemediatorAppliesTo reports whether one PodRemediator's namespace list
+// includes namespace. It ignores spec.disabled and deletion on purpose; the
+// caller tells those apart - see podRemediatorScope.
+func podRemediatorAppliesTo(pr *remediationv1.PodRemediator, namespace string) bool {
+	// An empty spec.namespaces means "the namespace this CR lives in".
+	if len(pr.Spec.Namespaces) == 0 {
+		return pr.Namespace == namespace
+	}
+	for _, ns := range pr.Spec.Namespaces {
+		if ns == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+// clusterView is one live, management-API-backed picture of a RabbitMq cluster
+// taken from a surviving broker. It is the shared evidence behind every
+// fail-closed safety decision - granting consent, validating the deletion
+// commit, and releasing a recovered replacement - so that those decisions
+// cannot drift apart.
+type clusterView struct {
+	// Survivors are the Ready pods that are neither the deletion candidate nor
+	// scheduled on a node PodRemediator marked stuck.
+	Survivors []corev1.Pod
+	// Anchor is the survivor used for management API and CLI calls.
+	Anchor *corev1.Pod
+	// Creds are the management API credentials used to build this view.
+	Creds *rmqMgmtCreds
+	// Nodes is the cluster's own view of its members.
+	Nodes []rmqNodeStatus
+	// RunningNodes are the RabbitMQ node names the cluster reports as running.
+	RunningNodes map[string]bool
+}
+
+// rmqListPods lists this cluster's pods through reader, which is the cached
+// client for routine reconciliation and the uncached APIReader when a decision
+// must not act on a stale watch cache.
+func (r *Reconciler) rmqListPods(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	reader client.Reader,
+) ([]corev1.Pod, error) {
+	podList := &corev1.PodList{}
+	if err := reader.List(ctx, podList,
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels(rabbitmq.SelectorLabels(instance.Name)),
+	); err != nil {
+		return nil, fmt.Errorf("listing RabbitMq pods: %w", err)
+	}
+	return podList.Items, nil
+}
+
+// rmqClusterView asks one survivor's management API for the cluster's own node
+// list. It fails closed: an unreadable secret or management endpoint is an
+// error, never an assumption that the cluster is healthy.
+func (r *Reconciler) rmqClusterView(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	survivors []corev1.Pod,
+) (*clusterView, error) {
+	if len(survivors) == 0 {
+		return nil, fmt.Errorf("no ready RabbitMq pod off the stuck node(s) to verify live cluster state")
+	}
+	creds, err := r.rmqLoadMgmtCreds(ctx, instance)
+	if err != nil {
+		return nil, fmt.Errorf("loading RabbitMq management credentials: %w", err)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	var lastErr error
+	for i := range survivors {
+		anchor := &survivors[i]
+		nodes, err := r.rmqClusterNodes(probeCtx, instance, anchor, creds)
+		if err != nil {
+			lastErr = fmt.Errorf("from %s: %w", anchor.Name, err)
+			continue
+		}
+		running := make(map[string]bool, len(nodes))
+		for _, node := range nodes {
+			if node.Running {
+				running[node.Name] = true
+			}
+		}
+		return &clusterView{
+			Survivors:    survivors,
+			Anchor:       anchor,
+			Creds:        creds,
+			Nodes:        nodes,
+			RunningNodes: running,
+		}, nil
+	}
+	return nil, fmt.Errorf("reading live RabbitMq cluster state from any ready survivor failed: %w", lastErr)
+}
+
+// safeNodes returns the RabbitMQ node names of the survivors that the cluster
+// also reports as running. Only these may be counted towards a majority.
+func (v *clusterView) safeNodes(instance *rabbitmqv1beta1.RabbitMq) map[string]bool {
+	safe := make(map[string]bool, len(v.Survivors))
+	for i := range v.Survivors {
+		name := rmqNodeName(instance, v.Survivors[i].Name)
+		if v.RunningNodes[name] {
+			safe[name] = true
+		}
+	}
+	return safe
+}
+
+// verifyCandidateRemovable is the fail-closed broker and queue safety check
+// shared by consent (CheckForStuckPVCRequiringRemediation) and the pre-commit
+// validator (ValidatePVCDeletion). Both have to reach the same verdict from the
+// same evidence, so neither re-derives it: the surviving brokers must still
+// hold a majority that the cluster reports as running, and every queue must
+// survive losing candidatePod.
+func (r *Reconciler) verifyCandidateRemovable(
+	ctx context.Context,
+	instance *rabbitmqv1beta1.RabbitMq,
+	view *clusterView,
+	candidatePod string,
+) error {
+	quorum := quorumOf(*instance.Spec.Replicas)
+	running, err := rmqRunningSurvivorCount(instance, view.Survivors, view.Nodes)
+	if err != nil {
+		return fmt.Errorf("RabbitMq survivor pod-to-node mapping is ambiguous: %w", err)
+	}
+	if running < quorum {
+		return fmt.Errorf("RabbitMq has %d running healthy survivors below quorum %d", running, quorum)
+	}
+	return r.rmqQueuesSafeAfterDeletion(ctx, instance, view.Anchor, view.Creds,
+		rmqNodeName(instance, candidatePod), view.safeNodes(instance))
+}
+
+// CheckForStuckPVCRequiringRemediation evaluates whether the RabbitMq cluster can
+// safely lose one replica, and if so grants PodRemediator consent to delete the PVC
+// by setting safe-to-delete=true.
+//
+// Annotation contract (infra-operator apis/remediation/v1beta1/annotations.go):
+//   - pvc-stuck-on-node: set by PodRemediator when a local PVC is on an unhealthy node
+//   - safe-to-delete:    set by this controller to authorize deletion
+//
+// Safety gates:
+//  1. configured-capacity gate: after deleting one member, Replicas-1 must still
+//     meet quorum; a two-member cluster therefore cannot authorize deletion.
+//  2. k8s gate: Status.ReadyCount >= floor(Replicas/2)+1 (already set by the main loop)
+//  3. survivor gate: ready pods outside the candidate and every annotated stuck node must
+//     meet quorum, and their exact RabbitMQ node names must be reported as running.
+//  4. management-API gate (fail-closed): the survivor check uses named members returned
+//     by GET /api/nodes. If the live view or pod-to-node mapping is unknown, consent is NOT
+//     granted and the reconcile requeues. This consent health probe uses HTTP; replacement
+//     rejoin separately executes RabbitMQ CLI commands in the affected pod.
+//  5. queue gate: each quorum queue must still have its own majority among the ready,
+//     running survivors, and no durable classic queue may reside on the candidate.
+//     Broker cluster quorum alone cannot establish queue or local data safety.
+//
+// Concurrency: one remediation remains in progress until the replacement member is ready
+// and running in the cluster, so another PVC cannot be deleted during recovery.
+//
+// Status: instance.Status.PVCRemediation is updated on every call; nil when healthy.
+//
+// The caller's decision (see RemediationDecision) splits this work in two.
+// Without AllowNewConsent no candidate is ever put forward, so no consent is
+// published for a cluster that is not taking part. The status bookkeeping
+// still runs while RecoveryInFlight is set, because it is the only code that
+// clears a record once its replacement has rejoined. Skipping it there would
+// freeze the record, and a frozen record keeps RecoveryInFlight true forever,
+// pinning the cluster to operator-dependent startup with no way back.
+func (r *Reconciler) CheckForStuckPVCRequiringRemediation(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, h *helper.Helper, remediation RemediationDecision) error {
+	Log := h.GetLogger()
+
+	if !remediation.AllowNewConsent && !remediation.RecoveryInFlight {
+		return nil
+	}
+
+	if instance.Spec.Replicas == nil {
+		return nil
+	}
+
+	claimList, err := r.rmqDataClaims(ctx, instance, r.Client)
+	if err != nil {
+		Log.Error(err, "Failed to list PVCs for RabbitMq")
+		return err
+	}
+	stuckNodes := rmqStuckNodes(claimList)
+
+	// Single pass: build status map and candidates list.
+	newRemediationStatus := make(map[string]rabbitmqv1beta1.PVCRemediationStatus)
+	pvcByName := make(map[string]*corev1.PersistentVolumeClaim, len(claimList))
+	candidates := make([]*corev1.PersistentVolumeClaim, 0)
+	for i := range claimList {
+		pvc := &claimList[i]
+		pvcByName[pvc.Name] = pvc
+		stuckNode := pvc.Annotations[remediationv1.PVCStuckOnNodeAnnotation]
+		if stuckNode == "" {
+			continue
+		}
+		phase := rabbitmqv1beta1.PVCRemediationPending
+		if remediationv1.HasRemediationConsent(pvc.Annotations) {
+			phase = rabbitmqv1beta1.PVCRemediationConsented
+		}
+		newRemediationStatus[pvc.Name] = rabbitmqv1beta1.PVCRemediationStatus{
+			PVCUID:    string(pvc.UID),
+			StuckNode: stuckNode,
+			RequestID: pvc.Annotations[remediationv1.RequestIDAnnotation],
+			Phase:     phase,
+		}
+		// A stuck claim is only a candidate for consent while PodRemediator is
+		// still accepting new work. Once its CR is disabled or being deleted
+		// this pass runs purely to finish tracking a remediation that already
+		// started, and must not offer up another claim.
+		if remediation.AllowNewConsent &&
+			phase == rabbitmqv1beta1.PVCRemediationPending && pvc.DeletionTimestamp == nil {
+			candidates = append(candidates, pvc)
+		}
+	}
+	observedRemediationStatus := make(map[string]rabbitmqv1beta1.PVCRemediationStatus, len(newRemediationStatus))
+	for name, entry := range newRemediationStatus {
+		observedRemediationStatus[name] = entry
+	}
+	// Keep a granted remediation in status after its PVC leaves the stuck list. PVC deletion
+	// is only the start of recovery; do not authorize another member until RabbitMQ has
+	// restored that replacement's membership. Other outages remain subject to the
+	// survivor and queue gates before another consent. A consent cleared while
+	// the same PVC still exists means deletion was aborted or consent was withdrawn, so re-evaluate that
+	// request instead of waiting for a replacement that cannot exist yet.
+	hasRecoveryPending := false
+	pendingRecovery := make(map[string]bool)
+	for name, previous := range instance.Status.PVCRemediation {
+		if !previous.Consented() {
+			continue
+		}
+		pvc, exists := pvcByName[name]
+		if exists && previous.PVCUID != "" && previous.PVCUID == string(pvc.UID) && pvc.DeletionTimestamp == nil {
+			// The cached PVC list can lag a deletion that has already been finalized.
+			// Confirm with an uncached read before treating this as a fresh-consent
+			// retry; otherwise keep the hold so a replacement cannot be pre-empted.
+			live := &corev1.PersistentVolumeClaim{}
+			err := r.safetyReader().Get(ctx, types.NamespacedName{Namespace: instance.Namespace, Name: name}, live)
+			switch {
+			case err == nil && string(live.UID) == previous.PVCUID && live.DeletionTimestamp == nil:
+				if remediationv1.HasRemediationConsent(live.Annotations) {
+					// Consent is still live on this claim (the cached copy just hadn't
+					// caught up yet): keep the granted record and keep deferring consent.
+					newRemediationStatus[name] = previous
+					continue
+				}
+				if live.Annotations[remediationv1.PVCDeletionCommitFinalizedAnnotation] != "" {
+					// The deletion is past PodRemediator's point of no return: it
+					// happens even though the handshake annotations are gone, which
+					// is what disabling the PodRemediator CR does to every claim it
+					// owns. Dropping the record here would lose the original claim's
+					// UID and request ID, and the replacement would come up
+					// unrecognized and unheld.
+					newRemediationStatus[name] = previous
+					continue
+				}
+				// PodRemediator can abort a prepared deletion and clear the PVC handshake
+				// when its Pod-user snapshot changes. The same claim is still present, so
+				// this is a fresh-consent retry, not replacement recovery.
+				Log.Info("Re-evaluating consent for PVC still present after consent was cleared",
+					"pvc", name, "pvcUID", pvc.UID)
+				continue
+			case err != nil && !k8s_errors.IsNotFound(err):
+				Log.Error(err, "Failed to confirm PVC state before releasing remediation hold; keeping hold", "pvc", name)
+			}
+		}
+		newRemediationStatus[name] = previous
+		pendingRecovery[name] = true
+		hasRecoveryPending = true
+	}
+
+	if len(newRemediationStatus) == 0 {
+		instance.Status.PVCRemediation = nil
+	} else {
+		instance.Status.PVCRemediation = newRemediationStatus
+	}
+
+	// A PVC still carrying consent is awaiting deletion. A deleted PVC stays pending
+	// below until its replacement rejoins the cluster.
+	for name, entry := range newRemediationStatus {
+		if entry.Consented() && !pendingRecovery[name] {
+			Log.Info("A stuck PVC already holds safe-to-delete consent; deferring further consent",
+				"pvc", name)
+			return nil
+		}
+	}
+
+	if len(candidates) == 0 && !hasRecoveryPending {
+		return nil
+	}
+
+	// Sort candidates: lowest ordinal first. No seqno ordering — RabbitMQ Raft
+	// ensures all surviving nodes are equally authoritative. All candidates have a
+	// valid ordinal (malformed names were excluded above).
+	sort.SliceStable(candidates, func(i, j int) bool {
+		oi, _ := rmqPVCOrdinal(candidates[i].Name)
+		oj, _ := rmqPVCOrdinal(candidates[j].Name)
+		return oi < oj
+	})
+
+	quorum := quorumOf(*instance.Spec.Replicas)
+	if len(candidates) > 0 && !canRetainQuorumAfterLosingOneReplica(*instance.Spec.Replicas) {
+		Log.Info("RabbitMq cluster cannot retain quorum after deleting one replica; deferring consent",
+			"survivorsAfterDeletion", *instance.Spec.Replicas-1, "required", quorum,
+			"specReplicas", *instance.Spec.Replicas)
+		return nil
+	}
+	if len(candidates) > 0 && int(instance.Status.ReadyCount) < quorum {
+		Log.Info("RabbitMq cluster does not have enough replicas to safely lose one; deferring consent",
+			"readyCount", instance.Status.ReadyCount, "required", quorum,
+			"specReplicas", *instance.Spec.Replicas)
+		return nil
+	}
+
+	// The candidate, if any, is the lowest-ordinal claim awaiting consent.
+	var candidatePodName string
+	if len(candidates) > 0 {
+		ordinal, ok := rmqPVCOrdinal(candidates[0].Name)
+		if !ok {
+			return fmt.Errorf("candidate PVC %s has no valid StatefulSet ordinal", candidates[0].Name)
+		}
+		candidatePodName = rmqPodName(instance, ordinal)
+	}
+
+	pods, err := r.rmqListPods(ctx, instance, r.Client)
+	if err != nil {
+		Log.Error(err, "Failed to list RabbitMq pods for live-quorum check; deferring consent")
+		return err
+	}
+	var exclude map[string]bool
+	if candidatePodName != "" {
+		exclude = map[string]bool{candidatePodName: true}
+	}
+	readySurvivors := rmqReadyPods(pods, stuckNodes, exclude)
+	if candidatePodName != "" && len(readySurvivors) < quorum {
+		Log.Info("RabbitMq has too few ready survivor pods to retain quorum after PVC deletion; deferring consent",
+			"readySurvivors", len(readySurvivors), "required", quorum,
+			"candidatePod", candidatePodName)
+		return nil
+	}
+
+	// Safety gate 3 (management HTTP API, fail-closed): verify the live cluster view
+	// before authorizing a destructive PVC deletion. If live quorum cannot be confirmed
+	// (secret/pod list/HTTP error or ambiguous pod-to-node mapping), consent is NOT granted
+	// and the reconcile requeues — never fail open.
+	view, err := r.rmqClusterView(ctx, instance, readySurvivors)
+	if err != nil {
+		Log.Error(err, "RabbitMq live-quorum check failed; deferring consent")
+		return err
+	}
+	podByName := make(map[string]*corev1.Pod, len(pods))
+	for i := range pods {
+		podByName[pods[i].Name] = &pods[i]
+	}
+	persistRemediationStatus := func() {
+		if len(newRemediationStatus) == 0 {
+			instance.Status.PVCRemediation = nil
+		} else {
+			instance.Status.PVCRemediation = newRemediationStatus
+		}
+	}
+
+	if hasRecoveryPending {
+		// Release the remediation slot per-PVC as soon as *that* replacement has
+		// rejoined (its pod is Ready and its node is running in the live cluster
+		// view). Do not gate release on the whole cluster being back at the full
+		// configured replica count: an unrelated broker that is intentionally down
+		// (maintenance) or separately failed would otherwise pin the single slot
+		// forever and block all future PVC remediations.
+		var stillRecovering []string
+		for name := range pendingRecovery {
+			ordinal, ok := rmqPVCOrdinal(name)
+			if !ok {
+				// Cannot map to a replacement pod; keep the slot occupied rather
+				// than release a remediation we can no longer track.
+				stillRecovering = append(stillRecovering, name)
+				continue
+			}
+			podName := rmqPodName(instance, ordinal)
+			replacementNode := rmqNodeName(instance, podName)
+			pod := podByName[podName]
+			claim := pvcByName[name]
+			recovery := newRemediationStatus[name]
+			replacementClaim := claim != nil && claim.DeletionTimestamp == nil &&
+				recovery.PVCUID != "" && string(claim.UID) != recovery.PVCUID
+			if recovery.Phase.AtLeast(rabbitmqv1beta1.PVCRemediationMemberRemoved) &&
+				replacementClaim &&
+				recovery.ReplacementPVCUID != string(claim.UID) {
+				Log.Info("Replacement PVC changed after recovery; requiring a fresh rejoin",
+					"pvc", name, "previousPVCUID", recovery.ReplacementPVCUID, "pvcUID", claim.UID)
+				recovery.Phase = rabbitmqv1beta1.PVCRemediationConsented
+				recovery.ReplacementPVCUID = ""
+				newRemediationStatus[name] = recovery
+				stillRecovering = append(stillRecovering, name)
+				continue
+			}
+			if replacementClaim && pod != nil && podUsesPVC(pod, name) &&
+				podReady(pod) && view.RunningNodes[replacementNode] {
+				delete(newRemediationStatus, name)
+				if current, exists := observedRemediationStatus[name]; exists {
+					newRemediationStatus[name] = current
+				}
+				continue
+			}
+			stillRecovering = append(stillRecovering, name)
+		}
+		if len(stillRecovering) > 0 {
+			// Keep the slot occupied (no new consent) until every tracked
+			// replacement has rejoined. One remediation at a time.
+			persistRemediationStatus()
+			Log.Info("RabbitMq replacement(s) have not rejoined; keeping remediation slot occupied",
+				"pending", stillRecovering)
+			return fmt.Errorf("RabbitMq replacement(s) have not rejoined: %v", stillRecovering)
+		}
+	}
+	persistRemediationStatus()
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Exactly the check PodRemediator re-runs through ValidatePVCDeletion just
+	// before it commits the deletion.
+	if err := r.verifyCandidateRemovable(ctx, instance, view, candidatePodName); err != nil {
+		Log.Info("RabbitMq cannot safely lose the candidate PVC; deferring consent", "error", err)
+		return err
+	}
+
+	// Grant consent to first candidate. One per reconcile.
+	candidate := candidates[0]
+	requestID := candidate.Annotations[remediationv1.RequestIDAnnotation]
+	if requestID == "" {
+		Log.Info("Stuck PVC has no request-id; deferring consent until PodRemediator sets one",
+			"pvc", candidate.Name)
+		return nil
+	}
+	entry, ok := instance.Status.PVCRemediation[candidate.Name]
+	if !ok {
+		return fmt.Errorf("PVC %s has no remediation status entry", candidate.Name)
+	}
+	entry.PVCUID = string(candidate.UID)
+	entry.RequestID = requestID
+	entry.Phase = rabbitmqv1beta1.PVCRemediationConsented
+	instance.Status.PVCRemediation[candidate.Name] = entry
+
+	// Persist the request and PVC identity before publishing consent. PodRemediator
+	// can delete the claim as soon as it observes safe-to-delete=true.
+	if err := h.PatchInstance(ctx, instance); err != nil {
+		Log.Error(err, "Failed to persist PVC recovery record before granting consent",
+			"pvc", candidate.Name, "requestID", requestID)
+		return fmt.Errorf("persisting PVC recovery record before consent: %w", err)
+	}
+
+	oldPVC := candidate.DeepCopy()
+	if candidate.Annotations == nil {
+		candidate.Annotations = make(map[string]string)
+	}
+	candidate.Annotations[remediationv1.SafeToDeleteAnnotation] = "true"
+	candidate.Annotations[remediationv1.ConsentIDAnnotation] = requestID
+	patch := client.MergeFromWithOptions(oldPVC, client.MergeFromWithOptimisticLock{})
+	if err := r.Patch(ctx, candidate, patch); err != nil {
+		Log.Error(err, "Failed to set safe-to-delete on stuck PVC",
+			"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation])
+		return err
+	}
+
+	Log.Info("Cluster healthy; granted safe-to-delete consent for stuck PVC",
+		"pvc", candidate.Name, "node", candidate.Annotations[remediationv1.PVCStuckOnNodeAnnotation],
+		"readyCount", instance.Status.ReadyCount)
+	return nil
+}
+
+// quorumOf returns the majority size (floor(n/2)+1) for n members. Returns 0 for
+// n <= 0 so callers treat a degenerate cluster as unable to form quorum.
+func quorumOf(n int32) int {
+	if n <= 0 {
+		return 0
+	}
+	return int(n/2 + 1)
+}
+
+// canRetainQuorumAfterLosingOneReplica reports whether the configured cluster
+// can retain a majority of its members after one replica is deleted. PVC
+// remediation must not authorize deletion when the remaining configured
+// members could not form quorum, even if every member is currently Ready.
+func canRetainQuorumAfterLosingOneReplica(replicas int32) bool {
+	if replicas <= 0 {
+		return false
+	}
+	return int(replicas-1) >= quorumOf(replicas)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	r.config = mgr.GetConfig()
+	if r.PodCommandExecutor == nil {
+		r.PodCommandExecutor = rsh.ExecInPod
+	}
 
 	// Various CR fields need to be indexed to filter watch events
 	// for the secret changes we want to be notified of
@@ -1739,7 +3015,23 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	// The PodRemediator CRD is optional: podRemediatorScopeFor treats a missing
+	// kind as "feature not installed". A watch on a kind the cluster does not
+	// have would contradict that - its informer never syncs, the controller
+	// never finishes its cache wait, and RabbitMq reconciliation stops
+	// altogether. Resolve the kind first and only watch what exists.
+	podRemediatorInstalled := true
+	if _, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{
+		Group: "remediation.openstack.org",
+		Kind:  "PodRemediator",
+	}); err != nil {
+		if !apimeta.IsNoMatchError(err) {
+			return fmt.Errorf("checking whether the PodRemediator CRD is installed: %w", err)
+		}
+		podRemediatorInstalled = false
+	}
+
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&rabbitmqv1beta1.RabbitMq{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
@@ -1757,7 +3049,70 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&topologyv1.Topology{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
-		Complete(r)
+		// Watch PVCs for annotation changes so the RabbitMq controller reacts promptly
+		// when PodRemediator sets pvc-stuck-on-node. IsRabbitmqPVC pre-screens events
+		// so only RabbitMq StatefulSet PVCs trigger the mapper.
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.FindRabbitmqForPVC),
+			builder.WithPredicates(predicate.And(
+				predicate.AnnotationChangedPredicate{},
+				predicate.NewPredicateFuncs(IsRabbitmqPVC),
+			)),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.FindRabbitmqForPod),
+			builder.WithPredicates(predicate.And(
+				rmqPodUpdatePredicate(),
+				predicate.NewPredicateFuncs(IsRabbitmqPod),
+			)),
+		)
+
+	// A PodRemediator CR is what switches PVC remediation on or off for a
+	// namespace. Creating, enabling, disabling or deleting one changes what
+	// this controller deploys, which without this watch would only be
+	// reconsidered when some unrelated event happened to trigger a reconcile.
+	if podRemediatorInstalled {
+		controllerBuilder = controllerBuilder.Watches(
+			&remediationv1.PodRemediator{},
+			handler.EnqueueRequestsFromMapFunc(r.findRabbitmqForPodRemediator),
+		)
+	}
+
+	return controllerBuilder.Complete(r)
+}
+
+// findRabbitmqForPodRemediator enqueues every RabbitMq this PodRemediator
+// could change: those in the namespaces it applies to. The delete event
+// carries the final state of the object, so the reconcile that notices the CR
+// is gone is driven from that same list.
+func (r *Reconciler) findRabbitmqForPodRemediator(ctx context.Context, o client.Object) []reconcile.Request {
+	pr, ok := o.(*remediationv1.PodRemediator)
+	if !ok {
+		return nil
+	}
+	namespaces := pr.Spec.Namespaces
+	if len(namespaces) == 0 {
+		namespaces = []string{pr.Namespace}
+	}
+	var requests []reconcile.Request
+	for _, namespace := range namespaces {
+		list := &rabbitmqv1beta1.RabbitMqList{}
+		if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
+			r.GetLogger(ctx).Error(err, "Listing RabbitMqs for a PodRemediator change", "namespace", namespace)
+			continue
+		}
+		for i := range list.Items {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Namespace: list.Items[i].Namespace,
+					Name:      list.Items[i].Name,
+				},
+			})
+		}
+	}
+	return requests
 }
 
 // findObjectsForSrc - returns a reconcile request if the object is referenced by a RabbitMq CR
