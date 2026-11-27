@@ -40,6 +40,8 @@ import (
 	"github.com/openstack-k8s-operators/infra-operator/internal/rabbitmq"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -94,6 +96,11 @@ type Client struct {
 	// nil.
 	httpOverride *http.Client
 	perPod       map[string]*http.Client
+
+	// Set by WithExec, for the commands that have to run inside a broker pod.
+	kclient kubernetes.Interface
+	config  *rest.Config
+	exec    ExecFunc
 }
 
 // New builds a Client for one cluster and reads its credentials using the
