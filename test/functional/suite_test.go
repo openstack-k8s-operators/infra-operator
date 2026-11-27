@@ -317,10 +317,11 @@ var _ = BeforeSuite(func() {
 	DeferCleanup(rabbitMQMgmt.Close)
 
 	err = (&rabbitmq_ctrl.Reconciler{
-		Client:               k8sManager.GetClient(),
-		Scheme:               k8sManager.GetScheme(),
-		Kclient:              kclient,
-		ManagementHTTPClient: rabbitMQMgmt.HTTPClient(),
+		Client:                       k8sManager.GetClient(),
+		Scheme:                       k8sManager.GetScheme(),
+		Kclient:                      kclient,
+		ManagementHTTPClient:         rabbitMQMgmt.HTTPClient(),
+		ClusterHealthRefreshInterval: rabbitmq_ctrl.DefaultClusterHealthRefreshInterval,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 

@@ -25,6 +25,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -33,6 +34,32 @@ import (
 // time, and each read makes the broker list all of its queues, so reading
 // again for every one of them would repeat that work for the same answer.
 const clusterHealthInterval = time.Minute
+
+// DefaultClusterHealthRefreshInterval is how often a Ready cluster's health is
+// read again when no Kubernetes event arrives. RabbitMQ's own state changes
+// without producing an event, and waiting for the next cache resync can leave
+// the reported values hours out of date.
+const DefaultClusterHealthRefreshInterval = 5 * time.Minute
+
+// clusterHealthRefresh returns how long to wait before reading a Ready
+// cluster's health again, falling back to the default when the override is not
+// set.
+func (r *Reconciler) clusterHealthRefresh() time.Duration {
+	if r.ClusterHealthRefreshInterval <= 0 {
+		return DefaultClusterHealthRefreshInterval
+	}
+	return r.ClusterHealthRefreshInterval
+}
+
+// requeueForClusterHealth is the result of a completed reconcile. A Ready
+// cluster is read again after refresh even when nothing in Kubernetes changes,
+// because the state being reported changes inside RabbitMQ without an event.
+func requeueForClusterHealth(clusterReady bool, refresh time.Duration) ctrl.Result {
+	if !clusterReady {
+		return ctrl.Result{}
+	}
+	return ctrl.Result{RequeueAfter: refresh}
+}
 
 // clusterHealthReadTimeout bounds the broker and queue reads together. The
 // per-request limits allow 15 seconds for the broker list and 60 for the

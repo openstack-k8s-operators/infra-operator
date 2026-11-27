@@ -108,6 +108,15 @@ type Reconciler struct {
 	// otherwise build to reach a broker's management API. Tests set it to
 	// reach a stub server; production leaves it nil.
 	ManagementHTTPClient *http.Client
+
+	// ClusterHealthRefreshInterval is how often a Ready cluster's health is
+	// read again when no Kubernetes event arrives. RabbitMQ's own state
+	// changes without producing an event, and waiting for the next cache
+	// resync can leave the reported values hours out of date. Values shorter
+	// than the one-minute read interval have no effect.
+	// Configurable via RABBITMQ_CLUSTER_HEALTH_REFRESH_INTERVAL (e.g. "5m").
+	// Default: DefaultClusterHealthRefreshInterval (5 minutes).
+	ClusterHealthRefreshInterval time.Duration
 }
 
 // +kubebuilder:rbac:groups=rabbitmq.openstack.org,resources=rabbitmqs,verbs=get;list;watch;create;update;patch;delete
@@ -1039,7 +1048,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// fully processed the spec at this generation.
 	instance.Status.ObservedGeneration = instance.Generation
 
-	return ctrl.Result{}, nil
+	return requeueForClusterHealth(clusterReady, r.clusterHealthRefresh()), nil
 }
 
 func (r *Reconciler) reconcilePerPodServices(ctx context.Context, instance *rabbitmqv1beta1.RabbitMq, helper *helper.Helper, labelMap map[string]string) (ctrl.Result, error) {
