@@ -359,6 +359,76 @@ type RabbitMqStatus struct {
 	// The proxy allows non-durable clients to work with quorum queues during the upgrade window.
 	// Only cleared when the AnnotationClientsReconfigured annotation is set to "true".
 	ProxyRequired string `json:"proxyRequired,omitempty"`
+
+	// ClusterHealth - what the broker cluster itself last reported about its
+	// membership and queue replication.
+	// +kubebuilder:validation:Optional
+	ClusterHealth *RabbitMqClusterHealth `json:"clusterHealth,omitempty"`
+}
+
+// RabbitMqClusterHealth holds what the operator saw the last time it asked
+// RabbitMQ about itself.
+//
+// Kubernetes can show every pod as Ready while the brokers have not joined
+// into a single cluster, or while a quorum queue is short of a replica. Pod
+// readiness only tells you the container started. It tells you nothing about
+// what is happening inside RabbitMQ, and this field fills that gap.
+//
+// These values can be out of date; ObservedAt says when they were read, and
+// LastAttemptAt when the operator last tried. Do not use them to decide
+// whether something is safe to do. Read the cluster again at the point you
+// need to make that decision.
+type RabbitMqClusterHealth struct {
+	// LastAttemptAt is when the operator last asked the cluster for these
+	// values, whether or not that attempt succeeded.
+	// +kubebuilder:validation:Optional
+	LastAttemptAt metav1.Time `json:"lastAttemptAt,omitempty"`
+
+	// ObservedAt is when these values were read from the cluster. It stays
+	// empty until a read succeeds; Error then says why none has.
+	// +kubebuilder:validation:Optional
+	ObservedAt metav1.Time `json:"observedAt,omitempty"`
+
+	// Members is how many brokers belong to the cluster, including any that
+	// are currently down. A broker that is down still belongs to the cluster,
+	// and still counts when working out whether a majority is present.
+	// +kubebuilder:validation:Optional
+	Members int `json:"members,omitempty"`
+
+	// RunningMembers is how many of those brokers are up.
+	// +kubebuilder:validation:Optional
+	RunningMembers int `json:"runningMembers,omitempty"`
+
+	// QuorumQueues is how many quorum queues the cluster holds.
+	// +kubebuilder:validation:Optional
+	QuorumQueues int `json:"quorumQueues,omitempty"`
+
+	// UnderReplicatedQuorumQueues is how many of those have fewer replicas
+	// online than they should. These queues still work, and RabbitMQ normally
+	// replaces the missing replica by itself.
+	// +kubebuilder:validation:Optional
+	UnderReplicatedQuorumQueues int `json:"underReplicatedQuorumQueues,omitempty"`
+
+	// QuorumQueuesBelowQuorum is how many have lost more than half of their
+	// replicas. These queues cannot be used until enough replicas come back.
+	// +kubebuilder:validation:Optional
+	QuorumQueuesBelowQuorum int `json:"quorumQueuesBelowQuorum,omitempty"`
+
+	// DegradedQueues lists some of the under-replicated queues, as
+	// vhost/name. It is kept short and sorted so that it stays readable on a
+	// cluster with thousands of queues.
+	// +kubebuilder:validation:Optional
+	// +listType=atomic
+	DegradedQueues []string `json:"degradedQueues,omitempty"`
+
+	// Error says why the last read failed, and is empty when it worked. A
+	// read also counts as failed when a quorum queue's replication cannot be
+	// determined, because its counts would understate what is wrong. The
+	// counts above and ObservedAt are left as they were, so a failed read
+	// does not replace the last good numbers with zeroes or make them look
+	// newer than they are.
+	// +kubebuilder:validation:Optional
+	Error string `json:"error,omitempty"`
 }
 
 //+kubebuilder:object:root=true

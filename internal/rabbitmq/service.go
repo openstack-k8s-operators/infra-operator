@@ -92,6 +92,14 @@ const (
 	StreamTLSPort = 5551
 )
 
+// ManagementPodServerName returns the TLS server name for one pod's management API.
+// The pod certificate's SAN is the headless-service hostname without the
+// Kubernetes .svc suffix, so a caller that dials the resolvable .svc name has to
+// verify against this shorter form.
+func ManagementPodServerName(podName, instanceName, namespace string) string {
+	return fmt.Sprintf("%s.%s-nodes.%s", podName, instanceName, namespace)
+}
+
 // HeadlessService creates the headless service for StatefulSet pod DNS
 // matching the old rabbitmq-cluster-operator layout
 func HeadlessService(r *rabbitmqv1.RabbitMq) (*corev1.Service, error) {
